@@ -301,6 +301,7 @@ class TestCheckCodexOauthAuth:
     def test_fails_when_codex_backend_active_without_auth_json(self, tmp_path, monkeypatch):
         codex_home = tmp_path / "codex-home"
         monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
         with (
             patch("ouroboros.cli.commands.mcp_doctor._get_runtime_backend", return_value="hermes"),
@@ -312,6 +313,24 @@ class TestCheckCodexOauthAuth:
         assert "Codex backend active" in result.message
         assert "CODEX_HOME/HOME" in result.remediation
         assert "OPENAI_API_KEY" in result.remediation
+
+    def test_passes_when_codex_backend_uses_openai_api_key_without_auth_json(
+        self, tmp_path, monkeypatch
+    ):
+        codex_home = tmp_path / "codex-home"
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+        with (
+            patch("ouroboros.cli.commands.mcp_doctor._get_runtime_backend", return_value="hermes"),
+            patch("ouroboros.cli.commands.mcp_doctor._get_llm_backend", return_value="codex"),
+        ):
+            result = check_codex_oauth_auth()
+
+        assert result.status == "pass"
+        assert "OPENAI_API_KEY is present" in result.message
+        assert "API-key-backed Codex profile" in result.message
+        assert "codex login" in result.remediation
 
     def test_warns_when_codex_backend_inactive_without_auth_json(self, tmp_path, monkeypatch):
         codex_home = tmp_path / "codex-home"

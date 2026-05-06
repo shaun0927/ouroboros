@@ -254,6 +254,21 @@ def check_codex_oauth_auth() -> CheckResult:
             message=f"{auth_json} found ({config_note}; {key_note})",
         )
 
+    if codex_active and openai_key_present:
+        return CheckResult(
+            name="codex_oauth_auth",
+            status="pass",
+            message=(
+                f"{auth_json} not found, but OPENAI_API_KEY is present for an "
+                "API-key-backed Codex profile"
+            ),
+            remediation=(
+                "If this deployment is intended to use Codex OAuth instead, run `codex login` "
+                "for the same user/environment or set CODEX_HOME/HOME so nested MCP/Codex "
+                "processes can read the existing auth.json."
+            ),
+        )
+
     if codex_active:
         return CheckResult(
             name="codex_oauth_auth",
