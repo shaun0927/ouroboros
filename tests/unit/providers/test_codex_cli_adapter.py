@@ -852,6 +852,112 @@ class TestCodexCliLLMAdapter:
         assert result.error.details["stderr"] == "Reading prompt from stdin..."
         assert process_holder["process"].communicate_calls == 1
 
+
+    @pytest.mark.asyncio
+    async def test_complete_classifies_openai_responses_auth_failures(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Nested Codex auth-plane failures should carry actionable diagnostics."""
+        codex_home = tmp_path / "codex-home"
+        codex_home.mkdir()
+        (codex_home / "auth.json").write_text("{}", encoding="utf-8")
+        (codex_home / "config.toml").write_text('model = "gpt-5.5"\n', encoding="utf-8")
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+        adapter = CodexCliLLMAdapter(cli_path="codex")
+        auth_error = (
+            "HTTP 400: 401 Unauthorized: Missing bearer or basic authentication "
+            "in header from https://api.openai.com/v1/responses"
+        )
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _FakeProcess:
+            output_index = command.index("--output-last-message") + 1
+            Path(command[output_index]).write_text("", encoding="utf-8")
+            return _FakeProcess(
+                stdout=json.dumps({"type": "turn.failed", "error": {"message": auth_error}}),
+                stderr="Reading prompt from stdin...",
+                returncode=1,
+            )
+
+        with patch(
+            "ouroboros.providers.codex_cli_adapter.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
+        ):
+            result = await adapter.complete(
+                [Message(role=MessageRole.USER, content="Ask the next question.")],
+                CompletionConfig(model="default"),
+            )
+
+        assert result.is_err
+        assert result.error.details["failure_category"] == "codex_auth"
+        assert result.error.details["auth_plane"] == "codex_cli"
+        assert result.error.details["openai_responses_endpoint_seen"] is True
+        context = result.error.details["codex_auth_context"]
+        assert context["codex_home"] == str(codex_home)
+        assert context["codex_auth_json_exists"] is True
+        assert context["codex_config_toml_exists"] is True
+        assert context["openai_api_key_present"] is False
+        assert "CODEX_HOME/auth.json" in result.error.details["remediation"]
+
+    @pytest.mark.asyncio
+    async def test_complete_emits_tool_started_callbacks_from_json_events(self) -> None:
+        """Chat renderers can show nested tool/MCP progress before completion."""
+        callback_events: list[tuple[str, str]] = []
+        adapter = CodexCliLLMAdapter(
+            cli_path="codex",
+            on_message=lambda message_type, content: callback_events.append(
+                (message_type, content)
+            ),
+        )
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _FakeProcess:
+            output_index = command.index("--output-last-message") + 1
+            Path(command[output_index]).write_text("Final answer", encoding="utf-8")
+            return _FakeProcess(
+                stdout="\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "type": "item.started",
+                                "item": {
+                                    "type": "mcp_tool_call",
+                                    "name": "mcp__ouroboros__ouroboros_interview",
+                                    "input": {"initial_context": "Build a tool"},
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "item.completed",
+                                "item": {
+                                    "type": "mcp_tool_call",
+                                    "name": "mcp__ouroboros__ouroboros_interview",
+                                    "input": {"initial_context": "Build a tool"},
+                                },
+                            }
+                        ),
+                    ]
+                ),
+                returncode=0,
+            )
+
+        with patch(
+            "ouroboros.providers.codex_cli_adapter.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
+        ):
+            result = await adapter.complete(
+                [Message(role=MessageRole.USER, content="Run interview MCP.")],
+                CompletionConfig(model="default"),
+            )
+
+        assert result.is_ok
+        assert callback_events == [
+            ("tool_started", "mcp__ouroboros__ouroboros_interview: Build a tool"),
+            ("tool", "mcp__ouroboros__ouroboros_interview: Build a tool"),
+        ]
+
     def test_extract_stdout_errors_returns_messages_in_arrival_order(self) -> None:
         """Helper extracts only error/turn.failed events and preserves order."""
         adapter = CodexCliLLMAdapter(cli_path="codex")
