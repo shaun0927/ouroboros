@@ -1101,6 +1101,19 @@ def get_llm_permission_mode(backend: str | None = None) -> str:
         return "acceptEdits" if _uses_opencode_backend(backend) else "default"
 
 
+def get_auto_interview_driver_backend() -> str | None:
+    """Get the configured default backend for selected-driver auto interviews."""
+    env_backend = os.environ.get("OUROBOROS_AUTO_DRIVER_BACKEND", "").strip().lower()
+    if env_backend:
+        return env_backend
+
+    try:
+        config = load_config()
+        return config.auto.interview_driver_backend
+    except ConfigError:
+        return None
+
+
 def _resolve_llm_backend_for_models(backend: str | None = None) -> str:
     """Resolve the effective backend name for backend-aware model defaults."""
     return (backend or get_llm_backend()).strip().lower()

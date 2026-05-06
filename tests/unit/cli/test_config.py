@@ -223,6 +223,58 @@ class TestConfigBackend:
         assert "Invalid config section" in result.output
 
 
+# ── config driver ────────────────────────────────────────────────
+
+
+class TestConfigDriver:
+    """Tests for config driver command."""
+
+    def test_show_current_driver_backend(self, config_dir: Path) -> None:
+        with patch("ouroboros.config.models.get_config_dir", return_value=config_dir):
+            result = runner.invoke(app, ["driver"])
+        assert result.exit_code == 0
+        assert "Current driver backend" in result.output
+        assert "deterministic" in result.output
+
+    def test_driver_set_hermes_updates_auto_driver_backend(self, config_dir: Path) -> None:
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
+            patch("ouroboros.config.loader.load_config"),
+        ):
+            result = runner.invoke(app, ["driver", "set", "hermes"])
+
+        assert result.exit_code == 0
+        data = yaml.safe_load((config_dir / "config.yaml").read_text())
+        assert data["auto"]["interview_driver_backend"] == "hermes"
+        assert data["llm"]["backend"] == "claude"
+
+    def test_driver_set_claude_stores_llm_backend_identity(self, config_dir: Path) -> None:
+        with (
+            patch("ouroboros.config.models.get_config_dir", return_value=config_dir),
+            patch("ouroboros.config.loader.load_config"),
+        ):
+            result = runner.invoke(app, ["driver", "set", "claude"])
+
+        assert result.exit_code == 0
+        data = yaml.safe_load((config_dir / "config.yaml").read_text())
+        assert data["auto"]["interview_driver_backend"] == "claude_code"
+
+    def test_driver_set_rejects_runtime_only_unknown_backend(self, config_dir: Path) -> None:
+        with patch("ouroboros.config.models.get_config_dir", return_value=config_dir):
+            result = runner.invoke(app, ["driver", "set", "nonexistent"])
+        assert result.exit_code == 1
+        assert "Unsupported interview driver backend" in result.output
+
+    def test_driver_show_rejects_structurally_invalid_auto_section(self, tmp_path: Path) -> None:
+        config = {"orchestrator": {"runtime_backend": "claude"}, "auto": []}
+        (tmp_path / "config.yaml").write_text(yaml.dump(config))
+
+        with patch("ouroboros.config.models.get_config_dir", return_value=tmp_path):
+            result = runner.invoke(app, ["driver"])
+        assert result.exit_code == 1
+        assert "Invalid config section 'auto'" in result.output
+
+
 # ── config validate ──────────────────────────────────────────────
 
 
@@ -242,6 +294,18 @@ class TestConfigValidate:
     def test_invalid_backend_exits_nonzero(self, tmp_path: Path) -> None:
         """validate should exit 1 when backend is unsupported."""
         config = {"orchestrator": {"runtime_backend": "nonexistent"}, "llm": {"backend": "claude"}}
+        (tmp_path / "config.yaml").write_text(yaml.dump(config))
+
+        with patch("ouroboros.config.models.get_config_dir", return_value=tmp_path):
+            result = runner.invoke(app, ["validate"])
+        assert result.exit_code == 1
+
+    def test_invalid_auto_driver_backend_exits_nonzero(self, tmp_path: Path) -> None:
+        """validate should exit 1 when configured auto driver backend is unsupported."""
+        config = {
+            "auto": {"interview_driver_backend": "bogus"},
+            "llm": {"backend": "claude"},
+        }
         (tmp_path / "config.yaml").write_text(yaml.dump(config))
 
         with patch("ouroboros.config.models.get_config_dir", return_value=tmp_path):

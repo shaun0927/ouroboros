@@ -14,17 +14,26 @@ import yaml
 
 from ouroboros.backends import (
     get_backend_capability,
+    interview_driver_backend_choices,
+    resolve_interview_driver_backend,
     runtime_backend_choices,
 )
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success, print_warning
 from ouroboros.cli.formatters.tables import create_key_value_table, print_table
+from ouroboros.providers.factory import resolve_llm_backend
 
 app = typer.Typer(
     name="config",
     help="Manage Ouroboros configuration.",
     no_args_is_help=True,
 )
+driver_app = typer.Typer(
+    name="driver",
+    help="Manage the default interview answer driver backend.",
+    no_args_is_help=False,
+)
+app.add_typer(driver_app, name="driver")
 
 _VALID_BACKENDS = runtime_backend_choices()
 _SWITCHABLE_BACKENDS = tuple(
@@ -32,6 +41,7 @@ _SWITCHABLE_BACKENDS = tuple(
     for backend in _VALID_BACKENDS
     if (capability := get_backend_capability(backend)) is not None and capability.switchable_runtime
 )
+_DRIVER_BACKENDS = interview_driver_backend_choices()
 
 
 def _load_config() -> tuple[dict, Path]:
@@ -61,6 +71,7 @@ def _load_config() -> tuple[dict, Path]:
     # Guard against sections that should be dicts but aren't (e.g. orchestrator: [])
     _MAPPING_SECTIONS = (
         "orchestrator",
+        "auto",
         "llm",
         "logging",
         "persistence",
@@ -274,6 +285,63 @@ def backend(
     else:
         print_success(f"Switched backend: [bold]{current}[/] → [bold]{new_backend}[/]")
         console.print(f"[dim]CLI: {cli_path}[/dim]\n")
+
+
+@driver_app.callback(invoke_without_command=True)
+def driver_show() -> None:
+    """Show the configured default interview driver backend."""
+    data, _config_path = _load_config()
+    current = data.get("auto", {}).get("interview_driver_backend") or "deterministic"
+    console.print(f"\n[bold]Current driver backend:[/bold] [cyan]{current}[/cyan]")
+    console.print(f"[dim]Set with: ouroboros config driver set <{'|'.join(_DRIVER_BACKENDS)}>\n[/dim]")
+
+
+@driver_app.command("set")
+def driver_set(
+    backend: Annotated[
+        str,
+        typer.Argument(help=f"Interview driver backend ({', '.join(_DRIVER_BACKENDS)})."),
+    ],
+) -> None:
+    """Set the default backend used by selected-driver auto interviews."""
+    data, config_path = _load_config()
+    try:
+        resolved = resolve_interview_driver_backend(backend)
+    except ValueError:
+        print_error(
+            f"Unsupported interview driver backend: {backend}\n"
+            f"Supported driver backends: {', '.join(_DRIVER_BACKENDS)}"
+        )
+        raise typer.Exit(1) from None
+
+    auto_config = data.setdefault("auto", {})
+    if not isinstance(auto_config, dict):
+        print_error("Invalid config section 'auto' (expected mapping)")
+        raise typer.Exit(1)
+
+    old_value = auto_config.get("interview_driver_backend")
+    auto_config["interview_driver_backend"] = resolve_llm_backend(resolved)
+    _save_config(data, config_path)
+
+    try:
+        from ouroboros.config.loader import load_config
+
+        load_config()
+    except Exception as exc:
+        if old_value is not None:
+            auto_config["interview_driver_backend"] = old_value
+        else:
+            del auto_config["interview_driver_backend"]
+        _save_config(data, config_path)
+        print_error(f"Invalid driver backend - rolled back.\n{exc}")
+        raise typer.Exit(1) from None
+
+    if old_value == auto_config["interview_driver_backend"]:
+        print_info(f"Already using driver backend {auto_config['interview_driver_backend']}.")
+    elif old_value is not None:
+        print_success(f"Driver backend: {old_value} -> {auto_config['interview_driver_backend']}")
+    else:
+        print_success(f"Driver backend: {auto_config['interview_driver_backend']}")
 
 
 @app.command()

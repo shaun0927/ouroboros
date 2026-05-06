@@ -1359,6 +1359,48 @@ async def test_auto_handler_resume_allows_normalized_driver_alias(monkeypatch, t
     assert result.is_ok
 
 
+@pytest.mark.asyncio
+async def test_auto_handler_resume_accepts_claude_alias_for_legacy_claude(
+    monkeypatch, tmp_path
+) -> None:
+    from ouroboros.auto.pipeline import AutoPipelineResult
+    from ouroboros.auto.state import AutoPipelineState, AutoStore
+    from ouroboros.mcp.tools import auto_handler as auto_module
+
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path / "project"))
+    state.runtime_backend = "codex"
+    state.interview_driver_backend = "claude"
+    store.save(state)
+
+    class FakePipeline:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003, ARG002
+            pass
+
+        async def run(self, run_state):  # noqa: ANN001
+            return AutoPipelineResult(
+                status="complete",
+                auto_session_id=run_state.auto_session_id,
+                phase="complete",
+            )
+
+    class FakeHandler:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003, ARG002
+            pass
+
+    monkeypatch.setattr(auto_module, "AutoPipeline", FakePipeline)
+    monkeypatch.setattr(auto_module, "InterviewHandler", FakeHandler)
+    monkeypatch.setattr(auto_module, "GenerateSeedHandler", FakeHandler)
+    monkeypatch.setattr(auto_module, "ExecuteSeedHandler", FakeHandler)
+    monkeypatch.setattr(auto_module, "StartExecuteSeedHandler", FakeHandler)
+
+    result = await AutoHandler(store=store).handle(
+        {"resume": state.auto_session_id, "driver": "claude"}
+    )
+
+    assert result.is_ok
+
+
 def test_auto_state_persists_loop_bounds() -> None:
     from ouroboros.auto.state import AutoPipelineState
 

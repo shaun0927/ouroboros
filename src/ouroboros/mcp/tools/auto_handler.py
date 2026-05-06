@@ -21,6 +21,7 @@ from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
 from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.state import AutoBrakeMode, AutoPipelineState, AutoStore
+from ouroboros.backends import resolve_interview_driver_backend
 from ouroboros.config import get_opencode_mode
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
@@ -132,7 +133,11 @@ class AutoHandler:
         if requested_driver is not None and not isinstance(requested_driver, str):
             raise ValueError("driver must be a string")
         requested_driver = requested_driver.strip() if isinstance(requested_driver, str) else None
-        requested_driver = resolve_llm_backend(requested_driver) if requested_driver else None
+        if requested_driver:
+            resolve_interview_driver_backend(requested_driver)
+            requested_driver = resolve_llm_backend(requested_driver)
+        else:
+            requested_driver = None
         requested_brake_mode: AutoBrakeMode | None = None
         if "brake" in arguments:
             requested_brake = arguments.get("brake")
@@ -151,7 +156,10 @@ class AutoHandler:
             max_interview_rounds = state.max_interview_rounds
             max_repair_rounds = state.max_repair_rounds
             skip_run = requested_skip_run or state.skip_run
-            if requested_driver is not None and state.interview_driver_backend not in {
+            persisted_driver = _normalize_persisted_driver_backend(
+                state.interview_driver_backend
+            )
+            if requested_driver is not None and persisted_driver not in {
                 None,
                 requested_driver,
             }:
@@ -159,7 +167,7 @@ class AutoHandler:
                     f"resume driver mismatch: session uses {state.interview_driver_backend}, "
                     f"but driver {requested_driver} was requested"
                 )
-            state.interview_driver_backend = requested_driver or state.interview_driver_backend
+            state.interview_driver_backend = requested_driver or persisted_driver
             if requested_brake_mode is not None and requested_brake_mode != state.brake:
                 raise ValueError(
                     f"resume brake mismatch: session uses {state.brake.value}, "
@@ -286,6 +294,14 @@ def _safe_default_cwd() -> Path:
     if cwd == Path("/"):
         return Path.home()
     return _require_writable_cwd(cwd)
+
+
+def _normalize_persisted_driver_backend(value: str | None) -> str | None:
+    """Normalize older persisted driver identities for resume comparison."""
+    if value is None or not value.strip():
+        return None
+    resolve_interview_driver_backend(value)
+    return resolve_llm_backend(value)
 
 
 def _resolve_cwd(value: object) -> Path:

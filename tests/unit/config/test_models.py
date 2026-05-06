@@ -4,6 +4,7 @@ from pydantic import ValidationError
 import pytest
 
 from ouroboros.config.models import (
+    AutoConfig,
     ClarificationConfig,
     ConsensusConfig,
     CredentialsConfig,
@@ -488,6 +489,7 @@ class TestOuroborosConfig:
         """OuroborosConfig has all default sections."""
         config = OuroborosConfig()
         assert config.economics is not None
+        assert config.auto == AutoConfig()
         assert config.llm is not None
         assert config.clarification is not None
         assert config.execution is not None
@@ -500,6 +502,15 @@ class TestOuroborosConfig:
         assert config.drift is not None
         assert config.runtime_controls is not None
         assert config.logging is not None
+
+    def test_auto_config_validates_interview_driver_backend(self) -> None:
+        """AutoConfig accepts known driver aliases and rejects unknown defaults."""
+        assert AutoConfig(interview_driver_backend="claude_code").interview_driver_backend == (
+            "claude_code"
+        )
+
+        with pytest.raises(ValidationError):
+            AutoConfig(interview_driver_backend="bogus")
 
     def test_ouroboros_config_accepts_llm_profiles(self) -> None:
         """OuroborosConfig stores task profiles and role mappings."""

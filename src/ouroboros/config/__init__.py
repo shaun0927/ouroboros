@@ -32,6 +32,7 @@ from ouroboros.config.loader import (
     get_agent_runtime_backend,
     get_assertion_extraction_model,
     get_atomicity_model,
+    get_auto_interview_driver_backend,
     get_clarification_model,
     get_cli_path,
     get_codex_cli_path,
@@ -66,6 +67,7 @@ from ouroboros.config.loader import (
     load_credentials,
 )
 from ouroboros.config.models import (
+    AutoConfig,
     ClarificationConfig,
     ConsensusConfig,
     CredentialsConfig,
@@ -97,6 +99,7 @@ __all__ = [
     "CredentialsConfig",
     "TierConfig",
     "ModelConfig",
+    "AutoConfig",
     "ProviderCredentials",
     "EconomicsConfig",
     "LLMConfig",
@@ -125,6 +128,7 @@ __all__ = [
     "get_agent_permission_mode",
     "get_assertion_extraction_model",
     "get_atomicity_model",
+    "get_auto_interview_driver_backend",
     "get_llm_backend",
     "get_max_parallel_workers",
     "get_llm_permission_mode",

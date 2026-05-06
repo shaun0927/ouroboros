@@ -26,6 +26,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from ouroboros.backends import resolve_interview_driver_backend
 from ouroboros.orchestrator_stage import VALID_STAGE_KEYS
 
 
@@ -237,6 +238,24 @@ class EvaluationConfig(BaseModel, frozen=True):
     uncertainty_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
     semantic_model: str = "claude-opus-4-6"
     assertion_extraction_model: str = "claude-sonnet-4-6"
+
+
+class AutoConfig(BaseModel, frozen=True):
+    """Configuration for ``ooo auto`` defaults."""
+
+    interview_driver_backend: str | None = None
+
+    @field_validator("interview_driver_backend")
+    @classmethod
+    def validate_interview_driver_backend(cls, value: str | None) -> str | None:
+        """Validate configured auto interview driver backend names and aliases."""
+        if value is None:
+            return None
+        normalized = value.strip().lower()
+        if not normalized:
+            return None
+        resolve_interview_driver_backend(normalized)
+        return normalized
 
 
 class ConsensusConfig(BaseModel, frozen=True):
@@ -552,6 +571,7 @@ class OuroborosConfig(BaseModel, frozen=True):
         resilience: Phase 3 configuration
         evaluation: Phase 4 configuration
         consensus: Phase 5 configuration
+        auto: Defaults for ooo auto flows
         llm_profiles: Named provider-neutral profiles for LLM-only tasks
         llm_role_profiles: Mapping from logical task roles to profile names
         persistence: Storage configuration
@@ -566,6 +586,7 @@ class OuroborosConfig(BaseModel, frozen=True):
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     resilience: ResilienceConfig = Field(default_factory=ResilienceConfig)
     evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
+    auto: AutoConfig = Field(default_factory=AutoConfig)
     consensus: ConsensusConfig = Field(default_factory=ConsensusConfig)
     llm_profiles: dict[str, LLMTaskProfileConfig] = Field(default_factory=dict)
     llm_role_profiles: dict[str, str] = Field(default_factory=dict)

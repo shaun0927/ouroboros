@@ -53,7 +53,7 @@ async def test_driver_answerer_brake_off_answers_risky_question() -> None:
 
 
 @pytest.mark.asyncio
-async def test_driver_answerer_ledger_updates_mirror_driver_answer() -> None:
+async def test_driver_answerer_preserves_scaffold_ledger_values() -> None:
     ledger = SeedDraftLedger.from_goal("Build a CLI")
     adapter = FakeAdapter("Use Typer and verify with pytest.")
     answerer = DriverAutoAnswerer(backend="codex", brake=AutoBrakeMode.OFF, adapter=adapter)
@@ -61,9 +61,10 @@ async def test_driver_answerer_ledger_updates_mirror_driver_answer() -> None:
     answer = await answerer.answer("Which runtime and framework should be used?", ledger)
 
     assert answer.ledger_updates
-    assert all(entry.value == answer.text for _section, entry in answer.ledger_updates)
+    assert all(entry.value != answer.text for _section, entry in answer.ledger_updates)
     assert {entry.source.value for _section, entry in answer.ledger_updates} == {"inference"}
     assert any("driver:codex" in entry.evidence for _section, entry in answer.ledger_updates)
+    assert any("Driver answer was:" in entry.rationale for _section, entry in answer.ledger_updates)
 
 
 @pytest.mark.asyncio
@@ -85,6 +86,50 @@ async def test_driver_answerer_constructs_adapter_with_session_cwd(monkeypatch, 
 
     assert answer.source == AutoAnswerSource.DRIVER
     assert captured["cwd"] == tmp_path
+    assert captured["allowed_tools"] == []
+
+
+@pytest.mark.asyncio
+async def test_hermes_driver_does_not_request_unsupported_tool_envelope(
+    monkeypatch, tmp_path
+) -> None:
+    from ouroboros.auto import driver_answerer as module
+
+    captured: dict[str, object] = {}
+    adapter = FakeAdapter("Use the checked-out project conventions.")
+
+    def fake_create_llm_adapter(**kwargs):  # noqa: ANN003, ANN202
+        captured.update(kwargs)
+        return adapter
+
+    monkeypatch.setattr(module, "create_llm_adapter", fake_create_llm_adapter)
+    ledger = SeedDraftLedger.from_goal("Build a CLI")
+    answerer = DriverAutoAnswerer(backend="hermes", brake=AutoBrakeMode.OFF, cwd=tmp_path)
+
+    answer = await answerer.answer("Which runtime and framework should be used?", ledger)
+
+    assert answer.source == AutoAnswerSource.DRIVER
+    assert captured["allowed_tools"] is None
+
+
+@pytest.mark.asyncio
+async def test_driver_answerer_risky_brake_off_records_active_risk() -> None:
+    from ouroboros.auto.ledger import LedgerSource, LedgerStatus
+
+    ledger = SeedDraftLedger.from_goal("Deploy a service")
+    adapter = FakeAdapter("Use a placeholder secret reference, never a real credential.")
+    answerer = DriverAutoAnswerer(backend="codex", brake=AutoBrakeMode.OFF, adapter=adapter)
+
+    answer = await answerer.answer("Which production credentials should we use?", ledger)
+
+    risks = [
+        entry
+        for _section, entry in answer.ledger_updates
+        if entry.key.startswith("risk.auto_driver")
+    ]
+    assert risks
+    assert risks[0].source == LedgerSource.ASSUMPTION
+    assert risks[0].status == LedgerStatus.INFERRED
 
 
 @pytest.mark.asyncio

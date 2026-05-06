@@ -66,14 +66,15 @@ class DriverAutoAnswerer:
                 source=AutoAnswerSource.BLOCKER,
                 confidence=1.0,
                 blocker=AutoBlocker(reason=reason, question=question),
-            )
+        )
 
         if self.adapter is None:
+            allowed_tools: list[str] | None = None if self.backend == "hermes" else []
             self.adapter = create_llm_adapter(
                 backend=self.backend,
                 use_case="interview",
                 cwd=self.cwd,
-                allowed_tools=[],
+                allowed_tools=allowed_tools,
                 max_turns=1,
                 timeout=self.timeout_seconds,
             )
@@ -231,16 +232,15 @@ def _ledger_updates_for(
             section,
             LedgerEntry(
                 key=entry.key,
-                value=driver_text,
+                value=entry.value,
                 source=LedgerSource.INFERENCE,
                 confidence=min(entry.confidence, 0.72),
-                status=LedgerStatus.WEAK
-                if entry.status == LedgerStatus.CONFIRMED
-                else entry.status,
+                status=entry.status,
                 reversible=entry.reversible,
                 rationale=(
-                    "Selected-driver answer was sent to the interview; ledger value "
-                    f"mirrors that exact answer. Deterministic scaffold was: {entry.value}"
+                    "Selected-driver answer was sent to the interview; structured ledger "
+                    "state preserves the deterministic scaffold to avoid collapsing "
+                    f"section-specific contracts. Driver answer was: {driver_text}"
                 ),
                 evidence=[*entry.evidence, f"driver:{backend}"],
             ),
@@ -252,11 +252,11 @@ def _ledger_updates_for(
             (
                 "constraints",
                 LedgerEntry(
-                    key=f"constraints.auto_driver_risk.{_slug_key(risk)}",
+                    key=f"risk.auto_driver.{_slug_key(risk)}",
                     value=f"Driver {backend} auto-sent a risky interview answer under brake=off: {risk}",
                     source=LedgerSource.ASSUMPTION,
                     confidence=0.6,
-                    status=LedgerStatus.WEAK,
+                    status=LedgerStatus.INFERRED,
                     rationale="Risk was preserved as provenance for Seed-ready and A-grade review gates.",
                 ),
             )

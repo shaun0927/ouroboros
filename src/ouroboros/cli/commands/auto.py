@@ -23,9 +23,10 @@ from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
 from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.state import AutoBrakeMode, AutoPipelineState, AutoStore
+from ouroboros.backends import interview_driver_backend_choices, resolve_interview_driver_backend
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success
-from ouroboros.config import get_opencode_mode
+from ouroboros.config import get_auto_interview_driver_backend, get_opencode_mode
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
 from ouroboros.orchestrator import resolve_agent_runtime_backend
@@ -51,6 +52,8 @@ class AutoBrakeOption(str, Enum):  # noqa: UP042
     OFF = "off"
 
 
+_DRIVER_CHOICES_HELP = ", ".join(interview_driver_backend_choices())
+
 app = typer.Typer(
     name="auto", help="Run bounded full-quality ooo auto pipeline.", no_args_is_help=False
 )
@@ -70,7 +73,7 @@ def auto_command(
         str | None,
         typer.Option(
             "--driver",
-            help="Interview answer driver selected from llm.backend candidates (codex, opencode, claude_code, gemini, kiro, copilot, litellm, etc.).",
+            help=f"Interview answer driver backend ({_DRIVER_CHOICES_HELP}).",
         ),
     ] = None,
     brake: Annotated[
@@ -183,7 +186,10 @@ async def _run_auto(
     skip_run: bool = False,
 ) -> AutoPipelineResult:
     store = AutoStore()
-    requested_driver = resolve_llm_backend(driver) if driver is not None else None
+    configured_driver = (
+        None if driver is not None or resume else get_auto_interview_driver_backend()
+    )
+    requested_driver = _resolve_driver_backend(driver or configured_driver)
     if resume:
         state = store.load(resume)
         persisted_runtime = state.runtime_backend
@@ -223,7 +229,8 @@ async def _run_auto(
         else:
             state.max_repair_rounds = max_repair_rounds
         skip_run = skip_run or state.skip_run
-        if requested_driver is not None and state.interview_driver_backend not in {
+        persisted_driver = _normalize_persisted_driver_backend(state.interview_driver_backend)
+        if requested_driver is not None and persisted_driver not in {
             None,
             requested_driver,
         }:
@@ -232,7 +239,7 @@ async def _run_auto(
                 f"but --driver {requested_driver} was requested"
             )
             raise ValueError(msg)
-        driver = requested_driver or state.interview_driver_backend
+        driver = requested_driver or persisted_driver
         brake_mode = AutoBrakeMode(brake or state.brake.value)
         if brake is not None and brake_mode != state.brake:
             msg = (
@@ -305,6 +312,19 @@ async def _run_auto(
     )
     result = await pipeline.run(state)
     return result
+
+
+def _resolve_driver_backend(value: str | None) -> str | None:
+    """Resolve a driver backend to the LLM adapter name persisted in auto state."""
+    if value is None or not value.strip():
+        return None
+    resolve_interview_driver_backend(value)
+    return resolve_llm_backend(value)
+
+
+def _normalize_persisted_driver_backend(value: str | None) -> str | None:
+    """Normalize older persisted driver identities for resume comparison."""
+    return _resolve_driver_backend(value)
 
 
 def _print_status(state: AutoPipelineState) -> None:
