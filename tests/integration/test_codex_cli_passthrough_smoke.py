@@ -155,7 +155,9 @@ async def test_packaged_ooo_auto_missing_mcp_tool_fails_closed_without_codex_fal
     with (
         patch("ouroboros.mcp.server.adapter.create_ouroboros_server", return_value=fake_server),
         patch("ouroboros.orchestrator.codex_cli_runtime.log.warning") as mock_warning,
-        patch("ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec") as mock_exec,
+        patch(
+            "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec"
+        ) as mock_exec,
     ):
         messages = [message async for message in runtime.execute_task("ooo auto Build a CLI")]
 
