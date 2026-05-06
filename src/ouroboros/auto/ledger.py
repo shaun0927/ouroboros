@@ -418,7 +418,7 @@ _EXPLICIT_GOAL_SECTION_LABEL_PATTERN = "|".join(
     f"(?:{label_pattern})"
     for _section_name, _key, label_pattern, _source in _EXPLICIT_GOAL_SECTION_PATTERNS
 )
-_EXPLICIT_GOAL_SECTION_START = r"(?:^|(?<=[.;!?])\s+|(?:\r?\n)\s*(?:[-*]\s*)?)"
+_EXPLICIT_GOAL_SECTION_START = r"(?:^\s*(?:[-*]\s*)?|(?<=[.;!?])\s+|(?:\r?\n)\s*(?:[-*]\s*)?)"
 _EXPLICIT_GOAL_SECTION_BOUNDARY = (
     rf"(?=(?:[.;!?]\s+|(?:\r?\n)\s*(?:[-*]\s*)?)"
     rf"(?:{_EXPLICIT_GOAL_SECTION_LABEL_PATTERN})\s+(?:is|are)\s+|\s*$)"

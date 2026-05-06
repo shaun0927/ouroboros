@@ -149,6 +149,25 @@ def test_seed_draft_ledger_ignores_inline_section_label_phrases() -> None:
     assert acceptance_criteria == "stdout includes hello"
 
 
+def test_seed_draft_ledger_hydrates_markdown_bulleted_goal() -> None:
+    ledger = SeedDraftLedger.from_goal(
+        "- Actor is a local developer\n"
+        "- Inputs are no CLI arguments\n"
+        "- Outputs are stable stdout\n"
+        "- Runtime context is local Python 3.11\n"
+        "- Constraints are stdlib only\n"
+        "- Non-goals are network calls\n"
+        "- Acceptance criteria are stdout includes hello\n"
+        "- Verification plan is run pytest\n"
+        "- Failure modes are missing stdout assertion"
+    )
+
+    assert ledger.is_seed_ready()
+    assert "actors" not in ledger.open_gaps()
+    assert ledger.sections["actors"].entries[-1].value == "a local developer"
+    assert ledger.sections["inputs"].entries[-1].value == "no CLI arguments"
+
+
 @pytest.mark.asyncio
 async def test_interview_driver_blocks_after_max_rounds_with_open_gaps(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
