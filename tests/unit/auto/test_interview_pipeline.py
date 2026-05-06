@@ -877,7 +877,10 @@ async def test_pipeline_refuses_duplicate_unknown_run_resume(tmp_path) -> None:
     result = await pipeline.run(state)
 
     assert result.status == "blocked"
+    assert result.run_handoff_status == "unknown_no_handle"
     assert "duplicate execution" in (result.blocker or "")
+    assert "will not start another run automatically" in (result.run_handoff_guidance or "")
+    assert state.run_handoff_status == "unknown_no_handle"
 
 
 @pytest.mark.asyncio

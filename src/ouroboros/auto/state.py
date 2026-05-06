@@ -101,6 +101,8 @@ class AutoPipelineState:
     run_session_id: str | None = None
     run_subagent: dict[str, Any] = field(default_factory=dict)
     run_start_attempted: bool = False
+    run_handoff_status: str | None = None
+    run_handoff_guidance: str | None = None
     ledger: dict[str, Any] = field(default_factory=dict)
     last_grade: str | None = None
     findings: list[dict[str, Any]] = field(default_factory=list)
@@ -190,6 +192,8 @@ class AutoPipelineState:
         # persisting them with subsequent saves.
         payload.setdefault("max_interview_rounds", 12)
         payload.setdefault("max_repair_rounds", 5)
+        payload.setdefault("run_handoff_status", None)
+        payload.setdefault("run_handoff_guidance", None)
         required_fields = {item.name for item in fields(cls)}
         missing_fields = sorted(required_fields - payload.keys())
         if missing_fields:
@@ -290,6 +294,8 @@ class AutoPipelineState:
             "execution_id",
             "job_id",
             "run_session_id",
+            "run_handoff_status",
+            "run_handoff_guidance",
             "last_grade",
             "pending_question",
             "last_tool_name",

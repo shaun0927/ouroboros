@@ -271,6 +271,10 @@ def _print_status(state: AutoPipelineState) -> None:
         console.print(f"  Job ID: {state.job_id}")
         console.print(f"  Execution ID: {state.execution_id}")
         console.print(f"  Session ID: {state.run_session_id}")
+    if state.run_handoff_status:
+        console.print(f"Run handoff status: [bold]{state.run_handoff_status}[/]")
+    if state.run_handoff_guidance:
+        console.print(f"Run handoff guidance: [yellow]{state.run_handoff_guidance}[/]")
     if state.last_error:
         console.print(f"Blocker: [yellow]{state.last_error}[/]")
     console.print(f"Resume: [bold]ooo auto --resume {state.auto_session_id}[/]")
@@ -296,6 +300,10 @@ def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
         console.print(f"  Job ID: {result.job_id}")
         console.print(f"  Execution ID: {result.execution_id}")
         console.print(f"  Session ID: {result.run_session_id}")
+    if result.run_handoff_status:
+        console.print(f"Run handoff status: [bold]{result.run_handoff_status}[/]")
+    if result.run_handoff_guidance:
+        console.print(f"Run handoff guidance: [yellow]{result.run_handoff_guidance}[/]")
     if show_ledger:
         if result.assumptions:
             console.print("Assumptions:")

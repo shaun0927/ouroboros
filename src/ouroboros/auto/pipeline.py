@@ -40,6 +40,8 @@ class AutoPipelineResult:
     last_progress_message: str | None = None
     last_progress_at: str | None = None
     last_grade: str | None = None
+    run_handoff_status: str | None = None
+    run_handoff_guidance: str | None = None
     assumptions: tuple[str, ...] = ()
     non_goals: tuple[str, ...] = ()
     blocker: str | None = None
@@ -256,14 +258,18 @@ class AutoPipeline:
 
         if state.phase == AutoPhase.RUN:
             if any((state.job_id, state.execution_id, state.run_session_id)):
+                state.run_handoff_status = "started"
+                state.run_handoff_guidance = None
                 state.transition(
                     AutoPhase.COMPLETE, "execution already started; using persisted run handle"
                 )
                 self._save(state)
                 return self._result(state, ledger, review=review)
             if state.run_start_attempted:
+                _mark_unknown_run_handoff(state)
                 state.mark_blocked(
-                    "Run start status is unknown; refusing to start a duplicate execution",
+                    state.run_handoff_guidance
+                    or "Run start status is unknown; refusing to start a duplicate execution",
                     tool_name="run_starter",
                 )
                 self._save(state)
@@ -296,6 +302,8 @@ class AutoPipeline:
 
         if state.phase != AutoPhase.RUN:
             state.run_start_attempted = False
+            state.run_handoff_status = None
+            state.run_handoff_guidance = None
             state.transition(
                 AutoPhase.RUN,
                 f"starting execution for grade {state.last_grade or state.required_grade} Seed",
@@ -313,6 +321,7 @@ class AutoPipeline:
             state.job_id = _optional_str(run_meta.get("job_id"))
             state.execution_id = _optional_str(run_meta.get("execution_id"))
         except TimeoutError as exc:
+            _mark_unknown_run_handoff(state)
             state.mark_blocked(
                 f"run start timed out after {self.run_start_timeout_seconds:.0f}s",
                 tool_name="run_starter",
@@ -330,10 +339,15 @@ class AutoPipeline:
         )
         state.run_subagent = run_subagent or {}
         if not any((state.job_id, state.execution_id, state.run_session_id)):
-            state.run_start_attempted = False
-            state.mark_blocked("Run starter returned no tracking handle", tool_name="run_starter")
+            _mark_unknown_run_handoff(state)
+            state.mark_blocked(
+                state.run_handoff_guidance or "Run starter returned no tracking handle",
+                tool_name="run_starter",
+            )
             self._save(state)
             return self._result(state, ledger, review=review, blocker=state.last_error)
+        state.run_handoff_status = "started"
+        state.run_handoff_guidance = None
         state.transition(
             AutoPhase.COMPLETE,
             f"execution started for grade {state.last_grade or state.required_grade} Seed",
@@ -386,6 +400,8 @@ class AutoPipeline:
             last_progress_message=state.last_progress_message,
             last_progress_at=state.last_progress_at,
             last_grade=state.last_grade,
+            run_handoff_status=state.run_handoff_status,
+            run_handoff_guidance=state.run_handoff_guidance,
             assumptions=tuple(ledger.assumptions()),
             non_goals=tuple(ledger.non_goals()),
             blocker=blocker or state.last_error,
@@ -409,6 +425,15 @@ def _mark_invalid_seed_artifact(state: AutoPipelineState, message: str) -> None:
         state.last_error = message
         return
     state.mark_failed(message, tool_name="auto_pipeline")
+
+
+def _mark_unknown_run_handoff(state: AutoPipelineState) -> None:
+    state.run_handoff_status = "unknown_no_handle"
+    state.run_handoff_guidance = (
+        "Run starter was attempted, but no durable tracking handle was captured. "
+        "Resume will not start another run automatically or risk duplicate execution; "
+        "inspect the runtime for an existing execution before rerunning manually."
+    )
 
 
 def _grade_meets_required(actual: str | None, required: str) -> bool:
