@@ -1242,7 +1242,7 @@ async def test_pipeline_blocks_duplicate_run_after_start_timeout(tmp_path) -> No
 
 
 @pytest.mark.asyncio
-async def test_pipeline_retries_after_malformed_run_starter_metadata(tmp_path) -> None:
+async def test_pipeline_refuses_retry_after_malformed_run_starter_metadata(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         raise AssertionError("resume should not restart interview")
 
@@ -1278,10 +1278,13 @@ async def test_pipeline_retries_after_malformed_run_starter_metadata(tmp_path) -
     second = await pipeline.run(state)
 
     assert first.status == "blocked"
+    assert first.run_handoff_status == "unknown_no_handle"
+    assert "will not start another run automatically" in (first.run_handoff_guidance or "")
     assert state.run_start_attempted is True
-    assert second.status == "complete"
-    assert second.job_id == "job_after_retry"
-    assert calls == 2
+    assert second.status == "blocked"
+    assert second.run_handoff_status == "unknown_no_handle"
+    assert second.job_id is None
+    assert calls == 1
 
 
 @pytest.mark.asyncio
