@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+import inspect
 import re
 from typing import Protocol
 
@@ -127,7 +128,7 @@ class AutoInterviewDriver:
             state.mark_progress(f"interview round {round_number}/{self.max_rounds}")
             self._save(state)
 
-            answer = self._answer_with_gap_steering(turn.question, ledger, answer_context)
+            answer = await self._answer_with_gap_steering(turn.question, ledger, answer_context)
             if answer.blocker is not None:
                 self.answerer.apply(answer, ledger, question=turn.question)
                 state.ledger = ledger.to_dict()
@@ -193,10 +194,10 @@ class AutoInterviewDriver:
             "blocked", state.interview_session_id, ledger, self.max_rounds, blocker
         )
 
-    def _answer_with_gap_steering(
+    async def _answer_with_gap_steering(
         self, question: str, ledger: SeedDraftLedger, context: AutoAnswerContext
     ) -> AutoAnswer:
-        answer = self.answerer.answer(question, ledger, context)
+        answer = await self._answer(question, ledger, context)
         if answer.blocker is not None:
             return answer
         gaps = self.gap_detector.detect(ledger)
@@ -219,7 +220,15 @@ class AutoInterviewDriver:
                 confidence=1.0,
                 blocker=blocker,
             )
-        return self.answerer.answer(_gap_prompt(next_gap), ledger, context)
+        return await self._answer(_gap_prompt(next_gap), ledger, context)
+
+    async def _answer(
+        self, question: str, ledger: SeedDraftLedger, context: AutoAnswerContext
+    ) -> AutoAnswer:
+        answer = self.answerer.answer(question, ledger, context)
+        if inspect.isawaitable(answer):
+            answer = await answer
+        return answer
 
     def _handle_completed_turn(
         self, state: AutoPipelineState, ledger: SeedDraftLedger, turn: InterviewTurn, rounds: int

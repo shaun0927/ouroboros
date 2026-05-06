@@ -32,6 +32,13 @@ class AutoPolicy(StrEnum):
     BALANCED = "balanced"
 
 
+class AutoBrakeMode(StrEnum):
+    """Safety-brake modes for driver-selected interview answering."""
+
+    ON = "on"
+    OFF = "off"
+
+
 TERMINAL_PHASES = {AutoPhase.COMPLETE, AutoPhase.BLOCKED, AutoPhase.FAILED}
 _ALLOWED_TRANSITIONS: dict[AutoPhase, set[AutoPhase]] = {
     AutoPhase.CREATED: {AutoPhase.INTERVIEW, AutoPhase.BLOCKED, AutoPhase.FAILED},
@@ -88,6 +95,8 @@ class AutoPipelineState:
     required_grade: str = "A"
     runtime_backend: str | None = None
     opencode_mode: str | None = None
+    interview_driver_backend: str | None = None
+    brake: AutoBrakeMode = AutoBrakeMode.ON
     skip_run: bool = False
     max_interview_rounds: int = 12
     max_repair_rounds: int = 5
@@ -181,6 +190,7 @@ class AutoPipelineState:
         data = asdict(self)
         data["phase"] = self.phase.value
         data["policy"] = self.policy.value
+        data["brake"] = self.brake.value
         return data
 
     @classmethod
@@ -194,6 +204,8 @@ class AutoPipelineState:
         payload.setdefault("max_repair_rounds", 5)
         payload.setdefault("run_handoff_status", None)
         payload.setdefault("run_handoff_guidance", None)
+        payload.setdefault("interview_driver_backend", None)
+        payload.setdefault("brake", AutoBrakeMode.ON.value)
         required_fields = {item.name for item in fields(cls)}
         missing_fields = sorted(required_fields - payload.keys())
         if missing_fields:
@@ -201,6 +213,7 @@ class AutoPipelineState:
             raise ValueError(msg)
         payload["phase"] = AutoPhase(payload["phase"])
         payload["policy"] = AutoPolicy(payload["policy"])
+        payload["brake"] = AutoBrakeMode(payload["brake"])
         state = cls(**payload)
         state._validate_loaded()
         return state
@@ -288,6 +301,7 @@ class AutoPipelineState:
         optional_string_fields = (
             "runtime_backend",
             "opencode_mode",
+            "interview_driver_backend",
             "interview_session_id",
             "seed_id",
             "seed_path",

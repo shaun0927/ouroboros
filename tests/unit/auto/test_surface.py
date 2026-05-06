@@ -116,7 +116,17 @@ def test_auto_handler_schema_contains_hang_safe_options() -> None:
 
     assert definition.name == "ouroboros_auto"
     names = {param.name for param in definition.parameters}
-    assert {"goal", "resume", "max_interview_rounds", "max_repair_rounds", "skip_run"} <= names
+    assert {
+        "goal",
+        "resume",
+        "max_interview_rounds",
+        "max_repair_rounds",
+        "skip_run",
+        "driver",
+        "brake",
+    } <= names
+    params = {param.name: param for param in definition.parameters}
+    assert params["brake"].default is None
 
 
 class _FakeInterviewHandler:
@@ -1194,6 +1204,160 @@ async def test_auto_handler_resume_uses_persisted_cwd_without_revalidating_serve
     assert captured["cwd"] == str(tmp_path / "project")
     assert captured["driver_rounds"] == 2
     assert captured["repair_rounds"] == 3
+
+
+@pytest.mark.asyncio
+async def test_auto_handler_uses_llm_backend_as_default_interview_driver(
+    monkeypatch, tmp_path
+) -> None:
+    from ouroboros.auto.pipeline import AutoPipelineResult
+    from ouroboros.mcp.tools import auto_handler as auto_module
+
+    captured: dict[str, object] = {}
+
+    class FakePipeline:
+        def __init__(self, driver, _seed_generator, **kwargs):  # noqa: ANN001, ANN003
+            captured["answerer_backend"] = driver.answerer.backend
+            captured["answerer_brake"] = driver.answerer.brake.value
+
+        async def run(self, run_state):  # noqa: ANN001
+            captured["state_driver"] = run_state.interview_driver_backend
+            captured["state_brake"] = run_state.brake.value
+            return AutoPipelineResult(
+                status="complete",
+                auto_session_id=run_state.auto_session_id,
+                phase="complete",
+            )
+
+    class FakeHandler:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003, ARG002
+            pass
+
+    monkeypatch.setattr(auto_module, "AutoPipeline", FakePipeline)
+    monkeypatch.setattr(auto_module, "InterviewHandler", FakeHandler)
+    monkeypatch.setattr(auto_module, "GenerateSeedHandler", FakeHandler)
+    monkeypatch.setattr(auto_module, "ExecuteSeedHandler", FakeHandler)
+    monkeypatch.setattr(auto_module, "StartExecuteSeedHandler", FakeHandler)
+
+    result = await AutoHandler(llm_backend="codex_cli").handle(
+        {"goal": "Build a CLI", "cwd": str(tmp_path)}
+    )
+
+    assert result.is_ok
+    assert captured == {
+        "answerer_backend": "codex",
+        "answerer_brake": "on",
+        "state_driver": "codex",
+        "state_brake": "on",
+    }
+
+
+@pytest.mark.asyncio
+async def test_auto_handler_resume_preserves_driver_and_brake_when_unspecified(
+    monkeypatch, tmp_path
+) -> None:
+    from ouroboros.auto.pipeline import AutoPipelineResult
+    from ouroboros.auto.state import AutoBrakeMode, AutoPipelineState, AutoStore
+    from ouroboros.mcp.tools import auto_handler as auto_module
+
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path / "project"))
+    state.runtime_backend = "codex"
+    state.interview_driver_backend = "opencode"
+    state.brake = AutoBrakeMode.OFF
+    store.save(state)
+    captured: dict[str, object] = {}
+
+    class FakePipeline:
+        def __init__(self, driver, _seed_generator, **kwargs):  # noqa: ANN001, ANN003
+            captured["answerer_backend"] = driver.answerer.backend
+            captured["answerer_brake"] = driver.answerer.brake.value
+
+        async def run(self, run_state):  # noqa: ANN001
+            captured["state_driver"] = run_state.interview_driver_backend
+            captured["state_brake"] = run_state.brake.value
+            return AutoPipelineResult(
+                status="complete",
+                auto_session_id=run_state.auto_session_id,
+                phase="complete",
+            )
+
+    class FakeHandler:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003, ARG002
+            pass
+
+    monkeypatch.setattr(auto_module, "AutoPipeline", FakePipeline)
+    monkeypatch.setattr(auto_module, "InterviewHandler", FakeHandler)
+    monkeypatch.setattr(auto_module, "GenerateSeedHandler", FakeHandler)
+    monkeypatch.setattr(auto_module, "ExecuteSeedHandler", FakeHandler)
+    monkeypatch.setattr(auto_module, "StartExecuteSeedHandler", FakeHandler)
+
+    result = await AutoHandler(store=store).handle({"resume": state.auto_session_id})
+
+    assert result.is_ok
+    assert captured == {
+        "answerer_backend": "opencode",
+        "answerer_brake": "off",
+        "state_driver": "opencode",
+        "state_brake": "off",
+    }
+
+
+@pytest.mark.asyncio
+async def test_auto_handler_resume_rejects_brake_mismatch(tmp_path) -> None:
+    from ouroboros.auto.state import AutoBrakeMode, AutoPipelineState, AutoStore
+
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path / "project"))
+    state.runtime_backend = "codex"
+    state.interview_driver_backend = "codex"
+    state.brake = AutoBrakeMode.OFF
+    store.save(state)
+
+    result = await AutoHandler(store=store).handle({"resume": state.auto_session_id, "brake": "on"})
+
+    assert result.is_err
+    assert "resume brake mismatch" in str(result.error)
+
+
+@pytest.mark.asyncio
+async def test_auto_handler_resume_allows_normalized_driver_alias(monkeypatch, tmp_path) -> None:
+    from ouroboros.auto.pipeline import AutoPipelineResult
+    from ouroboros.auto.state import AutoPipelineState, AutoStore
+    from ouroboros.mcp.tools import auto_handler as auto_module
+
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path / "project"))
+    state.runtime_backend = "codex"
+    state.interview_driver_backend = "codex"
+    store.save(state)
+
+    class FakePipeline:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003, ARG002
+            pass
+
+        async def run(self, run_state):  # noqa: ANN001
+            return AutoPipelineResult(
+                status="complete",
+                auto_session_id=run_state.auto_session_id,
+                phase="complete",
+            )
+
+    class FakeHandler:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003, ARG002
+            pass
+
+    monkeypatch.setattr(auto_module, "AutoPipeline", FakePipeline)
+    monkeypatch.setattr(auto_module, "InterviewHandler", FakeHandler)
+    monkeypatch.setattr(auto_module, "GenerateSeedHandler", FakeHandler)
+    monkeypatch.setattr(auto_module, "ExecuteSeedHandler", FakeHandler)
+    monkeypatch.setattr(auto_module, "StartExecuteSeedHandler", FakeHandler)
+
+    result = await AutoHandler(store=store).handle(
+        {"resume": state.auto_session_id, "driver": "codex_cli"}
+    )
+
+    assert result.is_ok
 
 
 def test_auto_state_persists_loop_bounds() -> None:

@@ -57,6 +57,7 @@ def _persisted_state_with_bounds(tmp_path, *, max_interview_rounds: int, max_rep
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
     state.runtime_backend = "claude"
+    state.interview_driver_backend = "codex"
     state.max_interview_rounds = max_interview_rounds
     state.max_repair_rounds = max_repair_rounds
     state.skip_run = True
@@ -184,3 +185,129 @@ def test_resume_rejects_lower_bound_override(tmp_path) -> None:
                     skip_run=False,
                 )
             )
+
+
+def test_resume_preserves_persisted_driver_and_brake_when_unspecified(tmp_path) -> None:
+    """Resume without driver/brake flags keeps the original interview semantics."""
+    import asyncio
+
+    from ouroboros.auto.state import AutoBrakeMode
+    from ouroboros.cli.commands.auto import _run_auto
+
+    state, store, session_id = _persisted_state_with_bounds(
+        tmp_path, max_interview_rounds=2, max_repair_rounds=1
+    )
+    state.brake = AutoBrakeMode.OFF
+    store.save(state)
+    captured: dict[str, str] = {}
+
+    async def fake_pipeline_run(self, state):  # noqa: ARG001
+        captured["driver"] = state.interview_driver_backend
+        captured["brake"] = state.brake.value
+        captured["answerer_backend"] = self.interview_driver.answerer.backend
+        captured["answerer_brake"] = self.interview_driver.answerer.brake.value
+        return AutoPipelineResult(
+            status="complete",
+            auto_session_id=session_id,
+            phase="complete",
+            grade="A",
+        )
+
+    with (
+        patch("ouroboros.cli.commands.auto.AutoStore") as store_cls,
+        patch("ouroboros.cli.commands.auto.AutoPipeline.run", new=fake_pipeline_run),
+    ):
+        store_cls.return_value = store
+        result = asyncio.run(
+            _run_auto(
+                goal=None,
+                resume=session_id,
+                runtime=None,
+                skip_run=False,
+            )
+        )
+
+    assert result.status == "complete"
+    assert captured == {
+        "driver": "codex",
+        "brake": "off",
+        "answerer_backend": "codex",
+        "answerer_brake": "off",
+    }
+
+
+def test_resume_rejects_brake_mismatch(tmp_path) -> None:
+    """Changing brake mode on resume must be explicit session mismatch, not silent mutation."""
+    import asyncio
+
+    import pytest
+
+    from ouroboros.auto.state import AutoBrakeMode
+    from ouroboros.cli.commands.auto import _run_auto
+
+    state, store, session_id = _persisted_state_with_bounds(
+        tmp_path, max_interview_rounds=2, max_repair_rounds=1
+    )
+    state.brake = AutoBrakeMode.OFF
+    store.save(state)
+
+    with patch("ouroboros.cli.commands.auto.AutoStore") as store_cls:
+        store_cls.return_value = store
+        with pytest.raises(ValueError, match="resume brake mismatch"):
+            asyncio.run(
+                _run_auto(
+                    goal=None,
+                    resume=session_id,
+                    runtime=None,
+                    brake=AutoBrakeMode.ON.value,
+                    skip_run=False,
+                )
+            )
+
+
+def test_auto_persists_selected_driver_and_brake_off(tmp_path) -> None:
+    """`ooo auto --driver X --brake off` stores the selected interview respondent."""
+    import asyncio
+
+    from ouroboros.auto.state import AutoBrakeMode, AutoStore
+    from ouroboros.cli.commands.auto import _run_auto
+
+    store = AutoStore(tmp_path)
+    captured: dict[str, str] = {}
+
+    async def fake_pipeline_run(self, state):  # noqa: ARG001
+        captured["driver"] = state.interview_driver_backend
+        captured["brake"] = state.brake.value
+        captured["answerer_backend"] = self.interview_driver.answerer.backend
+        captured["answerer_brake"] = self.interview_driver.answerer.brake.value
+        return AutoPipelineResult(
+            status="complete",
+            auto_session_id=state.auto_session_id,
+            phase="complete",
+            grade="A",
+        )
+
+    with (
+        patch("ouroboros.cli.commands.auto.AutoStore") as store_cls,
+        patch("ouroboros.cli.commands.auto.AutoPipeline.run", new=fake_pipeline_run),
+        patch("ouroboros.cli.commands.auto._safe_default_cwd", return_value=tmp_path),
+    ):
+        store_cls.return_value = store
+        result = asyncio.run(
+            _run_auto(
+                goal="Build a CLI",
+                resume=None,
+                runtime=None,
+                driver="codex",
+                brake=AutoBrakeMode.OFF.value,
+                skip_run=True,
+            )
+        )
+
+    assert result.status == "complete"
+    assert captured == {
+        "driver": "codex",
+        "brake": "off",
+        "answerer_backend": "codex",
+        "answerer_brake": "off",
+    }

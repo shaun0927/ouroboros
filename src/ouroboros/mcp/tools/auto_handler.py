@@ -15,10 +15,11 @@ from ouroboros.auto.adapters import (
     load_seed,
     save_seed,
 )
+from ouroboros.auto.driver_answerer import DriverAutoAnswerer
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
 from ouroboros.auto.seed_repairer import SeedRepairer
-from ouroboros.auto.state import AutoPipelineState, AutoStore
+from ouroboros.auto.state import AutoBrakeMode, AutoPipelineState, AutoStore
 from ouroboros.config import get_opencode_mode
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
@@ -33,6 +34,7 @@ from ouroboros.mcp.types import (
     ToolInputType,
 )
 from ouroboros.orchestrator import resolve_agent_runtime_backend
+from ouroboros.providers.factory import resolve_llm_backend
 
 
 @dataclass(slots=True)
@@ -86,6 +88,18 @@ class AutoHandler:
                     required=False,
                     default=False,
                 ),
+                MCPToolParameter(
+                    "driver",
+                    ToolInputType.STRING,
+                    "Interview answer driver from llm.backend candidates",
+                    required=False,
+                ),
+                MCPToolParameter(
+                    "brake",
+                    ToolInputType.STRING,
+                    "Safety brake mode: on gates risky answers, off sends all answers",
+                    required=False,
+                ),
             ),
         )
 
@@ -113,6 +127,16 @@ class AutoHandler:
         store = self.store or AutoStore()
         resume = arguments.get("resume")
         requested_skip_run = bool(arguments.get("skip_run", False))
+        requested_driver = arguments.get("driver")
+        if requested_driver is not None and not isinstance(requested_driver, str):
+            raise ValueError("driver must be a string")
+        requested_driver = requested_driver.strip() if isinstance(requested_driver, str) else None
+        requested_driver = resolve_llm_backend(requested_driver) if requested_driver else None
+        requested_brake_mode: AutoBrakeMode | None = None
+        if "brake" in arguments:
+            requested_brake = arguments.get("brake")
+            if requested_brake not in {None, ""}:
+                requested_brake_mode = AutoBrakeMode(str(requested_brake).strip().lower())
         if isinstance(resume, str) and resume:
             state = store.load(resume)
             cwd = state.cwd
@@ -126,6 +150,20 @@ class AutoHandler:
             max_interview_rounds = state.max_interview_rounds
             max_repair_rounds = state.max_repair_rounds
             skip_run = requested_skip_run or state.skip_run
+            if requested_driver is not None and state.interview_driver_backend not in {
+                None,
+                requested_driver,
+            }:
+                raise ValueError(
+                    f"resume driver mismatch: session uses {state.interview_driver_backend}, "
+                    f"but driver {requested_driver} was requested"
+                )
+            state.interview_driver_backend = requested_driver or state.interview_driver_backend
+            if requested_brake_mode is not None and requested_brake_mode != state.brake:
+                raise ValueError(
+                    f"resume brake mismatch: session uses {state.brake.value}, "
+                    f"but brake {requested_brake_mode.value} was requested"
+                )
         else:
             goal = arguments.get("goal")
             if not isinstance(goal, str) or not goal.strip():
@@ -139,6 +177,8 @@ class AutoHandler:
             state = AutoPipelineState(goal=goal.strip(), cwd=cwd)
             state.max_interview_rounds = max_interview_rounds
             state.max_repair_rounds = max_repair_rounds
+            state.interview_driver_backend = requested_driver or self.llm_backend
+            state.brake = requested_brake_mode or AutoBrakeMode.ON
         state.runtime_backend = runtime_backend
         state.opencode_mode = opencode_mode
         state.skip_run = skip_run
@@ -165,8 +205,15 @@ class AutoHandler:
             mcp_tool_prefix=self.mcp_tool_prefix,
         )
 
+        selected_answerer = DriverAutoAnswerer(
+            backend=state.interview_driver_backend,
+            brake=state.brake,
+            timeout_seconds=60.0,
+        )
+        state.interview_driver_backend = selected_answerer.backend
         driver = AutoInterviewDriver(
             HandlerInterviewBackend(interview_handler, cwd=cwd),
+            answerer=selected_answerer,
             store=store,
             max_rounds=max_interview_rounds,
         )

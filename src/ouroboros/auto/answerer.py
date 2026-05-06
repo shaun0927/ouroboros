@@ -18,6 +18,7 @@ class AutoAnswerSource(StrEnum):
     EXISTING_CONVENTION = "existing_convention"
     CONSERVATIVE_DEFAULT = "conservative_default"
     ASSUMPTION = "assumption"
+    DRIVER = "driver"
     NON_GOAL = "non_goal"
     BLOCKER = "blocker"
 

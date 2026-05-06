@@ -17,16 +17,18 @@ from ouroboros.auto.adapters import (
     load_seed,
     save_seed,
 )
+from ouroboros.auto.driver_answerer import DriverAutoAnswerer
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
 from ouroboros.auto.seed_repairer import SeedRepairer
-from ouroboros.auto.state import AutoPipelineState, AutoStore
+from ouroboros.auto.state import AutoBrakeMode, AutoPipelineState, AutoStore
 from ouroboros.cli.formatters import console
 from ouroboros.cli.formatters.panels import print_error, print_info, print_success
 from ouroboros.config import get_opencode_mode
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
 from ouroboros.orchestrator import resolve_agent_runtime_backend
+from ouroboros.providers.factory import resolve_llm_backend
 
 
 class AgentRuntimeBackend(str, Enum):  # noqa: UP042
@@ -39,6 +41,13 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
     GEMINI = "gemini"
     COPILOT = "copilot"
     KIRO = "kiro"
+
+
+class AutoBrakeOption(str, Enum):  # noqa: UP042
+    """Safety brake options for selected-driver interview answering."""
+
+    ON = "on"
+    OFF = "off"
 
 
 app = typer.Typer(
@@ -55,6 +64,21 @@ def auto_command(
     runtime: Annotated[
         AgentRuntimeBackend | None,
         typer.Option("--runtime", help="Execution runtime backend.", case_sensitive=False),
+    ] = None,
+    driver: Annotated[
+        str | None,
+        typer.Option(
+            "--driver",
+            help="Interview answer driver selected from llm.backend candidates (codex, opencode, claude_code, gemini, kiro, copilot, litellm, etc.).",
+        ),
+    ] = None,
+    brake: Annotated[
+        AutoBrakeOption | None,
+        typer.Option(
+            "--brake",
+            help="Safety brake: on gates risky driver answers; off sends all answers automatically.",
+            case_sensitive=False,
+        ),
     ] = None,
     max_interview_rounds: Annotated[
         int | None,
@@ -115,6 +139,8 @@ def auto_command(
                 goal=goal,
                 resume=resume,
                 runtime=runtime.value if runtime else None,
+                driver=driver,
+                brake=brake.value if brake else None,
                 max_interview_rounds=max_interview_rounds,
                 max_repair_rounds=max_repair_rounds,
                 skip_run=skip_run,
@@ -149,11 +175,14 @@ async def _run_auto(
     goal: str | None,
     resume: str | None,
     runtime: str | None,
-    max_interview_rounds: int | None,
-    max_repair_rounds: int | None,
-    skip_run: bool,
+    driver: str | None = None,
+    brake: str | None = None,
+    max_interview_rounds: int | None = None,
+    max_repair_rounds: int | None = None,
+    skip_run: bool = False,
 ) -> AutoPipelineResult:
     store = AutoStore()
+    requested_driver = resolve_llm_backend(driver) if driver is not None else None
     if resume:
         state = store.load(resume)
         persisted_runtime = state.runtime_backend
@@ -193,6 +222,23 @@ async def _run_auto(
         else:
             state.max_repair_rounds = max_repair_rounds
         skip_run = skip_run or state.skip_run
+        if requested_driver is not None and state.interview_driver_backend not in {
+            None,
+            requested_driver,
+        }:
+            msg = (
+                f"resume driver mismatch: session uses {state.interview_driver_backend}, "
+                f"but --driver {requested_driver} was requested"
+            )
+            raise ValueError(msg)
+        driver = requested_driver or state.interview_driver_backend
+        brake_mode = AutoBrakeMode(brake or state.brake.value)
+        if brake is not None and brake_mode != state.brake:
+            msg = (
+                f"resume brake mismatch: session uses {state.brake.value}, "
+                f"but --brake {brake_mode.value} was requested"
+            )
+            raise ValueError(msg)
     else:
         if goal is None or not goal.strip():
             raise ValueError("goal is required when not resuming")
@@ -203,6 +249,8 @@ async def _run_auto(
             max_repair_rounds = _DEFAULT_MAX_REPAIR_ROUNDS
         state = AutoPipelineState(goal=goal.strip(), cwd=str(_safe_default_cwd()))
         state.runtime_backend = runtime
+        state.interview_driver_backend = requested_driver
+        state.brake = AutoBrakeMode(brake or AutoBrakeMode.ON.value)
         state.skip_run = skip_run
         state.max_interview_rounds = max_interview_rounds
         state.max_repair_rounds = max_repair_rounds
@@ -228,8 +276,15 @@ async def _run_auto(
     start_execute = StartExecuteSeedHandler(
         execute_handler=execute_seed, agent_runtime_backend=runtime, opencode_mode=opencode_mode
     )
+    selected_answerer = DriverAutoAnswerer(
+        backend=state.interview_driver_backend,
+        brake=state.brake,
+        timeout_seconds=60.0,
+    )
+    state.interview_driver_backend = selected_answerer.backend
     driver = AutoInterviewDriver(
         HandlerInterviewBackend(interview, cwd=state.cwd),
+        answerer=selected_answerer,
         store=store,
         max_rounds=max_interview_rounds,
     )
@@ -256,6 +311,9 @@ def _print_status(state: AutoPipelineState) -> None:
     console.print(f"Last progress at: {state.last_progress_at}")
     if state.interview_session_id:
         console.print(f"Interview session: {state.interview_session_id}")
+    if state.interview_driver_backend:
+        console.print(f"Interview driver: {state.interview_driver_backend}")
+    console.print(f"Brake: {state.brake.value}")
     console.print(f"Current interview round: {state.current_round}")
     if state.pending_question:
         question = state.pending_question.replace("\n", " ").strip()
