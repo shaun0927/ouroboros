@@ -207,7 +207,7 @@ class SeedDraftLedger:
         ]
         if (
             same_key_entries
-            and entry.source == LedgerSource.USER_GOAL
+            and entry.source in {LedgerSource.USER_GOAL, LedgerSource.NON_GOAL}
             and entry.status == LedgerStatus.CONFIRMED
         ):
             for existing in same_key_entries:

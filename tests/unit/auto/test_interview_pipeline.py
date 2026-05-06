@@ -190,6 +190,28 @@ def test_seed_draft_ledger_uses_later_repeated_goal_label_as_correction() -> Non
     ]
 
 
+def test_seed_draft_ledger_uses_later_repeated_non_goal_as_correction() -> None:
+    ledger = SeedDraftLedger.from_goal(
+        "Actor is a local developer. "
+        "Inputs are no CLI arguments. "
+        "Outputs are stable stdout. "
+        "Runtime context is local Python 3.11. "
+        "Constraints are stdlib only. "
+        "Non-goals are network calls. "
+        "Non-goals are network calls and package publishing. "
+        "Acceptance criteria are stdout includes hello. "
+        "Verification plan is run pytest. "
+        "Failure modes are missing stdout assertion."
+    )
+
+    assert ledger.is_seed_ready()
+    non_goals = ledger.sections["non_goals"].entries
+    assert [(entry.value, entry.status) for entry in non_goals] == [
+        ("network calls", LedgerStatus.WEAK),
+        ("network calls and package publishing", LedgerStatus.CONFIRMED),
+    ]
+
+
 @pytest.mark.asyncio
 async def test_interview_driver_blocks_after_max_rounds_with_open_gaps(tmp_path) -> None:
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
