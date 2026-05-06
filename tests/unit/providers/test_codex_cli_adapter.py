@@ -852,7 +852,6 @@ class TestCodexCliLLMAdapter:
         assert result.error.details["stderr"] == "Reading prompt from stdin..."
         assert process_holder["process"].communicate_calls == 1
 
-
     @pytest.mark.asyncio
     async def test_complete_classifies_openai_responses_auth_failures(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
