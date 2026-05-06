@@ -201,11 +201,13 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
         "execution_id": result.execution_id,
         "job_id": result.job_id,
         "run_session_id": result.run_session_id,
-        "run_handoff_status": result.run_handoff_status,
-        "run_handoff_guidance": result.run_handoff_guidance,
     }
     if result.pending_question:
         meta["pending_question"] = result.pending_question
+    if result.run_handoff_status:
+        meta["run_handoff_status"] = result.run_handoff_status
+    if result.run_handoff_guidance:
+        meta["run_handoff_guidance"] = result.run_handoff_guidance
     return meta
 
 
