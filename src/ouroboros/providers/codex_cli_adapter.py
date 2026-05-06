@@ -693,7 +693,11 @@ class CodexCliLLMAdapter:
             return
 
         if item_type == "web_search":
-            query = item.get("query") if isinstance(item.get("query"), str) else self._extract_text(item)
+            query = (
+                item.get("query")
+                if isinstance(item.get("query"), str)
+                else self._extract_text(item)
+            )
             tool_info = self._format_tool_info("WebSearch", {"query": query})
             self._on_message("tool_started" if event_type == "item.started" else "tool", tool_info)
 
