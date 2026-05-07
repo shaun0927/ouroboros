@@ -261,23 +261,38 @@ def test_non_utf8_manifest_reports_structured_error(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "bad_path",
     [
+        # POSIX absolute / traversal
         "/etc/passwd",
         "/absolute/install",
         "../escape",
         "a/../escape",
         "nested/../../escape",
+        # Windows drive prefix — must be rejected even on POSIX hosts because
+        # the manifest may be consumed on Windows where ntpath treats these
+        # as absolute.
+        "C:/Windows/System32",
+        "c:foo",
+        # Backslash separator — never legal in a POSIX-slug source.path,
+        # and accepting it on POSIX would let a Windows consumer's
+        # `ntpath.join` interpret it as parent traversal.
+        "..\\escape",
+        "foo\\..\\bar",
+        "C:\\Windows",
     ],
 )
 @pytest.mark.parametrize("source_type", ["local_path", "plugin_home"])
 def test_sandboxed_source_path_rejects_traversal(
     tmp_path: Path, source_type: str, bad_path: str
 ) -> None:
-    """Path-bearing source types must reject absolute paths and `..` segments.
+    """Path-bearing source types must reject absolute paths and `..` segments
+    in both POSIX and Windows forms.
 
     Without this, a `plugin_home` manifest could declare
-    `source.path = "/etc/passwd"` or `"../foo"` and the loader would
-    happily return it — turning a naive downstream `os.path.join` into a
-    sandbox escape. The schema's `minLength: 1` only stopped empty strings.
+    `source.path = "C:/Windows/System32"` or `"..\\foo"` and the loader
+    would happily return it — turning a naive downstream `os.path.join`
+    on the consumer side into a sandbox escape. Validation has to be
+    platform-agnostic because the host that loads the manifest may not
+    be the host that resolves it.
     """
     bad = json.loads(json.dumps(REFERENCE_MANIFEST))
     bad["source"] = {"type": source_type, "path": bad_path}

@@ -27,7 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from importlib import resources
 import json
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 try:
@@ -237,14 +237,42 @@ def _validate_sandboxed_path(raw_path: str, *, source_type: str, manifest_path: 
 
     The locked spec says `local_path` resolves relative to the manifest's
     directory and `plugin_home` resolves relative to the user's plugin
-    home. Either one accepting `/etc/passwd` or `../../foo` would let a
+    home. Either one accepting `/etc/passwd`, `C:/Windows/System32`,
+    `..\\escape`, or any other absolute / traversal form would let a
     plugin escape its sandbox the moment a downstream consumer joined the
-    path naively. Catch it at load time, with the same JSON-pointer
-    contract the rest of the loader uses.
+    path naively. Validation is platform-agnostic — even when the loader
+    runs on Linux it must reject Windows escape forms, because the
+    consumer of the manifest may run on Windows.
+
+    Catch it at load time, with the same JSON-pointer contract the rest
+    of the loader uses.
     """
     pointer = "/source/path"
-    posix = PurePosixPath(raw_path)
-    if posix.is_absolute() or raw_path.startswith(("/", "\\")):
+
+    # Backslash is never legal in a manifest source.path: these are POSIX
+    # slugs, and accepting `..\\foo` on a POSIX host would let a Windows
+    # consumer's `ntpath.join` treat it as parent traversal.
+    if "\\" in raw_path:
+        raise PluginManifestError(
+            f"source.path for {source_type!r} must use forward slashes only",
+            path=str(manifest_path),
+            json_pointer=pointer,
+            expected="POSIX-style relative path with no '\\\\' separators",
+            got=raw_path,
+        )
+
+    # Windows drive prefix: `C:/foo`, `c:foo`, etc.
+    if len(raw_path) >= 2 and raw_path[1] == ":" and raw_path[0].isalpha():
+        raise PluginManifestError(
+            f"source.path for {source_type!r} must not be drive-qualified",
+            path=str(manifest_path),
+            json_pointer=pointer,
+            expected="relative path with no Windows drive prefix",
+            got=raw_path,
+        )
+
+    # POSIX absolute or UNC-style leading separator.
+    if raw_path.startswith("/"):
         raise PluginManifestError(
             f"source.path for {source_type!r} must be relative, not absolute",
             path=str(manifest_path),
@@ -252,8 +280,11 @@ def _validate_sandboxed_path(raw_path: str, *, source_type: str, manifest_path: 
             expected="relative path under the source root",
             got=raw_path,
         )
-    # Reject any `..` segment, including ones embedded mid-path like `a/../b`.
-    if any(part == ".." for part in posix.parts):
+
+    # Reject any `..` segment, including ones embedded mid-path like
+    # `a/../b`. Splitting on '/' is sufficient because backslashes were
+    # already rejected above.
+    if any(part == ".." for part in raw_path.split("/")):
         raise PluginManifestError(
             f"source.path for {source_type!r} must not contain '..' segments",
             path=str(manifest_path),
