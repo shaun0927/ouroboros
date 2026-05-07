@@ -261,3 +261,25 @@ def test_repo_context_surfaces_ambiguous_jvm_build_managers(tmp_path) -> None:
     assert context.repo_facts["project_kind"] == "JVM project"
     assert context.repo_facts["package_manager"] == "ambiguous JVM build manager (Maven, Gradle)"
     assert context.evidence["package_manager"] == ("pom.xml", "build.gradle")
+
+
+def test_repo_context_skips_javascript_on_invalid_utf8(tmp_path) -> None:
+    (tmp_path / "package.json").write_bytes(b'{"name": "demo-\xff\xfe"}')
+    (tmp_path / "package-lock.json").write_text("{}\n", encoding="utf-8")
+
+    context = repo_auto_answer_context(tmp_path)
+
+    assert "project_kind" not in context.repo_facts
+    assert "package_manager" not in context.repo_facts
+    assert "test_command" not in context.repo_facts
+
+
+def test_repo_context_skips_go_facts_on_invalid_utf8(tmp_path) -> None:
+    (tmp_path / "go.mod").write_bytes(b"module example.com/\xff\xfe\n")
+    (tmp_path / "go.sum").write_text("", encoding="utf-8")
+
+    context = repo_auto_answer_context(tmp_path)
+
+    assert "project_kind" not in context.repo_facts
+    assert "package_manager" not in context.repo_facts
+    assert context.evidence == {}

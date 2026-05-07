@@ -263,7 +263,7 @@ def _read_toml(path: Path) -> dict[str, Any] | None:
 def _read_json_object(path: Path) -> dict[str, Any] | None:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
     return data if isinstance(data, dict) else None
 
@@ -271,7 +271,7 @@ def _read_json_object(path: Path) -> dict[str, Any] | None:
 def _read_go_module(path: Path) -> str | None:
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
     for line in text.splitlines():
         stripped = line.strip()
