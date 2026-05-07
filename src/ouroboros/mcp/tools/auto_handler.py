@@ -248,7 +248,7 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
         "current_round": result.current_round,
         "last_progress_message": result.last_progress_message,
         "last_progress_at": result.last_progress_at,
-        "resume_command": f"ooo auto --resume {result.auto_session_id}",
+        "resume_capability": result.resume_capability,
         "blocker": result.blocker,
         "seed_path": result.seed_path,
         "seed_origin": result.seed_origin,
@@ -259,6 +259,14 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
         "job_id": result.job_id,
         "run_session_id": result.run_session_id,
     }
+    # Only advertise a runnable resume_command when --resume actually has
+    # something to do. NONE-capability sessions (COMPLETE, or unrecoverable
+    # BLOCKED/FAILED) must not surface a resume action via metadata —
+    # otherwise clients keying off ``meta.resume_command`` would push users
+    # into a guaranteed-failing ``--resume`` path even though the
+    # human-readable text intentionally omits the hint.
+    if result.resume_capability != "none":
+        meta["resume_command"] = f"ooo auto --resume {result.auto_session_id}"
     if result.pending_question:
         meta["pending_question"] = result.pending_question
     if result.run_handoff_status:
