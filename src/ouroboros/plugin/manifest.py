@@ -192,6 +192,19 @@ def _load_schema(schema_version: str, *, manifest_path: str | Path) -> dict[str,
                 got=f"{schema_version!r} (no vendored schema in installed package)",
             )
         raw = schema_resource.read_text(encoding="utf-8")
+    except (ModuleNotFoundError, ImportError) as exc:
+        # `importlib.resources.files("ouroboros.plugin.schemas")` raises
+        # ModuleNotFoundError if the namespace package is missing from the
+        # installed wheel (force-include misconfigured) or if the parent
+        # package fails to import. Surface it through the same structured
+        # error as every other loader failure.
+        raise PluginManifestError(
+            f"vendored schema package is not importable: {exc}",
+            path=str(manifest_path),
+            json_pointer="/schema_version",
+            expected="ouroboros.plugin.schemas package on the import path",
+            got=f"{type(exc).__name__}: {exc}",
+        ) from exc
     except FileNotFoundError as exc:
         # Raised by importlib.resources when the package itself is missing
         # the asset directory entirely (e.g. wheel built without
