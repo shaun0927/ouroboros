@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -176,6 +178,49 @@ def test_first_party_source_branch(tmp_path: Path) -> None:
     assert manifest.source.repository is None
 
 
+def test_local_path_source_requires_path(tmp_path: Path) -> None:
+    """source.type=local_path must reject manifests that omit `path`.
+
+    Without the conditional `required`, a manifest like
+    `{"source": {"type": "local_path"}}` would validate and the loader
+    would return `SourceSpec(path=None)`, pushing the failure into
+    downstream code instead of catching it at load time.
+    """
+    bad = json.loads(json.dumps(REFERENCE_MANIFEST))
+    bad["source"] = {"type": "local_path"}
+    with pytest.raises(PluginManifestError) as excinfo:
+        load_manifest(_write(tmp_path, bad))
+    err = excinfo.value
+    assert err.json_pointer is not None
+    assert err.json_pointer.startswith("/source")
+    assert "path" in err.args[0]
+
+
+def test_plugin_home_source_requires_path(tmp_path: Path) -> None:
+    """source.type=plugin_home must also reject manifests that omit `path`.
+
+    plugin_home sources reference a slot under the user's plugin home
+    directory; the loader needs the relative path to resolve them.
+    """
+    bad = json.loads(json.dumps(REFERENCE_MANIFEST))
+    bad["source"] = {"type": "plugin_home"}
+    with pytest.raises(PluginManifestError) as excinfo:
+        load_manifest(_write(tmp_path, bad))
+    err = excinfo.value
+    assert err.json_pointer is not None
+    assert err.json_pointer.startswith("/source")
+    assert "path" in err.args[0]
+
+
+def test_local_path_source_with_path_loads(tmp_path: Path) -> None:
+    """Positive control: source.type=local_path with `path` loads cleanly."""
+    fp = json.loads(json.dumps(REFERENCE_MANIFEST))
+    fp["source"] = {"type": "local_path", "path": "plugins/whatever"}
+    manifest = load_manifest(_write(tmp_path, fp))
+    assert manifest.source.type == "local_path"
+    assert manifest.source.path == "plugins/whatever"
+
+
 def test_old_risk_enum_value_rejected(tmp_path: Path) -> None:
     """Test 11: command.risk='writes_state' rejected by 3-value enum
     (per Q00/ouroboros-plugins#10 lock)."""
@@ -200,3 +245,110 @@ def test_missing_file_reports_clean_error(tmp_path: Path) -> None:
     with pytest.raises(PluginManifestError) as excinfo:
         load_manifest(tmp_path / "does-not-exist.json")
     assert "not found" in excinfo.value.args[0]
+
+
+def test_non_utf8_manifest_reports_structured_error(tmp_path: Path) -> None:
+    """Non-UTF-8 manifest bytes must surface as PluginManifestError, not
+    a raw UnicodeDecodeError (structured-error contract)."""
+    target = tmp_path / "ouroboros.plugin.json"
+    target.write_bytes(b"\xff\xfe\x00not utf-8")
+    with pytest.raises(PluginManifestError) as excinfo:
+        load_manifest(target)
+    assert "UTF-8" in excinfo.value.args[0] or "utf-8" in excinfo.value.args[0]
+    assert excinfo.value.path == str(target)
+
+
+@pytest.mark.parametrize(
+    "bad_path",
+    [
+        # POSIX absolute / traversal
+        "/etc/passwd",
+        "/absolute/install",
+        "../escape",
+        "a/../escape",
+        "nested/../../escape",
+        # Windows drive prefix — must be rejected even on POSIX hosts because
+        # the manifest may be consumed on Windows where ntpath treats these
+        # as absolute.
+        "C:/Windows/System32",
+        "c:foo",
+        # Backslash separator — never legal in a POSIX-slug source.path,
+        # and accepting it on POSIX would let a Windows consumer's
+        # `ntpath.join` interpret it as parent traversal.
+        "..\\escape",
+        "foo\\..\\bar",
+        "C:\\Windows",
+    ],
+)
+@pytest.mark.parametrize("source_type", ["local_path", "plugin_home"])
+def test_sandboxed_source_path_rejects_traversal(
+    tmp_path: Path, source_type: str, bad_path: str
+) -> None:
+    """Path-bearing source types must reject absolute paths and `..` segments
+    in both POSIX and Windows forms.
+
+    Without this, a `plugin_home` manifest could declare
+    `source.path = "C:/Windows/System32"` or `"..\\foo"` and the loader
+    would happily return it — turning a naive downstream `os.path.join`
+    on the consumer side into a sandbox escape. Validation has to be
+    platform-agnostic because the host that loads the manifest may not
+    be the host that resolves it.
+    """
+    bad = json.loads(json.dumps(REFERENCE_MANIFEST))
+    bad["source"] = {"type": source_type, "path": bad_path}
+    with pytest.raises(PluginManifestError) as excinfo:
+        load_manifest(_write(tmp_path, bad))
+    err = excinfo.value
+    assert err.json_pointer == "/source/path"
+    assert err.got == bad_path
+
+
+def test_plugin_home_with_relative_path_loads(tmp_path: Path) -> None:
+    """Positive control: a sandboxed relative `plugin_home` path loads."""
+    fp = json.loads(json.dumps(REFERENCE_MANIFEST))
+    fp["source"] = {"type": "plugin_home", "path": "vendor/ooo-pr-ops"}
+    manifest = load_manifest(_write(tmp_path, fp))
+    assert manifest.source.type == "plugin_home"
+    assert manifest.source.path == "vendor/ooo-pr-ops"
+
+
+def test_vendored_schemas_are_packaged_resources() -> None:
+    """The vendored schema must be reachable through `importlib.resources`,
+    not via a filesystem-relative read.
+
+    A wheel built without explicit `force-include` may silently drop the
+    `schemas/` directory, and `_load_schema()` would then raise
+    `vendored schema directory missing from installed package` for every
+    manifest load. Asserting the resource is reachable here gives that
+    failure mode a unit-test guard alongside the hatch packaging config.
+    """
+    from importlib import resources
+
+    schema_pkg = resources.files("ouroboros.plugin.schemas")
+    for version in SUPPORTED_SCHEMA_VERSIONS:
+        plugin_schema = schema_pkg.joinpath(version).joinpath("plugin.schema.json")
+        assert plugin_schema.is_file(), f"plugin.schema.json missing for v{version}"
+        # And it must be parseable JSON, not an empty placeholder.
+        body = plugin_schema.read_text(encoding="utf-8")
+        assert json.loads(body)["title"].startswith("Ouroboros Plugin Manifest")
+
+
+@pytest.mark.skipif(
+    sys.platform.startswith("win"),
+    reason="POSIX permission semantics; Windows handles read perms differently.",
+)
+def test_unreadable_manifest_reports_structured_error(tmp_path: Path) -> None:
+    """Permission-denied reads must surface as PluginManifestError, not
+    a raw OSError (structured-error contract)."""
+    target = _write(tmp_path, REFERENCE_MANIFEST)
+    target.chmod(0o000)
+    try:
+        # Skip if running as root, where chmod 0o000 cannot deny reads.
+        if os.geteuid() == 0:
+            pytest.skip("root bypasses POSIX read permissions")
+        with pytest.raises(PluginManifestError) as excinfo:
+            load_manifest(target)
+        assert "unreadable" in excinfo.value.args[0]
+        assert excinfo.value.path == str(target)
+    finally:
+        target.chmod(0o644)
