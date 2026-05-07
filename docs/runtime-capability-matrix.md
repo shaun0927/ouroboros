@@ -91,6 +91,45 @@ The runtime backend affects:
 
 > **No implied parity:** Each supported runtime is an independent product with its own strengths, limitations, and behavior. Ouroboros provides a unified workflow harness, but does not guarantee identical behavior or output quality across runtimes. This applies equally to any future or custom adapter implementations.
 
+## `ooo auto`: Authoring vs Run Handoff
+
+`ooo auto` runs four logical phases, but `--runtime <X>` only decides which
+backend handles the **run-handoff** phase. The three preceding *authoring*
+phases (interview, seed generation, seed repair) always execute in-process
+inside the Ouroboros MCP server. The single exception is OpenCode in
+`plugin` mode, which intercepts authoring via a `_subagent` envelope.
+
+| Phase                   | `claude` | `codex` | `opencode` (subprocess) | `opencode` (plugin)        | `hermes` | `gemini` | `kiro` | `copilot` |
+| ----------------------- | :------: | :-----: | :---------------------: | :------------------------: | :------: | :------: | :----: | :-------: |
+| 1. Interview authoring  |  in-process  |  in-process  |       in-process        | dispatched (bridge plugin) |  in-process  |  in-process  | in-process | in-process |
+| 2. Seed generation      |  in-process  |  in-process  |       in-process        | dispatched (bridge plugin) |  in-process  |  in-process  | in-process | in-process |
+| 3. Seed repair          |  in-process  |  in-process  |       in-process        |        in-process          |  in-process  |  in-process  | in-process | in-process |
+| 4. Run handoff (Seed →) | claude adapter | codex adapter | opencode adapter (subprocess) | opencode adapter (plugin) | hermes adapter | gemini adapter | kiro adapter | copilot adapter |
+
+The dispatch gate lives in
+[`should_dispatch_via_plugin()`](https://github.com/Q00/ouroboros/blob/main/src/ouroboros/mcp/tools/subagent.py)
+and is pinned by `tests/unit/mcp/tools/test_subagent.py::TestShouldDispatchViaPlugin`:
+
+- `runtime` not in `{opencode, opencode_cli}` → never dispatches.
+- `runtime` in `{opencode, opencode_cli}` and `opencode_mode == "plugin"` → dispatch envelope.
+- `runtime` in `{opencode, opencode_cli}` and `opencode_mode in {None, "", "subprocess", anything else}` → in-process. The safe default exists so users who upgraded without re-running `ouroboros setup` are not silently switched to envelope dispatch their session cannot intercept.
+
+> **Common misconception:** `ooo auto --runtime codex` does **not** mean
+> "Codex runs the entire pipeline". The Ouroboros MCP server itself runs
+> the interview question and seed generation, and only hands the executed
+> Seed off to the Codex runtime adapter at phase 4. If `interview.start`
+> blocks or times out, the failure is in the in-process authoring path, not
+> in the Codex CLI. See the [`ooo auto` CLI reference](cli-reference.md#what---runtime-controls-in-ooo-auto)
+> for the per-phase breakdown and resume guidance.
+
+> **The `opencode (plugin)` column is MCP-level.** It applies when an
+> OpenCode bridge plugin session calls the MCP authoring handlers
+> directly. The `ouroboros auto` CLI is a standalone process and not an
+> OpenCode plugin host, so it demotes a persisted `plugin` mode to
+> `subprocess` before constructing handlers — the auto CLI surface
+> therefore behaves like the `opencode (subprocess)` column even when the
+> persisted state declared `plugin`.
+
 ## Choosing a Runtime
 
 The table below covers the three currently shipped backends. Because Ouroboros uses a pluggable `AgentRuntime` protocol, teams can register additional backends without modifying the core engine.

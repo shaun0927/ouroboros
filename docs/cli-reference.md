@@ -66,13 +66,63 @@ ouroboros auto "Build a local-first habit tracker CLI"
 | Option | Description |
 |--------|-------------|
 | `--resume TEXT` | Resume an existing auto session id |
-| `--runtime claude|codex|opencode` | Runtime backend for execution handoff |
+| `--runtime TEXT` | Runtime backend for the **run-handoff** phase (`claude`, `codex`, `opencode`, `hermes`, `gemini`, `kiro`). Interview/Seed authoring stays in-process for every value except `opencode` with `--opencode-mode plugin`. See [What `--runtime` controls in `ooo auto`](#what---runtime-controls-in-ooo-auto) below. |
 | `--max-interview-rounds INTEGER` | Maximum automatic interview rounds; prevents unbounded interview loops |
 | `--max-repair-rounds INTEGER` | Maximum Seed repair rounds; prevents unbounded repair loops |
 | `--skip-run` | Stop after creating an A-grade Seed |
 | `--show-ledger` | Print assumptions and non-goals captured during auto convergence |
+| `--status` | Print the persisted state for `--resume <id>` without running |
 
 Auto mode starts execution only after the generated Seed reaches A-grade. If a phase times out or hits a hard blocker, the command prints the auto session id and a resume command instead of hanging indefinitely.
+
+### What `--runtime` controls in `ooo auto`
+
+`ooo auto` runs four logical phases. `--runtime` selects the backend for the
+**run-handoff** phase only. The three preceding *authoring* phases
+(interview, seed generation, seed repair) always run in-process inside the
+Ouroboros MCP server unless the caller is an OpenCode bridge plugin session
+that can intercept the dispatch envelope.
+
+| Phase                 | Handler                                        | Backend used                                                                                                                                       |
+| --------------------- | ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1. Interview authoring | `mcp.tools.authoring_handlers.InterviewHandler` | In-process for every `--runtime` value. Only `--runtime opencode --opencode-mode plugin` short-circuits to a `_subagent` envelope for the bridge plugin. |
+| 2. Seed generation    | `mcp.tools.authoring_handlers.GenerateSeedHandler` | Same rule as interview authoring (in-process unless `opencode + plugin`).                                                                          |
+| 3. Seed repair        | `auto.seed_repairer.SeedRepairer`              | In-process; never dispatched.                                                                                                                      |
+| 4. Run handoff        | `mcp.tools.execution_handlers.StartExecuteSeedHandler` | Routed through the runtime adapter selected by `--runtime`. This is the *only* phase where the chosen backend executes agent work. |
+
+The dispatch gate lives in
+[`should_dispatch_via_plugin()`](https://github.com/Q00/ouroboros/blob/main/src/ouroboros/mcp/tools/subagent.py)
+and is exhaustively tested in
+`tests/unit/mcp/tools/test_subagent.py::TestShouldDispatchViaPlugin`. The
+truth table:
+
+| `--runtime`        | `--opencode-mode` | Authoring path           |
+| ------------------ | ----------------- | ------------------------ |
+| `claude`           | (any)             | In-process               |
+| `codex`            | (any)             | In-process               |
+| `hermes`           | (any)             | In-process               |
+| `gemini`           | (any)             | In-process               |
+| `kiro`             | (any)             | In-process               |
+| `opencode`         | `subprocess`      | In-process               |
+| `opencode`         | (unset/None)      | In-process (safe default for upgraded users) |
+| `opencode`         | `plugin`          | Dispatched via `_subagent` envelope to the OpenCode bridge plugin |
+
+> **Why this matters:** `--runtime codex` does **not** mean "Codex performs
+> the interview". The Ouroboros MCP server still owns the first authoring
+> question and may time out before any Codex subagent is invoked. If
+> `interview.start` blocks, the timeout originates from the in-process
+> authoring path, not from the Codex CLI. Set realistic expectations when
+> chaining `ooo auto` from external gateways.
+
+> **`ooo auto` extra rule:** the `ouroboros auto` CLI runs as a standalone
+> process and is therefore *not* itself an OpenCode bridge plugin host.
+> Even when a resumed session was started with `--runtime opencode
+> --opencode-mode plugin`, the auto CLI demotes the mode to `subprocess`
+> before constructing the authoring handlers, so a `_subagent` envelope
+> would have no receiver. In other words: from the `ooo auto` CLI surface,
+> authoring is **always** in-process. The `plugin` row of the truth table
+> applies only when the same handlers are invoked from inside an active
+> OpenCode bridge plugin session.
 
 ---
 
