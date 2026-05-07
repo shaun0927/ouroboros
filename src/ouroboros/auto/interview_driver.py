@@ -194,9 +194,7 @@ class AutoInterviewDriver:
             if answer.blocker is not None:
                 self.answerer.apply(answer, ledger, question=turn.question)
                 state.ledger = ledger.to_dict()
-                blocker_text = label_blocker(
-                    state, answer.blocker.reason, phase="auto_answerer"
-                )
+                blocker_text = label_blocker(state, answer.blocker.reason, phase="auto_answerer")
                 state.mark_blocked(blocker_text, tool_name="auto_answerer")
                 self._save(state)
                 return AutoInterviewResult(

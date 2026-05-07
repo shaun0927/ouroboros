@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ouroboros.auto.state import AutoPipelineState
 
+
 def authoring_backend_label(state: AutoPipelineState) -> str:
     """Return the human-readable authoring path for an auto-mode state.
 
