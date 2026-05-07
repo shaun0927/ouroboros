@@ -182,15 +182,49 @@ permissions, and conforming firewalls MUST NOT block them on the trust
 check. Plugins that are not first-party never receive this treatment
 regardless of `source.type`.
 
-The user-facing revocation path for a first-party program is
-`ooo plugin disable <name>` (see UX § lifecycle), which is the same verb
-used for third-party plugins. For first-party that flag overrides the
-boot-time implicit grant: the next start (and every start thereafter)
-sees the program as un-trusted until the user re-runs
-`ooo plugin trust …` against it, which clears the override and writes
-explicit grants bound to the program's current triple. Disabled first-
-party programs remain installed (so re-enable is cheap) but are not
-invocable.
+**First-party persistence model — one rule, three references aligned.**
+The user lockfile (`~/.ouroboros/plugins.lock`) holds **zero** first-
+party records, ever, in any state (trusted or disabled). All durable
+state for first-party programs lives in a sibling override file
+`~/.ouroboros/first-party-overrides.json`, owned by core. The override
+file contains one entry per `(first-party name, artifact_digest)` pair
+that the user has explicitly disabled; nothing else is persisted there.
+
+The boot/disable/re-enable cycle works against that single file:
+
+1. **Boot.** For every first-party program present in the release
+   artifact, the firewall computes the program's `artifact_digest`
+   and looks up `(name, digest)` in the override file. If absent, the
+   program is implicitly trusted in-process (no lockfile write, no
+   override write — the trust is fully derived from "release artifact
+   present" + "no override saying otherwise"). If present, the
+   program starts disabled: required permissions are stripped from
+   the in-process trust table and invocation is refused.
+2. **`ooo plugin disable <name>` for a first-party program.** Writes
+   the `(name, current artifact_digest)` entry into the override
+   file. No lockfile changes. Effective immediately and on every
+   subsequent boot.
+3. **`ooo plugin trust …` for a disabled first-party program.**
+   Removes the matching entry from the override file. No lockfile
+   write occurs — first-party trust grants are never persisted in
+   the lockfile and the in-process implicit grant re-attaches at the
+   next boot (or immediately, in the same process). The CLI presents
+   this re-trust as an explicit confirmation prompt for audit
+   symmetry, but the persistence target is the override file, not
+   the lockfile.
+
+Two follow-on consequences this model bakes in: (a) a release that
+renames or rotates a first-party program produces a new
+`artifact_digest`, so any stale override entry from an older release
+no longer matches and the new program starts trusted by default — the
+user can disable again if desired. (b) the lockfile remains a clean,
+third-party-only artifact, so any tooling that audits "what
+third-party plugins do I trust?" never has to filter first-party rows
+out.
+
+Disabled first-party programs remain installed (they're part of the
+core release artifact, so they cannot be uninstalled separately) but
+are not invocable until the override entry is cleared.
 
 The manifest schema versions per
 [Q00/ouroboros-plugins#11](https://github.com/Q00/ouroboros-plugins/issues/11):
@@ -329,9 +363,14 @@ it is targeting:
   can change over time and the qualified form is stable across that
   drift.
 - **No catalog match** — `ooo plugin install <name>` with no known
-  source providing `<name>` MUST instruct the user to run
-  `ooo plugin add <repo-url>` first; it MUST NOT silently search the
-  network.
+  source providing `<name>` MUST instruct the user to either
+  `ooo plugin add <repo-url>` first (for a `plugin_home` source) **or**
+  re-run `install` in the qualified form
+  `ooo plugin install <name> --from <local-path>` (for a `local_path`
+  source — that form is itself the registration verb, per the catalog-
+  registration rules above). The error message MUST mention both
+  paths so users with a local checkout are not misdirected to `add`.
+  In no case may `install` silently search the network.
 
 **How sources enter the known catalog.** v0 has exactly two registration
 paths, one per `source.type` that can produce a user trust record:
@@ -429,9 +468,33 @@ covers all executable bytes the plugin will run:
 
 | `source.type` | `artifact_digest` input | Re-verification rule |
 |---|---|---|
-| `plugin_home` | sha256 of the canonical-ordered tarball (`tar --sort=name --owner=0 --group=0 --mtime=@0 --format=ustar`) of the installed plugin subtree under `~/.ouroboros/plugins/<...>/`, including manifest, entrypoint, and any in-bundle assets | Recorded at `install` / `add` time AND **recomputed before every invocation** against the on-disk subtree. If the recomputed digest does not match the trusted record (e.g. a user or another process edited the installed bytes), the firewall MUST emit `plugin.failed` with `result.status="trust_subject_changed"` and refuse to run; the user must re-issue `ooo plugin trust ...` to re-confirm the new artifact. There is no "recompute only at install" shortcut |
-| `local_path` | the same canonical-ordered subtree hash, computed against the absolute path on disk | Same per-invocation re-verification rule as `plugin_home`. The path is mutable in place, so the firewall MUST recompute the digest before each invocation and fail closed on drift, as above |
-| `first_party` | sha256 of the entrypoint file (or the canonical subtree if the program ships as a directory) at boot | Rolls with each core release; restart picks up the new digest and the boot-time grant attaches to the new triple. Per-invocation re-verification is not required because the core release artifact is the unit of trust here — tampering with it is out of scope for the plugin firewall |
+| `plugin_home` | sha256 of the **canonical tree hash** of the installed plugin subtree under `~/.ouroboros/plugins/<...>/`, computed independently of any tar dialect (see "Canonical tree hash" below) so arbitrary path lengths and link targets are covered without relying on `ustar`/`pax` quirks | Recorded at `install` / `add` time AND **recomputed before every invocation** against the on-disk subtree. If the recomputed digest does not match the trusted record (e.g. a user or another process edited the installed bytes), the firewall MUST emit `plugin.failed` with `result.status="trust_subject_changed"` and refuse to run; the user must re-issue `ooo plugin trust ...` to re-confirm the new artifact. There is no "recompute only at install" shortcut |
+| `local_path` | the same canonical tree hash, computed against the absolute path on disk | Same per-invocation re-verification rule as `plugin_home`. The path is mutable in place, so the firewall MUST recompute the digest before each invocation and fail closed on drift, as above |
+| `first_party` | the same canonical tree hash applied to the entrypoint file (or the program's subtree if it ships as a directory), computed at boot | Rolls with each core release; restart picks up the new digest and the boot-time grant attaches to the new triple. Per-invocation re-verification is not required because the core release artifact is the unit of trust here — tampering with it is out of scope for the plugin firewall |
+
+**Canonical tree hash.** To avoid `ustar`/`pax` lossiness for long paths
+or extended attributes, the digest is computed without going through a
+tarball at all:
+
+1. Walk the subtree depth-first, collecting an entry for each regular
+   file and each symlink (directories are implicit). Reject other file
+   types (devices, FIFOs, sockets) at install time.
+2. For each entry, build a record `<mode>\0<path>\0<sha256-of-content
+   or link-target>\0`, where:
+   - `<mode>` is the octal POSIX mode masked to the executable bit
+     (`0o755` or `0o644` for files; `0o777` for symlinks);
+   - `<path>` is the path relative to the subtree root, with `/` as
+     separator and **no length cap** (this is what `ustar` couldn't do);
+   - `<sha256-of-content>` is the hex sha256 of the file's bytes; for
+     symlinks it's the hex sha256 of the link target string.
+3. Sort the records lexicographically by `<path>` (NUL is sorted as
+   raw byte 0x00).
+4. The canonical tree hash is `sha256(concat(sorted records))`.
+
+This serialization is deterministic, covers the entire executable
+surface (including symlinks), and has no implementation-defined
+truncation. Implementations MAY cache the hash but MUST recompute it
+on the cadence specified in the table above.
 
 Manifest-only binding is **insufficient** and explicitly rejected: an
 attacker (or a careless edit) that swaps the entrypoint while leaving
