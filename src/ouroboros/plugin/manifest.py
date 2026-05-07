@@ -452,10 +452,26 @@ def load_manifest(path: str | Path) -> PluginManifest:
         # relative slug (no traversal, no absolute, no Windows drive
         # prefix). Now anchor it to the manifest's directory so the
         # firewall's subprocess `cwd` doesn't depend on where the
-        # operator ran `ooo` from. The two steps are complementary:
-        # sandbox validates the on-disk text, this resolves it to a
-        # stable absolute filesystem location for runtime consumers.
+        # operator ran `ooo` from. The textual + resolved checks are
+        # complementary: sandbox validates the on-disk text, this
+        # resolves it and verifies the kernel-level result still
+        # lives under the manifest's directory. Without the second
+        # check, a manifest can point at an in-tree symlink such as
+        # `plugins/link -> /outside/path` and the loader would
+        # silently accept a sandbox escape — `Path.resolve()` follows
+        # symlinks, so the syntactic slug check alone is insufficient.
+        anchor = manifest_path.parent.resolve()
         candidate = (manifest_path.parent / source_path).resolve()
+        try:
+            candidate.relative_to(anchor)
+        except ValueError as exc:
+            raise PluginManifestError(
+                f"source.path for {source_type!r} resolves outside the manifest's directory",
+                path=str(manifest_path),
+                json_pointer="/source/path",
+                expected=f"path resolving under {anchor}",
+                got=str(candidate),
+            ) from exc
         source_path = str(candidate)
     source = SourceSpec(
         type=source_type,

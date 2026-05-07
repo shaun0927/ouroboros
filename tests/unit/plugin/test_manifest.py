@@ -427,6 +427,37 @@ def test_source_first_party_path_optional(tmp_path: Path) -> None:
     assert manifest.source.path is None
 
 
+def test_sandbox_rejects_symlink_escape(tmp_path: Path) -> None:
+    """Regression for the symlink-escape sandbox bypass: the textual
+    sandbox check rejects `..` segments and absolute paths, but a
+    relative slug like `plugins/link` where the on-disk
+    `link -> /outside/path` symlink follows out of the plugin root
+    used to slip through, since `Path.resolve()` honors symlinks.
+    The loader must verify that the *resolved* filesystem target
+    still lives under the manifest's directory, not just that the
+    user-authored text was syntactically safe.
+    """
+    manifest_dir = tmp_path / "plugin_home"
+    manifest_dir.mkdir()
+    outside = tmp_path / "outside_target"
+    outside.mkdir()
+    link_path = manifest_dir / "link"
+    link_path.symlink_to(outside)
+
+    bad = json.loads(json.dumps(REFERENCE_MANIFEST))
+    bad["source"] = {"type": "local_path", "path": "link"}
+    target = manifest_dir / "ouroboros.plugin.json"
+    target.write_text(json.dumps(bad))
+
+    with pytest.raises(PluginManifestError) as excinfo:
+        load_manifest(target)
+    err = excinfo.value
+    assert err.json_pointer == "/source/path"
+    assert "outside" in err.args[0] or "outside" in err.expected
+    # The escape target should not appear as the loaded path.
+    assert str(outside) in err.got
+
+
 def test_first_party_source_path_stays_none(tmp_path: Path) -> None:
     """First-party plugins still produce `source.path is None`."""
     payload = json.loads(json.dumps(REFERENCE_MANIFEST))
