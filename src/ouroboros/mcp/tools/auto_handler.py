@@ -169,7 +169,7 @@ class AutoHandler:
             HandlerInterviewBackend(interview_handler, cwd=cwd),
             store=store,
             max_rounds=max_interview_rounds,
-            timeout_seconds=_interview_timeout_seconds(state),
+            timeout_seconds=state.phase_timeout_seconds(AutoPhase.INTERVIEW),
         )
         pipeline = AutoPipeline(
             driver,
@@ -216,22 +216,6 @@ def _resolved_opencode_mode(runtime_backend: str | None, opencode_mode: str | No
     if runtime_backend != "opencode":
         return None
     return opencode_mode or get_opencode_mode()
-
-
-_DEFAULT_INTERVIEW_TIMEOUT_SECONDS = 60.0
-
-
-def _interview_timeout_seconds(state: AutoPipelineState) -> float:
-    """Resolve interview-phase timeout from persisted state policy.
-
-    state validation already enforces a positive int for the interview phase,
-    but fall back defensively if older callers ever pass a state with the key
-    missing or an unusable type.
-    """
-    raw = state.timeout_seconds_by_phase.get(AutoPhase.INTERVIEW.value)
-    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
-        return _DEFAULT_INTERVIEW_TIMEOUT_SECONDS
-    return float(raw)
 
 
 def _positive_int_arg(arguments: dict[str, Any], name: str, default: int) -> int:
