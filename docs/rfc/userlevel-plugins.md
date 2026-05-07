@@ -119,6 +119,19 @@ The `source.type` enum is `local_path | plugin_home | first_party`. Per
 first-party programs share the manifest format and are registered at core
 boot, bypassing the user-facing `discovered → installed → trusted` flow.
 
+**First-party trust semantics.** Because first-party programs are shipped
+inside the same release artifact as core (i.e. their manifests are not
+attacker-controlled), all permissions they declare — including
+`required: true` — are treated as **implicitly trusted at boot** by the
+firewall (see Invocation Contract below). The boot-time registration step
+populates the trust store with these grants in-process; there is no
+user-visible "trust" prompt for first-party programs and no path for users
+to revoke them short of disabling the program. This is the deliberate
+contract: first-party programs MAY declare `required: true` permissions,
+and conforming firewalls MUST NOT block them on the trust check. Plugins
+that are not first-party never receive this treatment regardless of
+`source.type`.
+
 The manifest schema versions per
 [Q00/ouroboros-plugins#11](https://github.com/Q00/ouroboros-plugins/issues/11):
 SemVer-style `MAJOR.MINOR`, current MAJOR + previous MAJOR support window,
@@ -142,9 +155,10 @@ The wrapper's responsibilities, in order:
 
 1. **Pre-invocation trust check.** If any `required: true` permission is not
    trusted, emit only `plugin.failed` with `result.status="blocked"` and a
-   message naming the missing scope and the exact `ouroboros plugin trust ...`
-   command to run. **No `plugin.invoked` is emitted** — the plugin never
-   started.
+   message naming the missing scope and the exact `ooo plugin trust ...`
+   command to run (the canonical CLI entrypoint for the lifecycle commands;
+   `ouroboros` is not a separate user-facing command). **No `plugin.invoked`
+   is emitted** — the plugin never started.
 2. **Confirmation gate.** If the resolved command has
    `requires_confirmation: true`, show a single confirmation prompt. Per
    [Q00/ouroboros-plugins#9 Q2](https://github.com/Q00/ouroboros-plugins/issues/9),
@@ -174,10 +188,18 @@ core ledger writer accepts these events as-is, with any core-level envelope
 schema's `additionalProperties: false` boundary. No silent field truncation
 or expansion is permitted; mismatches produce errors, not warnings.
 
-Bounded payloads: argv is recorded as-is; provenance is string-only per
-`docs/audit.md`. Raw stdout/stderr is **not** copied into the ledger; only
-a sha256 hash is recorded for forensic comparison. Tokens, channel IDs, and
-free-form user messages are explicitly forbidden.
+Bounded payloads: argv is recorded as-is, **including** any argv tokens —
+the firewall does not redact, validate, or rewrite argv contents. The
+"tokens, channel IDs, and free-form user messages are forbidden" rule
+therefore applies to **plugin-defined audit fields** (i.e. fields the
+plugin populates inside `plugin.invoked` / `plugin.permission_used` /
+`plugin.completed` / `plugin.failed` event payloads), not to argv. The
+contractual obligation to keep secrets out of argv is on the **caller**
+(`ooo` CLI invocations and first-party programs that shell out to a
+plugin); plugins MUST refuse to accept secrets via argv and MUST document
+the secure path (env, file, OS keychain) instead. Provenance is
+string-only per `docs/audit.md`. Raw stdout/stderr is **not** copied into
+the ledger; only a sha256 hash is recorded for forensic comparison.
 
 ## UX
 
@@ -252,8 +274,14 @@ need. Adding any of them speculatively violates the
   per-repo policy file is possible but not designed.
 - **MCP-tool publication via plugins.** Partly resolved by the firewall
   (#729); remaining MCP-specific concerns to file separately if surfaced.
-- **Plugin-update flow (`ooo plugin update`).** v0 lifecycle is
-  install/inspect/trust/disable/remove only; update lands when needed.
+- **Plugin-update flow (`ooo plugin update`).** "Lifecycle" here refers
+  narrowly to **state-transition commands** (the verbs that move a plugin
+  between `discovered → installed → trusted → disabled → removed`); the
+  read-only verbs `add`, `discover`, and `list` from the v0 CLI in #731
+  remain shipped, they simply do not transition state. The deferred verb
+  is the `update` transition specifically; v0 ships
+  install/inspect/trust/disable/remove and adds `update` when a real
+  in-place upgrade need surfaces.
 - **Automated migration scripts** for MAJOR-version manifest schema bumps.
   v0 → v1 (whenever it happens) ships with a manual migration guide.
 - **Hosted catalog / index server.** Permanent non-goal: marketplace as a
