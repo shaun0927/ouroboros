@@ -69,9 +69,7 @@ def _common_paths(tmp_path: Path) -> dict[str, Path]:
     }
 
 
-def test_add_anti_pattern_install_string_rejected(
-    runner: CliRunner, tmp_path: Path
-) -> None:
+def test_add_anti_pattern_install_string_rejected(runner: CliRunner, tmp_path: Path) -> None:
     """The locked anti-pattern (#plugins/<name>) is rejected with the
     documented error message."""
     paths = _common_paths(tmp_path)
@@ -90,6 +88,7 @@ def test_add_anti_pattern_install_string_rejected(
     # Rich panel wraps long messages and inserts │ border chars; strip ANSI
     # and panel borders before matching.
     import re
+
     plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
     plain = plain.replace("│", " ").replace("╭", " ").replace("╮", " ")
     plain = plain.replace("╰", " ").replace("╯", " ").replace("─", " ")
@@ -128,9 +127,7 @@ def test_add_local_path_with_plugin_flag(runner: CliRunner, tmp_path: Path) -> N
     assert (paths["plugin_home_root"] / "github-pr-ops" / "ouroboros.plugin.json").is_file()
 
 
-def test_add_unknown_plugin_in_catalog_errors(
-    runner: CliRunner, tmp_path: Path
-) -> None:
+def test_add_unknown_plugin_in_catalog_errors(runner: CliRunner, tmp_path: Path) -> None:
     """Requesting a plugin not in the catalog produces a clear error."""
     repo_root = tmp_path / "repo"
     _make_repo_layout(repo_root, [REFERENCE_MANIFEST])
@@ -197,9 +194,7 @@ def test_install_invalid_manifest_errors(runner: CliRunner, tmp_path: Path) -> N
     assert "/name" in result.output
 
 
-def test_trust_grants_scope_and_writes_event(
-    runner: CliRunner, tmp_path: Path
-) -> None:
+def test_trust_grants_scope_and_writes_event(runner: CliRunner, tmp_path: Path) -> None:
     """`trust --scope X` records the grant, emits a plugin.trusted envelope
     to the audit log, and the trust file shape matches the locked Q6 spec."""
     plugin_dir = tmp_path / "github-pr-ops"
@@ -285,13 +280,20 @@ def test_disable_wipes_trust_grants(runner: CliRunner, tmp_path: Path) -> None:
     # Install + trust.
     runner.invoke(
         plugin_app,
-        ["install", str(plugin_dir),
-         "--lockfile", str(paths["lockfile"]),
-         "--plugin-home-root", str(paths["plugin_home_root"])],
+        [
+            "install",
+            str(plugin_dir),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+        ],
     )
     TrustStore(root=paths["trust_root"]).grant(
-        plugin="github-pr-ops", version="0.1.0",
-        scope="github:read", granted_by="u",
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
     )
     # Disable.
     result = runner.invoke(
@@ -303,9 +305,7 @@ def test_disable_wipes_trust_grants(runner: CliRunner, tmp_path: Path) -> None:
     assert "github-pr-ops" in Lockfile(paths["lockfile"]).read()
 
 
-def test_remove_drops_lockfile_trust_and_plugin_home(
-    runner: CliRunner, tmp_path: Path
-) -> None:
+def test_remove_drops_lockfile_trust_and_plugin_home(runner: CliRunner, tmp_path: Path) -> None:
     """`remove` is atomic across lockfile, trust store, and plugin home."""
     plugin_dir = tmp_path / "github-pr-ops"
     plugin_dir.mkdir(parents=True, exist_ok=True)
@@ -314,13 +314,20 @@ def test_remove_drops_lockfile_trust_and_plugin_home(
     # Install + trust.
     runner.invoke(
         plugin_app,
-        ["install", str(plugin_dir),
-         "--lockfile", str(paths["lockfile"]),
-         "--plugin-home-root", str(paths["plugin_home_root"])],
+        [
+            "install",
+            str(plugin_dir),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+        ],
     )
     TrustStore(root=paths["trust_root"]).grant(
-        plugin="github-pr-ops", version="0.1.0",
-        scope="github:read", granted_by="u",
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
     )
 
     # Remove.
@@ -342,6 +349,90 @@ def test_remove_drops_lockfile_trust_and_plugin_home(
     assert "github-pr-ops" not in Lockfile(paths["lockfile"]).read()
     assert TrustStore(root=paths["trust_root"]).read("github-pr-ops") is None
     assert not (paths["plugin_home_root"] / "github-pr-ops").exists()
+
+
+def test_install_failure_preserves_existing_trust_grants(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed reinstall MUST NOT wipe the trust file of the still-active
+    install. Earlier the implementation reset trust before swapping the
+    plugin home — if `copytree` then failed, the old version remained
+    installed but its grants were already gone, so the user lost
+    invocability of an unchanged install.
+    """
+    paths = _common_paths(tmp_path)
+    # Install v0.1.0 + grant scope.
+    plugin_dir_v1 = tmp_path / "src_v1"
+    plugin_dir_v1.mkdir()
+    (plugin_dir_v1 / "ouroboros.plugin.json").write_text(json.dumps(REFERENCE_MANIFEST))
+    runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(plugin_dir_v1),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    runner.invoke(
+        plugin_app,
+        [
+            "trust",
+            "github-pr-ops",
+            "--scope",
+            "github:read",
+            "--granted-by",
+            "user:test",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    # Sanity: trust granted at v0.1.0.
+    before = TrustStore(root=paths["trust_root"]).read("github-pr-ops")
+    assert before is not None
+    assert before.version == "0.1.0"
+    assert any(g.scope == "github:read" for g in before.granted_scopes)
+
+    # Try to reinstall at v0.2.0 with a forced copytree failure.
+    plugin_dir_v2 = tmp_path / "src_v2"
+    plugin_dir_v2.mkdir()
+    payload_v2 = {**REFERENCE_MANIFEST, "version": "0.2.0"}
+    (plugin_dir_v2 / "ouroboros.plugin.json").write_text(json.dumps(payload_v2))
+
+    def _boom_copytree(*_args, **_kwargs):
+        raise OSError("simulated mid-install failure")
+
+    monkeypatch.setattr("ouroboros.cli.commands.plugin.shutil.copytree", _boom_copytree)
+    bad = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(plugin_dir_v2),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    assert bad.exit_code != 0
+
+    # Trust file MUST still reflect the original v0.1.0 grant — the
+    # install never succeeded, so trust must not have been reset.
+    after = TrustStore(root=paths["trust_root"]).read("github-pr-ops")
+    assert after is not None
+    assert after.version == "0.1.0", (
+        f"failed reinstall must not invalidate trust of the still-active "
+        f"install; record was reset to {after.version!r}"
+    )
+    assert any(g.scope == "github:read" for g in after.granted_scopes)
 
 
 def test_install_failure_preserves_existing_plugin_home(
@@ -379,9 +470,7 @@ def test_install_failure_preserves_existing_plugin_home(
     def _boom(*_args, **_kwargs):
         raise OSError("simulated disk full during copytree")
 
-    monkeypatch.setattr(
-        "ouroboros.cli.commands.plugin.shutil.copytree", _boom
-    )
+    monkeypatch.setattr("ouroboros.cli.commands.plugin.shutil.copytree", _boom)
     bad = runner.invoke(
         plugin_app,
         [
@@ -400,9 +489,7 @@ def test_install_failure_preserves_existing_plugin_home(
     assert Lockfile(paths["lockfile"]).read()["github-pr-ops"].version == "0.1.0"
 
 
-def test_install_version_bump_invalidates_trust(
-    runner: CliRunner, tmp_path: Path
-) -> None:
+def test_install_version_bump_invalidates_trust(runner: CliRunner, tmp_path: Path) -> None:
     """Reinstalling at a different version MUST clear prior trust grants.
 
     Per Q00/ouroboros-plugins#9 Q4 lock — the user must re-consent against
@@ -485,9 +572,7 @@ def test_install_version_bump_invalidates_trust(
     assert rows[0]["granted_scopes"] == []
 
 
-def test_add_version_bump_invalidates_trust(
-    runner: CliRunner, tmp_path: Path
-) -> None:
+def test_add_version_bump_invalidates_trust(runner: CliRunner, tmp_path: Path) -> None:
     """Same as the install variant, driven through `ooo plugin add`."""
     paths = _common_paths(tmp_path)
 
@@ -551,9 +636,7 @@ def test_add_version_bump_invalidates_trust(
     assert after.granted_scopes == ()
 
 
-def test_disable_honors_trust_root_override(
-    runner: CliRunner, tmp_path: Path
-) -> None:
+def test_disable_honors_trust_root_override(runner: CliRunner, tmp_path: Path) -> None:
     """`disable --trust-root <custom>` MUST remove the trust file under
     that root — not silently target the default `~/.ouroboros/plugins`.
     """
@@ -634,9 +717,7 @@ def test_add_normalizes_git_plus_https_url(
             )
         return real_run(argv, *args, **kwargs)
 
-    monkeypatch.setattr(
-        "ouroboros.cli.commands.plugin.subprocess.run", _spy
-    )
+    monkeypatch.setattr("ouroboros.cli.commands.plugin.subprocess.run", _spy)
 
     result = runner.invoke(
         plugin_app,
@@ -664,9 +745,7 @@ def test_add_normalizes_git_plus_https_url(
     assert not cloned_url.startswith("git+"), cloned_url
 
 
-def test_add_skips_invalid_sibling_manifest_in_catalog(
-    runner: CliRunner, tmp_path: Path
-) -> None:
+def test_add_skips_invalid_sibling_manifest_in_catalog(runner: CliRunner, tmp_path: Path) -> None:
     """A repo with one good plugin and one bad sibling manifest must allow
     `--plugin <good-one>` to proceed. The invalid sibling is reported as a
     `skip:` warning rather than aborting the whole install.

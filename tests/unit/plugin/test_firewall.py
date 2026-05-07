@@ -348,6 +348,47 @@ def test_first_party_skips_trust_check(tmp_path: Path) -> None:
     assert all(e["trust_state"] == "first_party" for e in events)
 
 
+def test_partial_grant_set_does_not_label_trusted(tmp_path: Path) -> None:
+    """A trust record covering only some required scopes must be reported
+    as `trust_state="installed"`, not `"trusted"`. Otherwise audit events
+    and inspect/list output mis-label a permission boundary even though
+    `_missing_required` will still block invocation.
+    """
+    # Manifest with TWO required permissions.
+    payload = json.loads(json.dumps(REFERENCE_MANIFEST))
+    payload["permissions"] = [
+        {"scope": "github:read", "risk": "read_only", "required": True},
+        {"scope": "github:write", "risk": "destructive", "required": True},
+    ]
+    program = _make_program(tmp_path, payload)
+    # User has granted only ONE of the two required scopes.
+    partial = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+    )
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=partial,
+        event_sink=events.append,
+        correlation_id="corr-partial",
+        subprocess_runner=_fake_runner(stdout="ok"),
+    )
+    # Invocation is blocked by the missing scope (existing semantics).
+    assert result.status == "blocked"
+    assert "github:write" in result.message
+    # Crucially: the emitted event reports the CORRECT trust_state.
+    types = [e["event_type"] for e in events]
+    assert types == ["plugin.failed"]
+    assert events[0]["trust_state"] == "installed", (
+        f"partial grant set must not label as trusted; got {events[0]['trust_state']!r}"
+    )
+
+
 def test_stale_trust_record_after_version_bump_blocks(tmp_path: Path) -> None:
     """A trust record whose version no longer matches the manifest must NOT
     grant access at runtime — even if scopes are present.

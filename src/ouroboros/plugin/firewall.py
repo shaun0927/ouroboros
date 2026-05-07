@@ -123,15 +123,27 @@ def _trust_state_label(
     manifest: PluginManifest,
     trust_record: TrustRecord | None,
 ) -> str:
+    """Return the trust state label for `manifest`.
+
+    `"trusted"` is reserved for the state in which an invocation will NOT
+    be blocked on the trust check: the record matches the installed
+    version, has at least one granted scope, and covers every
+    `required: true` permission. A partial grant set still leaves the
+    plugin gated by `_missing_required`, so reporting it as `"trusted"`
+    would mis-label a permission boundary in audit events and in the
+    `inspect`/`list` UX.
+    """
     if manifest.source.type == "first_party":
         return "first_party"
-    if (
-        _record_matches_version(manifest, trust_record)
-        and trust_record is not None
-        and trust_record.granted_scopes
-    ):
-        return "trusted"
-    return "installed"
+    if not _record_matches_version(manifest, trust_record):
+        return "installed"
+    assert trust_record is not None  # narrowed by _record_matches_version
+    if not trust_record.granted_scopes:
+        return "installed"
+    required = _required_permissions(manifest)
+    if required and trust_record.missing(required):
+        return "installed"
+    return "trusted"
 
 
 def _missing_required(

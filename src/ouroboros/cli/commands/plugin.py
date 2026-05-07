@@ -79,18 +79,27 @@ def _trust_state_label(
     manifest: PluginManifest,
     trust_store: TrustStore,
 ) -> str:
+    """Compute the displayed trust state for a manifest.
+
+    ``"trusted"`` is reserved for the state in which the firewall will
+    not block invocation on the trust check: the record matches the
+    installed version, has at least one granted scope, and covers every
+    ``required: true`` permission. A partial grant set is still gated by
+    `_missing_required`, so reporting it as ``"trusted"`` would mis-label
+    a permission boundary in `inspect` / `list` output.
+    """
     if manifest.source.type == "first_party":
         return "first_party"
     record = trust_store.read(manifest.name)
-    # Per Q00/ouroboros-plugins#9 Q4 lock: a stale record (its version no
-    # longer matches the installed manifest) does NOT count as trust.
-    if (
-        record is not None
-        and record.version == manifest.version
-        and record.granted_scopes
-    ):
-        return "trusted"
-    return "installed"
+    if record is None or record.version != manifest.version:
+        return "installed"
+    granted = {g.scope for g in record.granted_scopes}
+    if not granted:
+        return "installed"
+    required = {p.scope for p in manifest.permissions if p.required}
+    if required - granted:
+        return "installed"
+    return "trusted"
 
 
 def _atomic_replace_dir(src: Path, dest: Path) -> None:
@@ -152,16 +161,19 @@ def _maybe_invalidate_trust_for_version_bump(
     *,
     name: str,
     new_version: str,
-    lock: Lockfile,
     trust: TrustStore,
 ) -> None:
-    """If a previous lockfile entry exists at a different version, reset
-    the trust file. Per Q00/ouroboros-plugins#9 Q4 lock — a version bump
-    must invalidate prior grants so the user is forced to re-consent."""
-    prior = lock.read().get(name)
-    if prior is None or prior.version == new_version:
-        return
-    if trust.read(name) is None:
+    """If the existing trust record's version no longer matches `new_version`,
+    reset the trust file. Per Q00/ouroboros-plugins#9 Q4 lock — a version
+    bump must invalidate prior grants so the user is forced to re-consent.
+
+    We compare against the trust record's own version (not the lockfile's
+    prior entry) because callers run this AFTER `_install_one` has updated
+    the lockfile. The trust file remains the authoritative pointer to the
+    version that was last consented to.
+    """
+    record = trust.read(name)
+    if record is None or record.version == new_version:
         return
     trust.reset_for_version_bump(name, new_version)
 
@@ -206,11 +218,15 @@ def inspect_command(
     name: Annotated[str, typer.Argument(help="Installed plugin name.")],
     lockfile_path: Annotated[
         Path | None,
-        typer.Option("--lockfile", help="Override the lockfile path (default: ~/.ouroboros/plugins.lock)."),
+        typer.Option(
+            "--lockfile", help="Override the lockfile path (default: ~/.ouroboros/plugins.lock)."
+        ),
     ] = None,
     trust_root: Annotated[
         Path | None,
-        typer.Option("--trust-root", help="Override the trust root (default: ~/.ouroboros/plugins)."),
+        typer.Option(
+            "--trust-root", help="Override the trust root (default: ~/.ouroboros/plugins)."
+        ),
     ] = None,
 ) -> None:
     """Show installed plugin metadata + trust state.
@@ -252,9 +268,7 @@ def inspect_command(
     if entry.git_sha:
         console.print(f"  git_sha:        {entry.git_sha}")
     console.print(f"  trust_state:    {_trust_state_label(manifest, trust)}")
-    console.print(
-        f"  granted_scopes: {', '.join(granted) if granted else '(none)'}"
-    )
+    console.print(f"  granted_scopes: {', '.join(granted) if granted else '(none)'}")
     if record is not None and not record_is_current:
         console.print(
             f"  trust note:     stored grants are for version {record.version!r} "
@@ -264,8 +278,7 @@ def inspect_command(
     missing = [s for s in required_perms if s not in granted]
     if missing:
         console.print(
-            f"  missing scopes: {', '.join(missing)} "
-            f"(invocation will be blocked until granted)"
+            f"  missing scopes: {', '.join(missing)} (invocation will be blocked until granted)"
         )
 
 
@@ -273,11 +286,15 @@ def inspect_command(
 def list_command(
     lockfile_path: Annotated[
         Path | None,
-        typer.Option("--lockfile", help="Override the lockfile path (default: ~/.ouroboros/plugins.lock)."),
+        typer.Option(
+            "--lockfile", help="Override the lockfile path (default: ~/.ouroboros/plugins.lock)."
+        ),
     ] = None,
     trust_root: Annotated[
         Path | None,
-        typer.Option("--trust-root", help="Override the trust root (default: ~/.ouroboros/plugins)."),
+        typer.Option(
+            "--trust-root", help="Override the trust root (default: ~/.ouroboros/plugins)."
+        ),
     ] = None,
     json_output: Annotated[
         bool,
@@ -300,21 +317,29 @@ def list_command(
     rows = []
     for entry in sorted(entries.values(), key=lambda e: e.name):
         record = trust.read(entry.name)
-        # A trust record whose version no longer matches the installed
-        # manifest is treated as if no scopes were granted — version
-        # bumps invalidate prior trust per Q00/ouroboros-plugins#9 Q4.
+        # Per Q4 lock: a record whose version no longer matches the
+        # installed manifest is treated as if no scopes were granted.
         record_is_current = record is not None and record.version == entry.version
-        scopes = (
-            [g.scope for g in record.granted_scopes]
-            if record_is_current and record
-            else []
-        )
+        scopes = [g.scope for g in record.granted_scopes] if record_is_current and record else []
+        # Compute the displayed trust state through the same predicate
+        # the firewall uses, so list/inspect/firewall agree on the
+        # invariant: "trusted" iff invocation will not be blocked on
+        # the trust check (record current + grants cover required).
+        manifest_path = Path(entry.plugin_home).expanduser() / "ouroboros.plugin.json"
+        try:
+            manifest = load_manifest(manifest_path)
+            trust_state = _trust_state_label(manifest, trust)
+        except PluginManifestError:
+            # Manifest unreadable post-install (e.g. external mutation):
+            # show conservatively as "installed", no granted scopes.
+            trust_state = "installed"
+            scopes = []
         rows.append(
             {
                 "name": entry.name,
                 "version": entry.version,
                 "source_kind": entry.source_kind,
-                "trust_state": "trusted" if scopes else "installed",
+                "trust_state": trust_state,
                 "granted_scopes": scopes,
             }
         )
@@ -373,7 +398,7 @@ def _normalize_clone_url(target: str) -> str:
     """
     for prefix in ("git+https://", "git+http://", "git+ssh://", "git+"):
         if target.startswith(prefix):
-            return target[len("git+"):]
+            return target[len("git+") :]
     return target
 
 
@@ -497,9 +522,7 @@ def _install_one(
         repository=repository,
         git_sha=git_sha,
         manifest_checksum=_manifest_checksum(plugin_home),
-        installed_at=datetime.datetime.now(tz=datetime.UTC).strftime(
-            "%Y-%m-%dT%H:%M:%SZ"
-        ),
+        installed_at=datetime.datetime.now(tz=datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         plugin_home=str(plugin_home),
     )
     lock.add(entry)
@@ -516,8 +539,7 @@ def add_command(
         list[str] | None,
         typer.Option(
             "--plugin",
-            help="Non-interactive: name of a plugin in the repo catalog. "
-            "Repeatable.",
+            help="Non-interactive: name of a plugin in the repo catalog. Repeatable.",
         ),
     ] = None,
     cache_root: Annotated[
@@ -595,17 +617,10 @@ def add_command(
     installed: list[str] = []
     for manifest in selected:
         plugin_home = plugin_home_root / manifest.name
-        # Per Q4 lock: a version bump invalidates any prior grants. We
-        # check this BEFORE swapping the plugin home so that even a
-        # mid-install crash leaves the trust store consistent with the
-        # version that's about to be on disk.
-        _maybe_invalidate_trust_for_version_bump(
-            name=manifest.name,
-            new_version=manifest.version,
-            lock=lock,
-            trust=trust,
-        )
         # Atomic install: prior plugin home survives any copy failure.
+        # We DO NOT invalidate trust before this step — if the copy
+        # fails, the user should still own the unchanged install with
+        # its prior grants intact.
         _atomic_replace_dir(repo_root / "plugins" / manifest.name, plugin_home)
         _install_one(
             manifest=manifest,
@@ -614,6 +629,17 @@ def add_command(
             source_kind=source_kind,
             repository=repository,
             git_sha=git_sha,
+        )
+        # Now that the new version is on disk and recorded in the
+        # lockfile, fulfill Q4: invalidate prior grants on a version
+        # bump. The firewall additionally enforces version-mismatch
+        # invalidation as defense-in-depth, so a crash in the narrow
+        # window between _install_one and this call still keeps the
+        # plugin gated until the user re-grants.
+        _maybe_invalidate_trust_for_version_bump(
+            name=manifest.name,
+            new_version=manifest.version,
+            trust=trust,
         )
         installed.append(f"{manifest.name} {manifest.version}")
         required = [p.scope for p in manifest.permissions if p.required]
@@ -673,14 +699,9 @@ def install_command(
         raise typer.Exit(code=1) from exc
 
     plugin_home = plugin_home_root / manifest.name
-    # Per Q4 lock: invalidate trust on version bump.
-    _maybe_invalidate_trust_for_version_bump(
-        name=manifest.name,
-        new_version=manifest.version,
-        lock=lock,
-        trust=trust,
-    )
-    # Atomic install: prior plugin home survives any copy failure.
+    # Atomic install: a failed copy must leave the prior install (and
+    # its trust grants) untouched. Trust is only invalidated AFTER the
+    # new version is committed to disk and the lockfile.
     _atomic_replace_dir(src, plugin_home)
 
     _install_one(
@@ -690,6 +711,13 @@ def install_command(
         source_kind="local",
         repository=None,
         git_sha=None,
+    )
+    # Per Q4 lock: invalidate trust on version bump (post-success).
+    # The firewall also enforces version mismatch as defense-in-depth.
+    _maybe_invalidate_trust_for_version_bump(
+        name=manifest.name,
+        new_version=manifest.version,
+        trust=trust,
     )
     print_success(f"Installed: {manifest.name} {manifest.version}")
 
@@ -851,7 +879,7 @@ def remove_command(
     # that callers (notably tests) can target a non-default install
     # location even if the lockfile points elsewhere.
     if plugin_home_root is not None:
-        plugin_home = (plugin_home_root.expanduser() / name)
+        plugin_home = plugin_home_root.expanduser() / name
     else:
         plugin_home = Path(entry.plugin_home).expanduser()
     if plugin_home.is_dir():
