@@ -238,17 +238,43 @@ core ledger writer accepts these events as-is, with any core-level envelope
 schema's `additionalProperties: false` boundary. No silent field truncation
 or expansion is permitted; mismatches produce errors, not warnings.
 
-Bounded payloads: argv is recorded as-is, **including** any argv tokens —
-the firewall does not redact, validate, or rewrite argv contents. The
-"tokens, channel IDs, and free-form user messages are forbidden" rule
-therefore applies to **plugin-defined audit fields** (i.e. fields the
-plugin populates inside `plugin.invoked` / `plugin.permission_used` /
-`plugin.completed` / `plugin.failed` event payloads), not to argv. The
-contractual obligation to keep secrets out of argv is on the **caller**
-(`ooo` CLI invocations and first-party programs that shell out to a
-plugin); plugins MUST refuse to accept secrets via argv and MUST document
-the secure path (env, file, OS keychain) instead. Provenance fields in
-audit events are string-only per the
+**Bounded payloads — argv handling.** The "tokens, channel IDs, and
+free-form user messages are forbidden" rule applies to **plugin-defined
+audit fields** (fields the plugin populates inside `plugin.invoked` /
+`plugin.permission_used` / `plugin.completed` / `plugin.failed` event
+payloads). For `argv` specifically the contract is **defense in depth**;
+treating argv as either fully trusted or fully redacted is unsafe.
+
+1. **Plugins MUST NOT accept secrets via argv.** Plugin authors MUST
+   document a secure path (env var, file, OS keychain) for any
+   credential a command needs and MUST reject argv-supplied secrets at
+   parse time when feasible. This is the primary control.
+2. **The firewall MUST apply a built-in argv redaction policy before
+   ledger write**, as a safety net for the case where rule (1) is
+   violated by accident. The minimum policy redacts:
+   - Values of well-known secret flags by name match
+     (e.g. `--token=…`, `--password=…`, `--api-key=…`, `--secret=…`,
+     and the value position immediately following those flags),
+   - Tokens with high-confidence formats (`Bearer …`, `gh[oprsu]_…`,
+     `sk-…`, AWS-style `AKIA…`, JWT-shaped strings with three
+     dot-separated base64url segments).
+   Redacted positions are replaced with the literal string `[redacted]`
+   in the ledger record. The hash of the original argv (sha256 over the
+   un-redacted form) MAY be recorded alongside for forensic
+   reconciliation, but the original value MUST NOT.
+3. **Plugins MAY tighten the policy per command.** A plugin MAY declare
+   additional flags or positional indexes to redact via a future
+   manifest extension; the v0 manifest does not yet expose this, so v0
+   redaction is exactly the built-in policy in (2). Adding the
+   per-command redaction list is tracked alongside the granular
+   permission emission work in the Deferred Decisions section.
+4. **Caller responsibility persists.** The firewall's safety net does
+   not absolve callers (`ooo` CLI, first-party programs, scripts/CI) of
+   the obligation to keep secrets out of argv in the first place; the
+   safety net exists to limit blast radius, not to make argv a
+   sanctioned secret channel.
+
+Provenance fields in audit events are string-only per the
 [`audit-event.schema.json`](https://github.com/Q00/ouroboros-plugins/blob/main/schemas/0.1/audit-event.schema.json)
 constraint set (the schema is the canonical source; this RFC does not
 introduce a separate `docs/audit.md` contract). Raw stdout/stderr is
@@ -271,6 +297,18 @@ repository is already known to the system or when scripts/CI need to
 bypass the prompt. The two commands are layered, not redundant: `add`
 calls `install`; `install` never calls `add`.
 
+**Plugin name → command-namespace mapping.** Every installed plugin's
+manifest `name` field IS the user-facing command namespace, with no
+aliasing: a plugin named `github-pr-ops` is invoked as
+`ooo github-pr-ops <command> [args...]`, where `<command>` is one of
+the entries declared in the manifest's `commands` array (each `commands`
+entry's own `name` is the subcommand). Manifest `name` therefore doubles
+as a uniqueness key in the trust store and as the CLI namespace.
+Aliases, short names, and namespace collisions across repos are
+explicitly out of scope for v0 — if two installed plugins declare the
+same `name`, `ooo plugin install` MUST refuse the second one with a
+collision error.
+
 ```bash
 $ ooo plugin add https://github.com/Q00/ouroboros-plugins
 Repository: Q00/ouroboros-plugins (b3a91f2)
@@ -282,7 +320,7 @@ Select plugins to install:
 Press space to toggle, enter to confirm, esc to cancel.
 
 $ ooo plugin trust github-pr-ops --scope github:read
-$ ooo github-pr review https://github.com/Q00/ouroboros/pull/725
+$ ooo github-pr-ops review https://github.com/Q00/ouroboros/pull/725
 ```
 
 Anti-pattern install strings (e.g.
