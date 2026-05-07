@@ -123,10 +123,24 @@ class TestDetectKeywords:
         assert result["detected"] is True
         assert result["suggested_skill"] == "/ouroboros:resume-session"
 
-    def test_ooo_resume_short_alias(self):
-        result = detect_keywords("ooo resume")
+    def test_ooo_resume_session_with_args(self):
+        result = detect_keywords("ooo resume-session --all")
         assert result["detected"] is True
         assert result["suggested_skill"] == "/ouroboros:resume-session"
+
+    def test_ooo_resume_prose_does_not_route(self):
+        # Guards the canonical-form-only decision: a prose mention of "ooo
+        # resume" inside a sentence must NOT route to resume-session, because
+        # word-boundary matching would otherwise mis-suggest session recovery
+        # for ordinary text like "please ooo resume work on this".
+        result = detect_keywords("please ooo resume work on this")
+        assert result["suggested_skill"] != "/ouroboros:resume-session"
+
+    def test_ooo_resume_bare_does_not_route(self):
+        # The bare short form is intentionally unsupported — users must type
+        # the unambiguous canonical "ooo resume-session".
+        result = detect_keywords("ooo resume")
+        assert result["suggested_skill"] != "/ouroboros:resume-session"
 
 
 class TestSetupBypass:
@@ -222,9 +236,9 @@ class TestMainGate:
 
     @patch.object(_mod, "is_mcp_configured", return_value=False)
     @patch.object(_mod, "is_first_time", return_value=False)
-    def test_resume_short_alias_bypasses_setup_gate(self, _first, _mcp, capsys):
+    def test_resume_session_with_args_bypasses_setup_gate(self, _first, _mcp, capsys):
         with patch("sys.stdin") as mock_stdin:
-            mock_stdin.read.return_value = "ooo resume"
+            mock_stdin.read.return_value = "ooo resume-session --all"
             main()
         out = capsys.readouterr().out
         assert "/ouroboros:setup" not in out

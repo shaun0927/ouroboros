@@ -63,7 +63,11 @@ KEYWORD_MAP = [
     {"patterns": ["ooo update", "ooo upgrade"], "skill": "/ouroboros:update"},
     {"patterns": ["ooo brownfield"], "skill": "/ouroboros:brownfield"},
     {"patterns": ["ooo publish"], "skill": "/ouroboros:publish"},
-    {"patterns": ["ooo resume-session", "ooo resume"], "skill": "/ouroboros:resume-session"},
+    # Canonical form only. The short `ooo resume` alias was rejected because
+    # word-boundary matching would route prose like "please ooo resume work on
+    # this" to /ouroboros:resume-session, and skills/resume-session/SKILL.md
+    # explicitly chose the hyphenated name to avoid /resume collision.
+    {"patterns": ["ooo resume-session"], "skill": "/ouroboros:resume-session"},
     # Natural language triggers
     # PM triggers must precede generic interview to avoid "pm interview" being shadowed
     {
