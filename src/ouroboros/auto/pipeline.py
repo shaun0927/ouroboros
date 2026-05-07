@@ -21,6 +21,12 @@ RunStarter = Callable[[Seed], Awaitable[dict[str, Any]]]
 SeedSaver = Callable[[Seed], str]
 SeedLoader = Callable[[str], Seed]
 
+# Cap the persisted progress event ring buffer so resume states stay compact
+# even on long-running sessions. With per-phase dedup in _maybe_emit_phase,
+# the worst-case sequence (12 interview rounds + 5 repair rounds + grade
+# updates + terminal phases) sits well below 100 entries.
+_PROGRESS_EVENT_LIMIT = 100
+
 
 @dataclass(frozen=True, slots=True)
 class AutoPipelineResult:
@@ -602,8 +608,6 @@ class AutoPipeline:
         round: int | None = None,
         grade: str | None = None,
     ) -> None:
-        if self.progress_callback is None:
-            return
         event = AutoProgressEvent(
             auto_session_id=state.auto_session_id,
             phase=state.phase.value,
@@ -612,6 +616,27 @@ class AutoPipeline:
             round=round,
             grade=grade,
         )
+        # Persist a JSON-friendly copy on state so MCP/CLI surfaces can
+        # rebuild the full progress history across resumes — without this,
+        # ``progress_events`` would only ever describe the current
+        # invocation. The log is bounded to the last
+        # ``_PROGRESS_EVENT_LIMIT`` entries so the persisted state file
+        # stays compact even on long-running sessions.
+        state.progress_events.append(
+            {
+                "phase": event.phase,
+                "kind": event.kind,
+                "message": event.message,
+                "round": event.round,
+                "grade": event.grade,
+                "timestamp": event.timestamp,
+            }
+        )
+        if len(state.progress_events) > _PROGRESS_EVENT_LIMIT:
+            del state.progress_events[: len(state.progress_events) - _PROGRESS_EVENT_LIMIT]
+
+        if self.progress_callback is None:
+            return
         try:
             self.progress_callback(event)
         except Exception:

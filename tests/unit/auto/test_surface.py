@@ -381,7 +381,7 @@ def test_get_ouroboros_tools_forwards_bridge_wiring_to_auto_handler() -> None:
 
 @pytest.mark.asyncio
 async def test_auto_handler_forwards_run_subagent_envelope(monkeypatch) -> None:
-    async def fake_run(self, arguments, **_kwargs):  # noqa: ARG001
+    async def fake_run(self, arguments):  # noqa: ARG001
         from ouroboros.auto.pipeline import AutoPipelineResult
 
         return AutoPipelineResult(
@@ -403,7 +403,7 @@ async def test_auto_handler_forwards_run_subagent_envelope(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_auto_handler_meta_exposes_auto_progress_fields(monkeypatch) -> None:
-    async def fake_run(self, arguments, **_kwargs):  # noqa: ARG001
+    async def fake_run(self, arguments):  # noqa: ARG001
         from ouroboros.auto.pipeline import AutoPipelineResult
 
         return AutoPipelineResult(
