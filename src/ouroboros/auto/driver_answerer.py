@@ -188,6 +188,7 @@ class DriverAutoAnswerer:
     def apply(self, answer: AutoAnswer, ledger: SeedDraftLedger, *, question: str) -> None:
         """Apply a selected-driver answer to the ledger."""
         self.baseline.apply(answer, ledger, question=question)
+        _persist_answer_metadata(answer, ledger, question=question)
 
 
 def classify_interview_answer_risk(question: str, scaffold: AutoAnswer | None = None) -> str | None:
@@ -228,7 +229,6 @@ def classify_interview_answer_risk(question: str, scaffold: AutoAnswer | None = 
 
 def classify_driver_answer_text_risk(text: str) -> str | None:
     """Return a risk label for risky selected-driver output text."""
-    lowered = text.lower()
     if _contains_real_secret(text):
         return "actual answer contains secret or credential"
     if re.search(
@@ -253,15 +253,90 @@ def classify_driver_answer_text_risk(text: str) -> str | None:
         return "actual answer contains secret or credential"
     if re.search(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b", text):
         return "actual answer contains secret or credential"
-    destructive_action = (
-        r"\b(delete|destroy|drop|truncate|wipe|erase|purge|deprovision|terminate)\b"
-    )
-    production_target = r"\b(production|prod|live|billing|database|db|credentials?)\b"
-    if re.search(destructive_action, lowered) and re.search(production_target, lowered):
+    if _destructive_clause_match(text):
         return "actual answer recommends destructive production action"
     if re.search(r"\brm\s+-rf\s+/(?:\s|$)", text):
         return "actual answer recommends destructive production action"
     return None
+
+
+_DESTRUCTIVE_VERB_RE = re.compile(
+    r"\b(delete|destroy|drop|truncate|wipe|erase|purge|deprovision|terminate)\b",
+    re.IGNORECASE,
+)
+_PRODUCTION_TARGET_RE = re.compile(
+    r"\b(production|prod|live|billing|database|db|credentials?)\b",
+    re.IGNORECASE,
+)
+_DEV_QUALIFIER_RE = re.compile(
+    r"\b(local|test|tests|testing|dev|development|staging|sandbox|scratch|"
+    r"ephemeral|temporary|temp|tmp|fixture|seed|in[-_ ]?memory|mock|mocked)\b",
+    re.IGNORECASE,
+)
+_CLAUSE_SPLIT_RE = re.compile(
+    r"[.;,:]|\b(?:and|or|but|then|before|after|while|so|because)\b",
+    re.IGNORECASE,
+)
+
+
+def _destructive_clause_match(text: str) -> bool:
+    """Return ``True`` only when a clause pairs a destructive verb with a
+    production target without a dev qualifier.
+
+    The classifier is a brake gate, so a flat ``verb anywhere AND target
+    anywhere`` heuristic over-blocks benign mixed-context guidance like
+    "Delete the local test database and re-seed it from production". This
+    helper splits the answer into clauses (sentence/phrase boundaries plus
+    coordinating conjunctions) and only flags a clause that has the verb
+    aimed at a production target with no qualifying dev/local/test/staging
+    scope in the same clause.
+    """
+    for clause in _CLAUSE_SPLIT_RE.split(text):
+        if not clause or not clause.strip():
+            continue
+        if not _DESTRUCTIVE_VERB_RE.search(clause):
+            continue
+        if not _PRODUCTION_TARGET_RE.search(clause):
+            continue
+        if _DEV_QUALIFIER_RE.search(clause):
+            continue
+        return True
+    return False
+
+
+def _persist_answer_metadata(answer: AutoAnswer, ledger: SeedDraftLedger, *, question: str) -> None:
+    """Persist the ``AutoAnswerMetadata`` audit payload onto the ledger.
+
+    ``AutoAnswerer.apply`` only writes ``ledger_updates``/blocker entries, so
+    structured ``risk``/``confidence``/``provenance`` would otherwise be
+    discarded with the in-memory answer. Downstream Seed-ready and A-grade
+    gates need a durable record to consume, so this writes the metadata as a
+    constraint entry keyed by question slug.
+    """
+    meta = answer.metadata
+    if meta.risk is None and meta.confidence is None and not meta.provenance:
+        return
+    confidence = meta.confidence if meta.confidence is not None else answer.confidence
+    bounded_confidence = max(0.0, min(1.0, float(confidence)))
+    value = (
+        f"risk={meta.risk!r}; confidence={bounded_confidence:.2f}; "
+        f"provenance={list(meta.provenance)}"
+    )
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key=f"answer_metadata.auto_driver.{_slug_key(question)[:48]}",
+            value=value,
+            source=LedgerSource.INFERENCE,
+            confidence=bounded_confidence,
+            status=LedgerStatus.INFERRED,
+            rationale=(
+                "Selected-driver post-generation audit metadata; preserves "
+                "risk/confidence/provenance for Seed-ready and A-grade review gates."
+            ),
+            evidence=list(meta.provenance),
+        ),
+    )
 
 
 def _contains_real_secret(text: str) -> bool:

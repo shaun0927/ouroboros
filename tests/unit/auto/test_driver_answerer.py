@@ -129,6 +129,37 @@ def test_answer_text_risk_allows_dev_sql_table_drops() -> None:
     )
 
 
+def test_answer_text_risk_scopes_destructive_action_to_clause() -> None:
+    """Regression for the bot's blocking finding on PR #683 that the
+    destructive classifier matched any ``destructive_verb`` plus any
+    ``production_target`` token anywhere in the answer.
+
+    The classifier must only flag a clause where the verb is actually
+    aimed at the target with no qualifying dev/local/test/staging scope.
+    """
+    assert (
+        classify_driver_answer_text_risk(
+            "Delete the local test database and re-seed it from production."
+        )
+        is None
+    )
+    assert (
+        classify_driver_answer_text_risk("Wipe the staging credentials before redeploying.") is None
+    )
+    assert (
+        classify_driver_answer_text_risk(
+            "Truncate the dev database, then re-run the migrations against production."
+        )
+        is None
+    )
+    assert (
+        classify_driver_answer_text_risk(
+            "Drop the production database and migrate to the new cluster."
+        )
+        == "actual answer recommends destructive production action"
+    )
+
+
 def test_answer_text_risk_allows_benign_credential_phrasing() -> None:
     assert classify_driver_answer_text_risk("Bearer-style auth pattern is documented.") is None
     assert (
@@ -209,6 +240,34 @@ def test_scope_add_questions_are_still_risky(question: str) -> None:
         classify_interview_answer_risk(question, scaffold=None)
         == "scope or product/business tradeoff"
     )
+
+
+@pytest.mark.asyncio
+async def test_driver_answerer_apply_persists_answer_metadata_to_ledger() -> None:
+    """Regression for the bot's blocking finding on PR #683 that
+    ``AutoAnswerMetadata`` was populated in ``answer()`` but
+    ``apply()`` discarded it, so downstream Seed-ready / A-grade gates
+    could not consume the audit metadata. ``apply()`` must persist the
+    structured metadata into the ledger.
+    """
+    ledger = SeedDraftLedger.from_goal("Build a CLI")
+    adapter = FakeAdapter("Use Typer and verify with pytest.")
+    answerer = DriverAutoAnswerer(backend="codex", brake=AutoBrakeMode.OFF, adapter=adapter)
+
+    question = "Which runtime and framework should be used?"
+    answer = await answerer.answer(question, ledger)
+    answerer.apply(answer, ledger, question=question)
+
+    constraint_entries = ledger.sections["constraints"].entries
+    metadata_entries = [
+        entry for entry in constraint_entries if entry.key.startswith("answer_metadata.auto_driver")
+    ]
+    assert metadata_entries, "selected-driver answer metadata must be persisted to the ledger"
+    persisted = metadata_entries[-1]
+    assert "provenance=" in persisted.value
+    assert "confidence=" in persisted.value
+    assert any(item.startswith("driver:") for item in persisted.evidence)
+    assert any(item.startswith("brake:") for item in persisted.evidence)
 
 
 @pytest.mark.asyncio
