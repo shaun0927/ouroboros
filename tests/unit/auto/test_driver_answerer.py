@@ -107,24 +107,24 @@ def test_answer_text_risk_detects_known_provider_secret_shapes() -> None:
         ), text
 
 
-def test_answer_text_risk_flags_rm_rf_paths_beyond_root() -> None:
+def test_answer_text_risk_flags_only_bare_rm_rf_root() -> None:
     assert (
-        classify_driver_answer_text_risk("Run rm -rf /opt/app/data to reset state.")
-        == "actual answer recommends destructive production action"
-    )
-    assert (
-        classify_driver_answer_text_risk("rm -rf ./build && rebuild")
+        classify_driver_answer_text_risk("Run rm -rf / to wipe the host.")
         == "actual answer recommends destructive production action"
     )
 
 
-def test_answer_text_risk_flags_drop_and_truncate_sql_targets() -> None:
+def test_answer_text_risk_allows_rm_rf_local_dev_cleanup() -> None:
+    assert classify_driver_answer_text_risk("rm -rf ./build && rebuild") is None
+    assert classify_driver_answer_text_risk("Use rm -rf node_modules before reinstall.") is None
+    assert classify_driver_answer_text_risk("Run rm -rf /opt/app/cache to reset state.") is None
+
+
+def test_answer_text_risk_allows_dev_sql_table_drops() -> None:
+    assert classify_driver_answer_text_risk("DROP TABLE users CASCADE;") is None
+    assert classify_driver_answer_text_risk("TRUNCATE TABLE accounts;") is None
     assert (
-        classify_driver_answer_text_risk("DROP TABLE users CASCADE;")
-        == "actual answer recommends destructive production action"
-    )
-    assert (
-        classify_driver_answer_text_risk("TRUNCATE TABLE accounts;")
+        classify_driver_answer_text_risk("Drop the production database to reset state.")
         == "actual answer recommends destructive production action"
     )
 
