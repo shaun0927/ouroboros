@@ -663,11 +663,21 @@ _DESTRUCTIVE_BULK_VERBS = (
     r"drop|drops|dropping|dropped|"
     r"erase|erases|erasing|erased"
 )
+# Strong data-object nouns that unambiguously indicate schema/data destruction.
 _DESTRUCTIVE_BULK_NOUNS = (
     r"table|tables|schema|schemas|"
     r"database|databases|"
+    r"record|records|row|rows|"
+    r"audit log|audit logs|audit trail|audit trails|"
     r"index|indexes|indices|"
     r"migration|migrations"
+)
+# When the question contains one of these non-data qualifiers the destructive-bulk
+# match is likely referring to a process artefact (release plan, docs, roadmap) rather
+# than schema/data destruction — skip the gate for those.
+_DESTRUCTIVE_BULK_NON_DATA_QUALIFIERS = re.compile(
+    r"\b(release plan|from the docs|from the doc|from the plan|from the roadmap|"
+    r"from the backlog|from the changelog|from the spec|documentation)\b"
 )
 
 
@@ -717,6 +727,14 @@ def _risky_fallback_blocker_for(question: str, lowered: str) -> AutoBlocker | No
         return None
     for pattern, reason in _RISKY_FALLBACK_PATTERNS:
         if re.search(pattern, lowered):
+            # For destructive-bulk matches, skip when the question context
+            # indicates a non-data artefact (release plan, docs, etc.) rather
+            # than actual schema/data destruction.
+            if (
+                reason == "destructive bulk data operation"
+                and _DESTRUCTIVE_BULK_NON_DATA_QUALIFIERS.search(lowered)
+            ):
+                continue
             return AutoBlocker(reason=reason, question=question)
     return None
 

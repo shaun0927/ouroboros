@@ -1095,3 +1095,46 @@ def test_auto_answerer_blocks_destructive_bulk_operations_in_either_order() -> N
         assert answer.source == AutoAnswerSource.BLOCKER, question
         assert answer.blocker is not None, question
         assert answer.blocker.reason == "destructive bulk data operation", question
+
+
+def test_auto_answerer_allows_release_plan_drop_question() -> None:
+    """Process-artefact drop questions must NOT trigger the destructive-bulk gate.
+
+    ``Which migration should we drop from the release plan?`` is asking about
+    removing a migration from a planning artefact, not about schema destruction.
+    The non-data qualifier ``release plan`` must exempt the match.
+
+    Ref: ouroboros-agent[bot] follow-up warning on #738 — ``answerer.py:666``.
+    """
+    answerer = AutoAnswerer()
+    allowed_questions = (
+        "Which migration should we drop from the release plan?",
+        "Which migrations should we drop from the release plan?",
+        "Should we drop this migration from the release plan?",
+    )
+
+    for question in allowed_questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a release pipeline"))
+        assert answer.blocker is None, question
+        assert answer.source != AutoAnswerSource.BLOCKER, question
+
+
+def test_auto_answerer_allows_docs_index_drop_question() -> None:
+    """Documentation-index drop questions must NOT trigger the destructive-bulk gate.
+
+    ``Which indexes should we drop from the docs?`` is asking about removing
+    entries from documentation, not about dropping database indexes.
+    The non-data qualifier ``from the docs`` must exempt the match.
+
+    Ref: ouroboros-agent[bot] follow-up warning on #738 — ``answerer.py:666``.
+    """
+    answerer = AutoAnswerer()
+    allowed_questions = (
+        "Which indexes should we drop from the docs?",
+        "Which index should we drop from the documentation?",
+    )
+
+    for question in allowed_questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a docs site"))
+        assert answer.blocker is None, question
+        assert answer.source != AutoAnswerSource.BLOCKER, question
