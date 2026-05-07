@@ -101,9 +101,9 @@ def test_run_auto_threads_runtime_through_all_four_handlers(
     runs ``_run_auto``, and asserts on the captured kwargs.
     """
     captured = _spy_handler_constructions(monkeypatch)
-    monkeypatch.setattr(AutoStore, "__init__", lambda self, root=None: None)
+    monkeypatch.setattr(AutoStore, "__init__", lambda _self, root=None: None)  # noqa: ARG005
     monkeypatch.setattr(AutoStore, "root", tmp_path, raising=False)
-    monkeypatch.setattr(AutoStore, "save", lambda self, state: tmp_path / "noop.json")
+    monkeypatch.setattr(AutoStore, "save", lambda _self, _state: tmp_path / "noop.json")
     # _run_auto resolves opencode_mode from get_opencode_mode() for the opencode
     # runtime; pin a stable value so the test is deterministic.
     monkeypatch.setattr(auto_cli, "get_opencode_mode", lambda: "subprocess")
