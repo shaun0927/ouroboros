@@ -390,13 +390,26 @@ paths, one per `source.type` that can produce a user trust record:
   whether the user proceeds to install anything from the selection
   prompt). Subsequent `install`s can address that `name` without
   re-fetching.
-- `local_path` sources are registered the first time the user runs
-  `ooo plugin install <name> --from <local-path>` against an absolute
-  path. The qualified form is therefore both a register-on-first-use
-  and an install in the same command; there is no separate
-  `register-local` verb in v0. The path is recorded as a known catalog
-  in the trust store; later `install <name>` calls can address it via
-  the default form if it is unambiguous.
+- `local_path` sources follow a strict **one-path = one-plugin**
+  model. The `--from <local-path>` argument MUST point at the
+  directory containing that plugin's `plugin.json` manifest, not at a
+  parent directory containing multiple plugins. Concretely:
+  - There is no "local catalog" abstraction. If a user has multiple
+    local plugins on disk, they install each one via its own
+    `ooo plugin install <name-N> --from <path-N>` invocation; there
+    is no path under which `ooo plugin install <name>` could enumerate
+    siblings.
+  - `source_identity` for any registered `local_path` install is the
+    absolute, symlink-resolved path of *that plugin's directory*. Two
+    different local plugins MUST live at two different absolute paths
+    and therefore have two different `source_identity` values.
+  - The qualified form is both register-on-first-use and install in
+    the same command; there is no separate `register-local` verb in
+    v0.
+  - Default-form `ooo plugin install <name>` resolves against the
+    set of registered `local_path` and `plugin_home` catalogs the
+    same way: exactly-one-match succeeds, ambiguity errors. There is
+    no special enumeration rule for `local_path`.
 
 `first_party` sources do not go through registration at all — they are
 populated at boot from the core release artifact, as documented under
@@ -541,8 +554,11 @@ Concrete obligations on the lifecycle commands:
   matching `(name, source.type, source_identity)` for any historical
   `artifact_digest` — explicitly **scoped to this plugin name**, never
   to other sibling plugins installed from the same `plugin_home` repo
-  URL or the same `local_path` directory. (A catalog repo can host
-  multiple plugins; removing one MUST NOT de-trust its siblings.)
+  URL. (A `plugin_home` catalog repo can host multiple plugins, each
+  with its own `name`; removing one MUST NOT de-trust its siblings.
+  `local_path` has no sibling case under the one-path-one-plugin model
+  — every local plugin already has a distinct `source_identity` —
+  but the deletion scope rule is uniform across source types.)
   After clearing those records, `remove` also removes the installed
   snapshot for the `plugin_home` plugin (its own subdirectory under
   `~/.ouroboros/plugins/<...>/`, not the parent catalog) or, for
@@ -578,13 +594,19 @@ Concrete obligations on the lifecycle commands:
     triple changes.
   - **Disable records** — keyed by `(name, source.type,
     source_identity)` (no `artifact_digest`) — express "the user has
-    disabled this plugin, regardless of which version is installed".
-    They survive every digest change, including upgrades and any
-    `remove + add` cycle that lands the same `(source.type,
-    source_identity)` again. (For first-party programs the disable
-    records live in `~/.ouroboros/first-party-overrides.json` keyed
-    by `name` only, per the Manifest Schema section above; the lock-
-    file holds zero first-party rows.)
+    disabled this plugin **while it remains installed**, regardless of
+    which version is installed". They survive every digest change for
+    a given install: in-place upgrades, `update` (when it lands), and
+    any change of `artifact_digest`. They do NOT survive `ooo plugin
+    remove`, because `remove` is the user's explicit reset of the
+    plugin's state (see below); a future fresh install of the same
+    name+source therefore starts with no disable signal carried over.
+    (For first-party programs the disable records live in
+    `~/.ouroboros/first-party-overrides.json` keyed by `name` only,
+    per the Manifest Schema section above; the lockfile holds zero
+    first-party rows. First-party "remove" is not a user-visible verb
+    — first-party programs leave only when a future release omits
+    them — so the `remove`-clears-disable rule does not apply there.)
 
   `disable` MUST therefore:
   - delete every trust record bound to the plugin's install subject
