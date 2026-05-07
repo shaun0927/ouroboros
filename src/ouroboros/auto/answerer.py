@@ -115,17 +115,7 @@ class AutoAnswerer:
             return self._verification_answer(question)
         if _is_feature_acceptance_question(lowered):
             return self._feature_acceptance_answer(question)
-        # Regulated-product questions take precedence over the generic IO and
-        # runtime branches so that prompts such as "What inputs should the GDPR
-        # export take?" or "Which runtime should the GDPR export use?" reach
-        # _product_behavior_answer() with the regulated noun preserved instead
-        # of getting a generic IO/runtime template that strips the
-        # regulated-feature semantics. The risky-fallback gate below also
-        # consults _is_safe_product_regulated_question(), so this keeps the
-        # router and the safe-allowlist on the same answer path.
-        if _is_safe_product_regulated_question(lowered):
-            answer = self._product_behavior_answer(question)
-        elif _is_actor_or_io_question(lowered):
+        if _is_actor_or_io_question(lowered):
             answer = self._io_actor_answer(question)
         elif _is_runtime_context_question(lowered):
             answer = self._runtime_answer(question, context)
@@ -133,6 +123,20 @@ class AutoAnswerer:
             answer = self._product_behavior_answer(question)
         else:
             answer = self._default_answer(question, ledger)
+
+        # When the chosen route produced a non-grounded fallback (ASSUMPTION,
+        # EXISTING_CONVENTION, CONSERVATIVE_DEFAULT) for a question that the
+        # safe-allowlist recognises as a regulated-product question, re-route
+        # to _product_behavior_answer() so the regulated-feature semantics
+        # (regulated noun, subject-specific constraints) are preserved in the
+        # ledger instead of being replaced by a generic IO/runtime/default
+        # template. Grounded answers (REPO_FACT etc.) are NOT in
+        # _RISKY_FALLBACK_SOURCES and so are left untouched — preserving the
+        # existing runtime/IO contract that "concrete repo fact wins".
+        if answer.source in _RISKY_FALLBACK_SOURCES and _is_safe_product_regulated_question(
+            lowered
+        ):
+            answer = self._product_behavior_answer(question)
 
         if answer.source in _RISKY_FALLBACK_SOURCES:
             risky_blocker = _risky_fallback_blocker_for(question, lowered)

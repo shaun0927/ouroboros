@@ -1254,21 +1254,19 @@ def test_auto_answerer_allows_product_questions_with_adjectival_compliance_verbs
 
 
 def test_auto_answerer_routes_regulated_product_questions_before_io_or_runtime() -> None:
-    """Regulated-product questions must route to ``_product_behavior_answer()``
-    even when the prompt also matches the IO or runtime classifiers.
+    """Regulated-product questions must reach ``_product_behavior_answer()`` —
+    but only when the IO/runtime branch would otherwise return a non-grounded
+    fallback.
 
-    The router previously checked ``_is_actor_or_io_question`` and
-    ``_is_runtime_context_question`` before ``_is_product_behavior_question``,
-    so prompts like "What inputs should the GDPR export take?" or "Which
-    runtime should the GDPR export use?" got a generic IO/runtime template
-    and then bypassed the risky-fallback blocker via
-    ``_is_safe_product_regulated_question``. The result was a generic answer
-    that silently dropped the regulated-feature semantics from the ledger.
-
-    With ``_is_safe_product_regulated_question`` now checked first, those
-    prompts route through ``_product_behavior_answer()``: the answer source is
-    a feature-specific entry (``constraints.behavior.*`` /
-    ``acceptance.behavior.*``) and the regulated noun is preserved.
+    The router still checks ``_is_actor_or_io_question`` and
+    ``_is_runtime_context_question`` first so grounded answers (REPO_FACT for
+    runtime, ASSUMPTION-but-confirmed for IO) keep priority. When that route
+    produces a *non-grounded* fallback (``ASSUMPTION``,
+    ``EXISTING_CONVENTION``, ``CONSERVATIVE_DEFAULT``) for a question that
+    ``_is_safe_product_regulated_question`` recognises, the answer is then
+    re-routed through ``_product_behavior_answer()`` so the regulated-feature
+    semantics (regulated noun, subject-specific constraints) are preserved
+    in the ledger instead of being replaced by a generic IO/runtime template.
 
     Ref: ouroboros-agent[bot] BLOCKING on #738 — ``answerer.py:837``.
     """
@@ -1304,6 +1302,48 @@ def test_auto_answerer_routes_regulated_product_questions_before_io_or_runtime()
         assert regulated_noun in combined.lower(), (
             f"Regulated noun {regulated_noun!r} not preserved for {question!r}"
         )
+
+
+def test_auto_answerer_preserves_repo_fact_for_regulated_runtime_question() -> None:
+    """The regulated-product reroute must NOT override grounded
+    ``REPO_FACT`` runtime answers.
+
+    ``Which runtime should the GDPR export use?`` is a regulated-product
+    question, but when the caller supplies a concrete ``runtime_context``
+    repo fact, the runtime contract requires the answer to carry that
+    grounded evidence (``AutoAnswerSource.REPO_FACT``,
+    ``LedgerSource.REPO_FACT``, runtime_context ledger entry with the
+    supplied evidence). The reroute is gated on
+    ``answer.source in _RISKY_FALLBACK_SOURCES``, and ``REPO_FACT`` is
+    not a risky-fallback source, so this case must remain unchanged.
+
+    Ref: ouroboros-agent[bot] BLOCKING on #738 — ``answerer.py:126``.
+    """
+    answerer = AutoAnswerer()
+    ledger = SeedDraftLedger.from_goal("Build a GDPR-compliant export pipeline")
+    context = AutoAnswerContext(
+        repo_facts={"runtime_context": "Python 3.12 project managed with uv and Typer CLI."},
+        evidence={"runtime_context": ("pyproject.toml", "src/ouroboros/cli/main.py")},
+    )
+
+    answer = answerer.answer("Which runtime should the GDPR export use?", ledger, context)
+
+    assert answer.source == AutoAnswerSource.REPO_FACT
+    assert "Python 3.12" in answer.text
+
+    update_sections = {section for section, _ in answer.ledger_updates}
+    assert "runtime_context" in update_sections, (
+        "Grounded runtime_context entry was dropped — regulated-product reroute "
+        "must not override REPO_FACT runtime answers."
+    )
+
+    runtime_entries = [
+        entry for section, entry in answer.ledger_updates if section == "runtime_context"
+    ]
+    assert runtime_entries, "Expected at least one runtime_context ledger entry"
+    assert runtime_entries[0].source == LedgerSource.REPO_FACT
+    assert runtime_entries[0].status == LedgerStatus.CONFIRMED
+    assert runtime_entries[0].evidence == ["pyproject.toml", "src/ouroboros/cli/main.py"]
 
 
 def test_auto_answerer_blocks_mixed_intent_regulated_questions() -> None:
