@@ -1303,3 +1303,74 @@ def test_auto_handler_meta_exposes_run_reconciliation_fields() -> None:
     assert meta["run_reconciliation_status"] == "unsupported"
     assert meta["run_reconciliation_source"] == "generic"
     assert meta["run_reconciled_at"] == "2026-05-07T00:00:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_auto_handler_reports_is_error_for_complete_phase_blocked_status(
+    monkeypatch,
+) -> None:
+    """A complete-phase result with a blocked status_override must surface as is_error.
+
+    Regression guard for the public `status` override introduced for the run
+    handoff reconciliation contract: a session may finish its lifecycle
+    (`phase="complete"`) yet still need to be reported as blocked (e.g. an
+    invalid reconcile against a terminal session, or a complete-but-unknown
+    handoff). The MCP surface must propagate that as an error to callers,
+    matching the CLI exit-code contract.
+    """
+
+    async def fake_run(self, arguments):  # noqa: ARG001
+        from ouroboros.auto.pipeline import AutoPipelineResult
+
+        return AutoPipelineResult(
+            status="blocked",
+            auto_session_id="auto_complete_blocked",
+            phase="complete",
+            grade="A",
+            blocker="invalid reconcile against complete session",
+        )
+
+    monkeypatch.setattr(AutoHandler, "_run", fake_run)
+
+    result = await AutoHandler().handle({"goal": "Build a CLI"})
+
+    assert result.is_ok
+    assert result.value.is_error is True
+    assert result.value.meta["status"] == "blocked"
+    assert result.value.meta["phase"] == "complete"
+
+
+def test_cli_auto_exits_non_zero_when_complete_phase_status_is_blocked(
+    monkeypatch, tmp_path
+) -> None:
+    """CLI must exit non-zero when an A-grade complete session is overridden to blocked."""
+    from unittest.mock import patch
+
+    from ouroboros.auto.pipeline import AutoPipelineResult
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.auto_session_id = "auto_complete_blocked"
+    store = AutoStore(tmp_path)
+    store.save(state)
+
+    async def fake_pipeline_run(self, state):  # noqa: ARG001
+        return AutoPipelineResult(
+            status="blocked",
+            auto_session_id="auto_complete_blocked",
+            phase="complete",
+            grade="A",
+            blocker="invalid reconcile against complete session",
+        )
+
+    with (
+        patch("ouroboros.cli.commands.auto.AutoStore") as store_cls,
+        patch("ouroboros.cli.commands.auto.AutoPipeline.run", new=fake_pipeline_run),
+    ):
+        store_cls.return_value = store
+        result = CliRunner().invoke(
+            app,
+            ["auto", "--resume", "auto_complete_blocked"],
+        )
+
+    assert result.exit_code == 1
+    assert "blocked" in result.output
