@@ -66,13 +66,33 @@ _ISSUE_URL_RE = re.compile(
 # way and the words are unambiguous in this domain.
 _MERGE_EN_RE = re.compile(r"\b(merge|merging|merged|squash|rebase\s+merge)\b", re.IGNORECASE)
 _MERGE_KO = ("머지", "병합")
-_CLOSE_EN_RE = re.compile(r"\b(close|closes|closing)\b", re.IGNORECASE)
+# ``close`` is a polysemous English word — "take a close look", "close call",
+# "close to", "close eye on" are NOT destructive intents. Exclude common
+# adjectival/non-imperative uses with a negative lookahead so the classifier
+# does not promote a benign goal to ``destructive_close``. (Bot-flagged in
+# #721 review.)
+_CLOSE_EN_RE = re.compile(
+    r"\b(?:close|closes|closing)\b"
+    r"(?!\s+(?:look|call|to|eye|enough|attention|range|reading|"
+    r"relationship|cousin|encounter|second|game|race|by|with))",
+    re.IGNORECASE,
+)
 _CLOSE_KO = ("닫", "종료")
 _REVIEW_EN_RE = re.compile(
     r"\b(review|reviewing|fix(?:es|ed|ing)?|address|resolve|improve)\b",
     re.IGNORECASE,
 )
 _REVIEW_KO = ("리뷰", "검토", "개선", "수정")
+
+# ``owner/repo`` style identifier. The classifier accepts this as a target
+# alongside full URLs so operational asks like ``fix the failing tests in
+# owner/repo`` are recognized without requiring a fully-qualified URL.
+# (Bot-flagged in #719 review.) Excludes common false positives such as
+# ``and/or`` by requiring at least one digit/dash/underscore in either
+# component.
+_REPO_PATH_RE = re.compile(
+    r"(?<![\w/])([A-Za-z0-9][\w\-.]*?[\w-]/[A-Za-z0-9][\w\-.]*[A-Za-z0-9_])(?![\w/])",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,16 +127,23 @@ def _has_korean_keyword(text: str, keywords: tuple[str, ...]) -> bool:
     return any(keyword in text for keyword in keywords)
 
 
-def _extract_targets(goal: str) -> tuple[tuple[str, ...], bool, bool, bool]:
-    """Return (urls, has_pr, has_pr_index, has_issue) preserving first-seen order.
+def _extract_targets(
+    goal: str,
+) -> tuple[tuple[str, ...], bool, bool, bool, bool]:
+    """Return (targets, has_pr, has_pr_index, has_issue, has_repo) in
+    first-seen order.
 
-    Implementation note: matches from all three URL classes are collected
-    together and sorted by their offset in the goal string. This guarantees
-    real first-appearance order across types — a goal like
-    ``see issues/9 then pull/1`` returns ``(issues/9, pull/1)``, not
-    ``(pull/1, issues/9)`` which an earlier per-class loop produced.
+    Implementation note: matches from every URL class plus the
+    ``owner/repo`` identifier pattern are collected together and sorted by
+    their offset in the goal string. This guarantees first-appearance order
+    across types and avoids double-counting — a ``/pull/1`` URL already
+    contains ``owner/repo`` substring, so the URL match shadows the bare
+    identifier when their start offsets line up.
     """
-    matches: list[tuple[int, str, str]] = []  # (start, kind, url)
+    matches: list[tuple[int, str, str]] = []  # (start, kind, value)
+
+    # URL classes first — their matches take precedence over a bare repo
+    # identifier embedded inside them.
     for kind, pattern in (
         ("pr", _PR_URL_RE),
         ("pr_index", _PR_INDEX_URL_RE),
@@ -124,22 +151,35 @@ def _extract_targets(goal: str) -> tuple[tuple[str, ...], bool, bool, bool]:
     ):
         for match in pattern.finditer(goal):
             matches.append((match.start(), kind, match.group(0)))
+
+    # Repo identifiers — only added when not already covered by a URL match
+    # at the same span. Use a coverage check on the spans we already have.
+    covered = [(start, start + len(val)) for start, _kind, val in matches]
+    for match in _REPO_PATH_RE.finditer(goal):
+        m_start, m_end = match.start(), match.end()
+        if any(start <= m_start and m_end <= end for start, end in covered):
+            continue
+        matches.append((m_start, "repo", match.group(1)))
+
     matches.sort(key=lambda triple: triple[0])
 
     seen: list[str] = []
     has_pr = False
     has_pr_index = False
     has_issue = False
-    for _start, kind, url in matches:
-        if url not in seen:
-            seen.append(url)
+    has_repo = False
+    for _start, kind, value in matches:
+        if value not in seen:
+            seen.append(value)
         if kind == "pr":
             has_pr = True
         elif kind == "pr_index":
             has_pr_index = True
-        else:
+        elif kind == "issue":
             has_issue = True
-    return tuple(seen), has_pr, has_pr_index, has_issue
+        else:
+            has_repo = True
+    return tuple(seen), has_pr, has_pr_index, has_issue, has_repo
 
 
 def classify_operational_task(goal: str) -> OperationalTaskClassification:
@@ -160,7 +200,7 @@ def classify_operational_task(goal: str) -> OperationalTaskClassification:
             reasons=("empty goal",),
         )
 
-    targets, has_pr, has_pr_index, has_issue = _extract_targets(goal)
+    targets, has_pr, has_pr_index, has_issue, has_repo = _extract_targets(goal)
 
     has_merge = bool(_MERGE_EN_RE.search(goal)) or _has_korean_keyword(goal, _MERGE_KO)
     has_close = bool(_CLOSE_EN_RE.search(goal)) or _has_korean_keyword(goal, _CLOSE_KO)
@@ -173,6 +213,8 @@ def classify_operational_task(goal: str) -> OperationalTaskClassification:
         reasons.append("pr_index_url")
     if has_issue:
         reasons.append("issue_url")
+    if has_repo:
+        reasons.append("repo_path")
     if has_merge:
         reasons.append("merge_keyword")
     if has_close:
@@ -180,7 +222,9 @@ def classify_operational_task(goal: str) -> OperationalTaskClassification:
     if has_review:
         reasons.append("review_keyword")
 
-    operational = (has_pr or has_pr_index or has_issue) or (has_merge or has_close or has_review)
+    operational = (has_pr or has_pr_index or has_issue or has_repo) or (
+        has_merge or has_close or has_review
+    )
     if not operational:
         return OperationalTaskClassification(
             kind=GENERAL,
@@ -218,11 +262,14 @@ def classify_operational_task(goal: str) -> OperationalTaskClassification:
         requires_confirmation = False
 
     # The operational path is only safe to skip the interview when the goal
-    # carries a concrete target URL. A destructive verb on its own ("merge it
-    # once CI is green", "close it") is not actionable — there is no object
-    # to operate on — so it falls back to interview-first regardless of risk
-    # label. (Bot-flagged in #719 review.)
-    has_target = has_pr or has_pr_index or has_issue
+    # carries a concrete target — either a full URL OR an ``owner/repo``
+    # identifier paired with a review/fix intent (so the pipeline knows
+    # what to act on). A destructive verb on its own ("merge it once CI is
+    # green", "close it") is not actionable; an ``owner/repo`` reference
+    # without any verb is also too thin. (Bot-flagged in #719 review.)
+    has_url_target = has_pr or has_pr_index or has_issue
+    has_actionable_repo = has_repo and (has_review or has_merge or has_close)
+    has_target = has_url_target or has_actionable_repo
     interview_required = not has_target
 
     return OperationalTaskClassification(

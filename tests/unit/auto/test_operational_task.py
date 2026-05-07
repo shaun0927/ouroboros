@@ -206,3 +206,76 @@ def test_targets_preserve_first_seen_order_across_types() -> None:
         "https://github.com/o/r/pull/1",
         "https://github.com/o/r/pulls",
     )
+
+
+# ---------------------------------------------------------------------------
+# Bot review follow-ups (#719 + #721, second round)
+# ---------------------------------------------------------------------------
+
+
+def test_repo_path_with_review_intent_is_operational_no_url_required() -> None:
+    """Module docstring lists ``fix the failing tests in <repo>`` as an
+    operational ask; an ``owner/repo`` identifier paired with a review/fix
+    intent must skip the interview rather than fall back to it.
+    (Bot-flagged in #719 review, second round.)"""
+    result = classify_operational_task("fix the failing tests in shaun0927/opensafari")
+    assert result.interview_required is False
+    assert result.direct_run_allowed is True
+    assert "shaun0927/opensafari" in result.targets
+    assert "repo_path" in result.reasons
+
+
+def test_repo_path_alone_without_intent_still_requires_interview() -> None:
+    """A bare ``owner/repo`` without any review/merge intent is too thin to
+    act on — keep interview-first."""
+    result = classify_operational_task("look at owner/repo sometime")
+    assert result.interview_required is True
+    assert result.direct_run_allowed is False
+
+
+def test_close_adjective_is_not_destructive_intent() -> None:
+    """``take a close look at <url>`` MUST NOT classify as destructive_close.
+    (Bot-flagged in #721 review.) The PR url alone keeps the kind PR_URL
+    and the side-effect risk stays low (review keyword present)."""
+    result = classify_operational_task("take a close look at https://github.com/o/r/pull/1")
+    assert result.kind == PR_URL
+    assert result.side_effect_risk != RISK_DESTRUCTIVE_CLOSE
+    assert result.requires_confirmation is False
+    assert "close_keyword" not in result.reasons
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "close look",
+        "close call",
+        "close to merging",
+        "close eye on this",
+        "close attention",
+        "close enough",
+    ],
+)
+def test_close_adjectival_phrases_do_not_trigger_destructive(phrase: str) -> None:
+    """A range of common ``close <word>`` adjectival/idiomatic uses must NOT
+    be promoted to ``destructive_close``."""
+    result = classify_operational_task(f"please {phrase} on https://github.com/o/r/pull/1")
+    assert result.side_effect_risk != RISK_DESTRUCTIVE_CLOSE
+    assert "close_keyword" not in result.reasons
+
+
+def test_close_imperative_still_marks_destructive_close() -> None:
+    """Make sure the negative-lookahead refinement does NOT lose the real
+    destructive-close case (``close <url>``)."""
+    result = classify_operational_task("close https://github.com/o/r/pull/2")
+    assert result.kind == MERGE_INTENT
+    assert result.side_effect_risk == RISK_DESTRUCTIVE_CLOSE
+    assert result.requires_confirmation is True
+
+
+def test_repo_path_does_not_double_count_when_inside_url() -> None:
+    """A PR URL contains an ``owner/repo`` substring; the targets list MUST
+    NOT include the bare identifier in addition to the URL."""
+    result = classify_operational_task("review https://github.com/owner/repo/pull/1")
+    assert result.targets == ("https://github.com/owner/repo/pull/1",)
+    # The repo identifier alone should not appear as an extra target.
+    assert "owner/repo" not in result.targets
