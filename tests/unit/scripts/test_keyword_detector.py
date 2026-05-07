@@ -161,3 +161,26 @@ class TestMainGate:
             main()
         out = capsys.readouterr().out
         assert "/ouroboros:setup" in out
+
+    @patch.object(_mod, "is_mcp_configured", return_value=False)
+    @patch.object(_mod, "is_first_time", return_value=False)
+    def test_ooo_auto_unconfigured_redirects_to_setup(self, _first, _mcp, capsys):
+        # ooo auto is not in SETUP_BYPASS_SKILLS, so an unconfigured environment
+        # must steer the user to /ouroboros:setup before running the skill.
+        with patch("sys.stdin") as mock_stdin:
+            mock_stdin.read.return_value = 'ooo auto "Add /healthz endpoint"'
+            main()
+        out = capsys.readouterr().out
+        assert "/ouroboros:setup" in out
+
+    @patch.object(_mod, "is_mcp_configured", return_value=True)
+    @patch.object(_mod, "is_first_time", return_value=False)
+    def test_ooo_auto_configured_routes_to_auto_skill(self, _first, _mcp, capsys):
+        # When MCP is configured, ooo auto must surface /ouroboros:auto rather
+        # than the setup redirect.
+        with patch("sys.stdin") as mock_stdin:
+            mock_stdin.read.return_value = 'ooo auto "Add /healthz endpoint"'
+            main()
+        out = capsys.readouterr().out
+        assert "/ouroboros:auto" in out
+        assert "/ouroboros:setup" not in out
