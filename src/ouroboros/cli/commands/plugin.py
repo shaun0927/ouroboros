@@ -29,7 +29,11 @@ from ouroboros.plugin.manifest import (
     PluginManifestError,
     load_manifest,
 )
-from ouroboros.plugin.trust_store import DEFAULT_TRUST_ROOT, TrustStore
+from ouroboros.plugin.trust_store import (
+    DEFAULT_TRUST_ROOT,
+    TrustRecord,
+    TrustStore,
+)
 
 app = typer.Typer(
     name="plugin",
@@ -65,14 +69,52 @@ def _load_with_friendly_error(target: str) -> PluginManifest:
         raise typer.Exit(code=1) from exc
 
 
+def _required_scopes(manifest: PluginManifest) -> list[str]:
+    return [p.scope for p in manifest.permissions if p.required]
+
+
+def _missing_required(
+    manifest: PluginManifest,
+    record: TrustRecord | None,
+) -> list[str]:
+    """Required scopes that are not currently satisfied.
+
+    Mirrors `ouroboros.plugin.firewall._missing_required` so the CLI's
+    trust-state report cannot drift away from the firewall's actual
+    invocation gate. A version-bumped trust file is treated as if no
+    scopes were granted (locked Q4: version bump invalidates trust).
+    """
+    required = _required_scopes(manifest)
+    if not required:
+        return []
+    if record is None:
+        return list(required)
+    if record.version != manifest.version:
+        return list(required)
+    return record.missing(required)
+
+
 def _trust_state_label(
     manifest: PluginManifest,
-    trust_store: TrustStore,
+    record: TrustRecord | None,
 ) -> str:
+    """Compute the trust state shown in `inspect`/`list`.
+
+    "trusted" must mean "the firewall will let this run without further
+    user action" — i.e. the trust file matches the manifest version AND
+    every required scope is granted. Anything short of that is reported
+    as "installed" so the CLI cannot lie to operators about whether
+    invocation will be blocked.
+    """
     if manifest.source.type == "first_party":
         return "first_party"
-    record = trust_store.read(manifest.name)
-    if record is not None and record.granted_scopes:
+    if record is None:
+        return "installed"
+    if record.version != manifest.version:
+        return "installed"
+    if _missing_required(manifest, record):
+        return "installed"
+    if record.granted_scopes:
         return "trusted"
     return "installed"
 
@@ -158,12 +200,19 @@ def inspect_command(
         console.print(f"  repository:     {entry.repository}")
     if entry.git_sha:
         console.print(f"  git_sha:        {entry.git_sha}")
-    console.print(f"  trust_state:    {_trust_state_label(manifest, trust)}")
+    console.print(f"  trust_state:    {_trust_state_label(manifest, record)}")
     console.print(
         f"  granted_scopes: {', '.join(granted) if granted else '(none)'}"
     )
-    required_perms = [p.scope for p in manifest.permissions if p.required]
-    missing = [s for s in required_perms if s not in granted]
+    if record is not None and record.version != manifest.version:
+        # Loud signal so users understand why "trust_state" flipped back
+        # to installed even though the trust file still lists grants.
+        console.print(
+            f"  trust_version:  recorded {record.version!r} but installed "
+            f"{manifest.version!r} — version bump invalidated trust; "
+            f"re-grant scopes via `ooo plugin trust`."
+        )
+    missing = _missing_required(manifest, record)
     if missing:
         console.print(
             f"  missing scopes: {', '.join(missing)} "
@@ -203,13 +252,31 @@ def list_command(
     for entry in sorted(entries.values(), key=lambda e: e.name):
         record = trust.read(entry.name)
         scopes = [g.scope for g in record.granted_scopes] if record else []
+        # Re-load the manifest so trust_state reflects the same gate the
+        # firewall enforces (required-scope set + version match), not
+        # just "did the user grant any scope at all".
+        manifest_path = (
+            Path(entry.plugin_home).expanduser() / "ouroboros.plugin.json"
+        )
+        try:
+            manifest = load_manifest(manifest_path)
+            trust_state = _trust_state_label(manifest, record)
+            missing = _missing_required(manifest, record)
+        except PluginManifestError:
+            # Lockfile entry exists but the on-disk manifest is broken.
+            # We cannot prove "trusted" without the manifest, so report
+            # "installed" — the safer default — and surface the missing
+            # required-scope set as unknown.
+            trust_state = "installed"
+            missing = []
         rows.append(
             {
                 "name": entry.name,
                 "version": entry.version,
                 "source_kind": entry.source_kind,
-                "trust_state": "trusted" if scopes else "installed",
+                "trust_state": trust_state,
                 "granted_scopes": scopes,
+                "missing_required_scopes": missing,
             }
         )
 
@@ -219,7 +286,7 @@ def list_command(
         return
 
     table = create_table(title="Installed UserLevel plugins")
-    for column in ("name", "version", "source", "trust", "scopes"):
+    for column in ("name", "version", "source", "trust", "scopes", "missing"):
         table.add_column(column)
     for row in rows:
         table.add_row(
@@ -228,6 +295,7 @@ def list_command(
             row["source_kind"],
             row["trust_state"],
             ", ".join(row["granted_scopes"]) or "(none)",
+            ", ".join(row["missing_required_scopes"]) or "(none)",
         )
     print_table(table)
 

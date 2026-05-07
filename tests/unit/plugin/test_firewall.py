@@ -3,15 +3,10 @@
 from __future__ import annotations
 
 import json
-import subprocess
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
-
-import pytest
+import subprocess
 
 from ouroboros.plugin.firewall import (
-    InvocationResult,
     invoke_plugin,
 )
 from ouroboros.plugin.manifest import load_manifest
@@ -19,7 +14,6 @@ from ouroboros.plugin.trust_store import TrustStore
 from ouroboros.plugin.userlevel_registry import (
     UserLevelProgramRegistry,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -379,3 +373,124 @@ def test_entrypoint_missing_emits_failed_127(tmp_path: Path) -> None:
     types = [e["event_type"] for e in events]
     assert types == ["plugin.invoked", "plugin.permission_used", "plugin.failed"]
     assert "not found" in result.message.lower()
+
+
+def test_stale_trust_version_blocks_invocation(tmp_path: Path) -> None:
+    """Regression: a trust file from an older version of the plugin must
+    not satisfy the firewall after the plugin is upgraded.
+
+    Locked Q00/ouroboros-plugins#9 Q4 makes a version bump invalidate
+    trust. The firewall enforces this by treating a TrustRecord whose
+    `version` differs from the manifest as if no scopes were granted —
+    otherwise an upgrade-without-reset would silently bypass the gate.
+    """
+    program = _make_program(tmp_path)  # manifest version = "0.1.0"
+    # Trust file claims grants for an older release of the same plugin.
+    stale_trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.0.9",  # stale: predates the installed manifest
+        scope="github:read",
+        granted_by="user:test",
+    )
+    runner_called = False
+
+    def _spy(*args, **kwargs):
+        nonlocal runner_called
+        runner_called = True
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=stale_trust,
+        event_sink=events.append,
+        correlation_id="corr-stale",
+        subprocess_runner=_spy,
+    )
+    # The firewall must refuse the call and never reach the runner.
+    assert result.status == "blocked"
+    assert runner_called is False, "stale trust must not let the entrypoint launch"
+    # Only `plugin.failed` (status=blocked); no `plugin.invoked` slipped through.
+    types = [e["event_type"] for e in events]
+    assert types == ["plugin.failed"]
+    assert events[0]["result"]["status"] == "blocked"
+    # Blocked-message must guide the user to re-trust the same scope.
+    assert "github:read" in result.message
+    # And the emitted event must NOT label the plugin "trusted" while it
+    # is in fact being blocked — that was the consistency bug.
+    assert events[0]["trust_state"] != "trusted"
+
+
+def test_entrypoint_permission_error_emits_failed_126(tmp_path: Path) -> None:
+    """Regression: PermissionError at subprocess launch must reach a
+    terminal `plugin.failed` event instead of escaping the firewall.
+
+    Previously only FileNotFoundError was caught, so an entrypoint that
+    existed but lacked the exec bit (or any other OSError surfaced at
+    spawn-time) crashed the caller with no audit trail. The firewall
+    now widens the catch to OSError and uses conventional shell exit
+    codes (126 = found-but-not-executable).
+    """
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+
+    def _runner(argv, *args, **kwargs):
+        raise PermissionError(13, "Permission denied", argv[0])
+
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-perm",
+        subprocess_runner=_runner,
+    )
+    assert result.status == "failed"
+    assert result.exit_code == 126
+    # invoked + permission_used + failed (does not raise).
+    types = [e["event_type"] for e in events]
+    assert types == ["plugin.invoked", "plugin.permission_used", "plugin.failed"]
+    assert events[-1]["result"]["status"] == "failed"
+    assert "not executable" in result.message
+
+
+def test_entrypoint_generic_oserror_emits_failed_126(tmp_path: Path) -> None:
+    """Regression: a generic OSError (e.g. ENOEXEC) must also land on a
+    `plugin.failed` event with a 126-class exit code rather than
+    propagating up and crashing the caller.
+    """
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+
+    def _runner(argv, *args, **kwargs):
+        raise OSError(8, "Exec format error", argv[0])
+
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-enoexec",
+        subprocess_runner=_runner,
+    )
+    assert result.status == "failed"
+    assert result.exit_code == 126
+    types = [e["event_type"] for e in events]
+    assert types == ["plugin.invoked", "plugin.permission_used", "plugin.failed"]
+    assert "failed to launch" in result.message

@@ -16,7 +16,6 @@ from ouroboros.cli.commands.plugin import app as plugin_app
 from ouroboros.plugin.lockfile import LockEntry, Lockfile
 from ouroboros.plugin.trust_store import TrustStore
 
-
 REFERENCE_MANIFEST: dict = {
     "schema_version": "0.1",
     "name": "github-pr-ops",
@@ -247,3 +246,176 @@ def test_no_args_shows_help(runner: CliRunner) -> None:
     assert "discover" in result.output
     assert "inspect" in result.output
     assert "list" in result.output
+
+
+# Manifest with TWO required scopes — used to exercise partial-trust
+# regression cases that the single-required-scope fixture cannot reach.
+TWO_REQUIRED_MANIFEST: dict = {
+    **REFERENCE_MANIFEST,
+    "permissions": [
+        {"scope": "github:read", "risk": "read_only", "required": True},
+        {
+            "scope": "github:pull_request:write",
+            "risk": "destructive",
+            "required": True,
+        },
+    ],
+}
+
+
+def test_inspect_partial_trust_reports_installed_not_trusted(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Regression for the trust_state misreport: when at least one of
+    the manifest's required scopes is missing, `inspect` must NOT call
+    the plugin "trusted" — the firewall would still block invocation.
+    """
+    plugin_home = tmp_path / "plugin_home"
+    _write_manifest(plugin_home, TWO_REQUIRED_MANIFEST)
+    lock_path = tmp_path / "plugins.lock"
+    trust_root = tmp_path / "trust"
+    Lockfile(lock_path).add(
+        LockEntry(
+            name="github-pr-ops",
+            version="0.1.0",
+            source_kind="local",
+            repository=None,
+            git_sha=None,
+            manifest_checksum="sha256:0",
+            installed_at="2026-05-08T00:00:00Z",
+            plugin_home=str(plugin_home),
+        )
+    )
+    # Grant only ONE of the two required scopes.
+    TrustStore(root=trust_root).grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+    )
+    result = runner.invoke(
+        plugin_app,
+        [
+            "inspect",
+            "github-pr-ops",
+            "--lockfile",
+            str(lock_path),
+            "--trust-root",
+            str(trust_root),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    # The display must say "installed" on the trust_state line. We assert
+    # the row text instead of substring matches to avoid the prior false
+    # positive where "trusted" leaked in via a different field.
+    assert "trust_state:    installed" in result.output
+    # The granted scope is still listed truthfully.
+    assert "github:read" in result.output
+    # And the missing required scope is surfaced.
+    assert "missing scopes" in result.output
+    assert "github:pull_request:write" in result.output
+
+
+def test_inspect_stale_version_reports_installed(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Regression: a trust file recorded for an older plugin version
+    must NOT make `inspect` say "trusted" — the firewall treats it as
+    invalidated, and the CLI must agree.
+    """
+    plugin_home = tmp_path / "plugin_home"
+    _write_manifest(plugin_home, REFERENCE_MANIFEST)  # version 0.1.0
+    lock_path = tmp_path / "plugins.lock"
+    trust_root = tmp_path / "trust"
+    Lockfile(lock_path).add(
+        LockEntry(
+            name="github-pr-ops",
+            version="0.1.0",
+            source_kind="local",
+            repository=None,
+            git_sha=None,
+            manifest_checksum="sha256:0",
+            installed_at="2026-05-08T00:00:00Z",
+            plugin_home=str(plugin_home),
+        )
+    )
+    # Trust granted against an older version of the same plugin.
+    TrustStore(root=trust_root).grant(
+        plugin="github-pr-ops",
+        version="0.0.9",
+        scope="github:read",
+        granted_by="user:test",
+    )
+    result = runner.invoke(
+        plugin_app,
+        [
+            "inspect",
+            "github-pr-ops",
+            "--lockfile",
+            str(lock_path),
+            "--trust-root",
+            str(trust_root),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "trust_state:    installed" in result.output
+    # User must see WHY trust flipped back to installed, otherwise the
+    # report is just contradictory. Rich may soft-wrap the line, so we
+    # assert the words separately.
+    assert "trust_version" in result.output
+    assert "version bump" in result.output
+    assert "invalidated trust" in result.output
+    assert "missing scopes" in result.output
+    assert "github:read" in result.output
+
+
+def test_list_json_partial_trust_reports_installed_not_trusted(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Regression: `list --json` must mirror the firewall's gate. With
+    at least one required scope missing, the row's trust_state cannot
+    say "trusted".
+    """
+    plugin_home = tmp_path / "ph"
+    _write_manifest(plugin_home, TWO_REQUIRED_MANIFEST)
+    lock_path = tmp_path / "plugins.lock"
+    trust_root = tmp_path / "trust"
+    Lockfile(lock_path).add(
+        LockEntry(
+            name="github-pr-ops",
+            version="0.1.0",
+            source_kind="local",
+            repository=None,
+            git_sha=None,
+            manifest_checksum="sha256:0",
+            installed_at="2026-05-08T00:00:00Z",
+            plugin_home=str(plugin_home),
+        )
+    )
+    TrustStore(root=trust_root).grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+    )
+    result = runner.invoke(
+        plugin_app,
+        [
+            "list",
+            "--json",
+            "--lockfile",
+            str(lock_path),
+            "--trust-root",
+            str(trust_root),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output.strip())
+    assert isinstance(data, list) and len(data) == 1
+    row = data[0]
+    assert row["name"] == "github-pr-ops"
+    assert row["trust_state"] == "installed", row
+    assert row["granted_scopes"] == ["github:read"]
+    # And the row exposes the firewall-blocking scopes as structured
+    # output so consumers can pipe to jq for an automated re-trust step.
+    assert row["missing_required_scopes"] == ["github:pull_request:write"]

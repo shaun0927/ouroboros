@@ -30,18 +30,17 @@ ledger writer (#737). Tests pass a list-appender for inspection.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 import hashlib
 import shlex
 import subprocess
-from collections.abc import Callable
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Iterable, Literal
+from typing import Literal
 
 from ouroboros.plugin.manifest import PluginManifest
 from ouroboros.plugin.trust_store import TrustRecord
 from ouroboros.plugin.userlevel_registry import RegisteredProgram
-
 
 SCHEMA_VERSION = "0.1"
 
@@ -60,7 +59,7 @@ class InvocationResult:
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _source_type_for_event(manifest: PluginManifest) -> str:
@@ -108,17 +107,6 @@ def _required_permissions(manifest: PluginManifest) -> list[str]:
     return [p.scope for p in manifest.permissions if p.required]
 
 
-def _trust_state_label(
-    manifest: PluginManifest,
-    trust_record: TrustRecord | None,
-) -> str:
-    if manifest.source.type == "first_party":
-        return "first_party"
-    if trust_record is not None and trust_record.granted_scopes:
-        return "trusted"
-    return "installed"
-
-
 def _missing_required(
     manifest: PluginManifest,
     trust_record: TrustRecord | None,
@@ -128,7 +116,36 @@ def _missing_required(
         return []
     if trust_record is None:
         return list(required)
+    # Per Q00/ouroboros-plugins#9 Q4: a version bump invalidates prior
+    # trust. If the trust file's recorded version no longer matches the
+    # manifest, treat the record as if no scopes were granted — the user
+    # must re-trust after upgrading. Without this guard a stale trust
+    # file from an older release would still satisfy the firewall and
+    # silently bypass the version-bump invalidation contract.
+    if trust_record.version != manifest.version:
+        return list(required)
     return trust_record.missing(required)
+
+
+def _trust_state_label(
+    manifest: PluginManifest,
+    trust_record: TrustRecord | None,
+) -> str:
+    if manifest.source.type == "first_party":
+        return "first_party"
+    if trust_record is None:
+        return "installed"
+    # Stale-version trust counts as not yet trusted (locked Q4).
+    if trust_record.version != manifest.version:
+        return "installed"
+    # Required scopes still missing → CLI/firewall will block invocation,
+    # so reporting "trusted" here would lie to operators. Only mark the
+    # plugin trusted once the required-scope set is fully satisfied.
+    if _missing_required(manifest, trust_record):
+        return "installed"
+    if trust_record.granted_scopes:
+        return "trusted"
+    return "installed"
 
 
 def _format_blocked_message(plugin_name: str, missing: list[str], risks: dict[str, str]) -> str:
@@ -292,8 +309,23 @@ def invoke_plugin(
             text=True,
             check=False,
         )
-    except FileNotFoundError as exc:
-        message = f"entrypoint not found: {cmd_argv[0]!r} ({exc})"
+    except OSError as exc:
+        # Broader than FileNotFoundError so the firewall always reaches
+        # a terminal `plugin.failed` event instead of crashing the
+        # caller. Covers PermissionError (exec bit not set) and other
+        # OSError subclasses such as `[Errno 8] Exec format error`
+        # (ENOEXEC) on platforms where subprocess surfaces them at
+        # spawn-time. Conventional shell exit codes: 127 for
+        # "command not found", 126 for "found but not executable".
+        if isinstance(exc, FileNotFoundError):
+            message = f"entrypoint not found: {cmd_argv[0]!r} ({exc})"
+            exit_code = 127
+        elif isinstance(exc, PermissionError):
+            message = f"entrypoint not executable: {cmd_argv[0]!r} ({exc})"
+            exit_code = 126
+        else:
+            message = f"entrypoint failed to launch: {cmd_argv[0]!r} ({exc})"
+            exit_code = 126
         _emit(
             _event_envelope(
                 event_type="plugin.failed",
@@ -308,7 +340,7 @@ def invoke_plugin(
         )
         return InvocationResult(
             status="failed",
-            exit_code=127,
+            exit_code=exit_code,
             message=message,
             events=tuple(emitted),
         )
