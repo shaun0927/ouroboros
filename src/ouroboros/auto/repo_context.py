@@ -26,6 +26,15 @@ _JS_LOCKFILES = {
     "yarn.lock": "Yarn",
 }
 
+# Ordered so that conflicting-manager output stays stable; first-listed manager
+# is the one mentioned first in the ambiguity message.
+_JVM_BUILD_FILES = (
+    ("pom.xml", "Maven"),
+    ("build.gradle", "Gradle"),
+    ("build.gradle.kts", "Gradle"),
+    ("settings.gradle", "Gradle"),
+)
+
 _SCRIPT_FACTS = {
     "build": "build_command",
     "dev": "dev_command",
@@ -178,16 +187,30 @@ def _add_go_facts(root: Path, facts: dict[str, str], evidence: dict[str, tuple[s
 
 
 def _add_jvm_facts(root: Path, facts: dict[str, str], evidence: dict[str, tuple[str, ...]]) -> None:
-    for filename, manager in (
-        ("pom.xml", "Maven"),
-        ("build.gradle", "Gradle"),
-        ("build.gradle.kts", "Gradle"),
-        ("settings.gradle", "Gradle"),
-    ):
-        if (root / filename).is_file():
-            _set_fact(facts, evidence, "project_kind", "JVM project", (filename,))
-            _set_fact(facts, evidence, "package_manager", manager, (filename,))
-            return
+    matched = [
+        (filename, manager) for filename, manager in _JVM_BUILD_FILES if (root / filename).is_file()
+    ]
+    if not matched:
+        return
+    filenames = tuple(filename for filename, _manager in matched)
+    managers = {manager for _filename, manager in matched}
+    _set_fact(facts, evidence, "project_kind", "JVM project", filenames)
+    if len(managers) == 1:
+        (manager,) = managers
+        _set_fact(facts, evidence, "package_manager", manager, filenames)
+    else:
+        ordered_managers = ", ".join(
+            sorted(
+                managers, key=lambda name: next(i for i, (_f, m) in enumerate(matched) if m == name)
+            )
+        )
+        _set_fact(
+            facts,
+            evidence,
+            "package_manager",
+            f"ambiguous JVM build manager ({ordered_managers})",
+            filenames,
+        )
 
 
 def _add_docker_task_facts(

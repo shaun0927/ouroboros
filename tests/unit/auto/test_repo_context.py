@@ -229,3 +229,35 @@ def test_repo_context_skips_go_facts_when_go_mod_unreadable(tmp_path, monkeypatc
     assert "project_kind" not in context.repo_facts
     assert "package_manager" not in context.repo_facts
     assert context.evidence == {}
+
+
+def test_repo_context_recognizes_maven_jvm_project(tmp_path) -> None:
+    (tmp_path / "pom.xml").write_text("<project></project>\n", encoding="utf-8")
+
+    context = repo_auto_answer_context(tmp_path)
+
+    assert context.repo_facts["project_kind"] == "JVM project"
+    assert context.repo_facts["package_manager"] == "Maven"
+    assert context.evidence["package_manager"] == ("pom.xml",)
+
+
+def test_repo_context_recognizes_gradle_jvm_project(tmp_path) -> None:
+    (tmp_path / "build.gradle.kts").write_text("plugins {}\n", encoding="utf-8")
+    (tmp_path / "settings.gradle").write_text("rootProject.name = 'demo'\n", encoding="utf-8")
+
+    context = repo_auto_answer_context(tmp_path)
+
+    assert context.repo_facts["project_kind"] == "JVM project"
+    assert context.repo_facts["package_manager"] == "Gradle"
+    assert context.evidence["package_manager"] == ("build.gradle.kts", "settings.gradle")
+
+
+def test_repo_context_surfaces_ambiguous_jvm_build_managers(tmp_path) -> None:
+    (tmp_path / "pom.xml").write_text("<project></project>\n", encoding="utf-8")
+    (tmp_path / "build.gradle").write_text("plugins {}\n", encoding="utf-8")
+
+    context = repo_auto_answer_context(tmp_path)
+
+    assert context.repo_facts["project_kind"] == "JVM project"
+    assert context.repo_facts["package_manager"] == "ambiguous JVM build manager (Maven, Gradle)"
+    assert context.evidence["package_manager"] == ("pom.xml", "build.gradle")
