@@ -96,16 +96,27 @@ SCAN_EXTRA_FILES: tuple[str, ...] = ("src/ouroboros/cli/commands/auto.py",)
 # bracket character classes such as ``[A-Z]`` outside that scope stay
 # case-sensitive, which is the exact discrimination needed for
 # PascalCase-composition forms.
+#
+# Every keyword anchors with a left ``(?<![A-Za-z])`` (negative
+# lookbehind: not preceded by a letter) so that benign identifiers
+# that merely *contain* the keyword as a substring --
+# ``collinearPoints``, ``bilinearForm``, ``nonlinear_adapter``,
+# ``mygithub_thing``, ``mypull_request_data`` -- do not false-positive.
+# We deliberately do *not* use ``\b`` here, because ``_`` is a word
+# character: ``\b`` would mean the underscore-adjacent forms
+# ``notify_slack_user``, ``FOO_GITHUB_BASE``, and ``linear_client``
+# stop matching, which loses the legitimate snake_case-composition
+# catches the bot review specifically asked us to keep.
 FORBIDDEN_PATTERNS: tuple[str, ...] = (
-    r"(?i:github)",
-    r"(?i:pull_request)",
+    r"(?<![A-Za-z])(?i:github)",
+    r"(?<![A-Za-z])(?i:pull_request)",
     # Compressed camelCase form ``PullRequestHandler`` / ``pullRequestId``
     # that the snake-case pattern above misses (the underscore prevents
     # the substrings from sharing).
-    r"(?i:pullrequest)",
-    r"(?i:/pulls?/)",
-    r"(?i:jira)",
-    r"(?i:slack)",
+    r"(?<![A-Za-z])(?i:pullrequest)",
+    r"(?i:/pulls?/)",  # `/` is already a non-word boundary
+    r"(?<![A-Za-z])(?i:jira)",
+    r"(?<![A-Za-z])(?i:slack)",
     # Linear (the issue tracker / SaaS) -- tightened to:
     #   * the URL form ``linear.app`` / ``linear.com``, or
     #   * a PascalCase composition (`LinearClient`, `LinearAdapter`,
@@ -115,11 +126,13 @@ FORBIDDEN_PATTERNS: tuple[str, ...] = (
     #   * an explicit integration suffix in snake_case
     #     (`linear_client`, `linear_webhook`, ...).
     # Plain "linear pipeline" / "linear scan" / "linear_time" do NOT
-    # match.
+    # match. Each sub-pattern carries its own ``(?<![A-Za-z])`` anchor
+    # so that embedded forms like ``collinearPoints``, ``bilinearForm``,
+    # ``nonlinearAdapter``, and ``nonlinear_adapter`` also do not match.
     (
-        r"(?i:linear\.(?:app|com))"
-        r"|(?i:linear)[A-Z]"
-        r"|(?i:linear_(?:client|adapter|api|webhook|sdk|service|integration|notifier|hook|bot|messenger|action))"
+        r"(?<![A-Za-z])(?i:linear\.(?:app|com))"
+        r"|(?<![A-Za-z])(?i:linear)[A-Z]"
+        r"|(?<![A-Za-z])(?i:linear_(?:client|adapter|api|webhook|sdk|service|integration|notifier|hook|bot|messenger|action))"
     ),
 )
 

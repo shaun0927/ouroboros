@@ -387,6 +387,19 @@ def test_allowlist_marker_split_string_and_comment(
         ("STEP_LINEAR = 1", "SCREAMING_SNAKE LINEAR_ ... only"),
         ("complexity = 'linear'", "string literal 'linear'"),
         ("# perform a linear search across the timeline", "linear search comment"),
+        # Embedded-substring guards: `linear` inside a larger word must
+        # not trigger the linear-the-SaaS pattern.
+        ("pts = collinearPoints()", "collinearPoints (linear inside)"),
+        ("form = bilinearForm()", "bilinearForm (linear inside)"),
+        ("ad = nonlinearAdapter()", "nonlinearAdapter (linear inside)"),
+        ("from x import nonlinear_adapter", "nonlinear_adapter (snake embed)"),
+        # Word-boundary guards for the other keywords too: embedded
+        # substrings should NOT trigger.
+        ("var = mygithub_thing", "mygithub_thing (embedded github)"),
+        ("data = myjira_data", "myjira_data (embedded jira)"),
+        ("data = myslack_data", "myslack_data (embedded slack)"),
+        ("data = mypull_request_data", "mypull_request_data (embedded pull_request)"),
+        ("var = mypullrequest_handler", "mypullrequest (embedded pullrequest)"),
     ],
 )
 def test_linear_word_is_not_a_false_positive(
