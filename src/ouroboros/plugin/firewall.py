@@ -333,7 +333,35 @@ def invoke_plugin(
 
     # 5. Run entrypoint out-of-process.
     cmd_template = manifest.entrypoint.command
-    cmd_template_parts = shlex.split(cmd_template)
+    try:
+        cmd_template_parts = shlex.split(cmd_template)
+    except ValueError as exc:
+        # Malformed shell quoting (e.g. an unterminated quote like
+        # `"unterminated`) passes the schema's `\\S` pattern check
+        # but explodes inside `shlex.split()`. The firewall's
+        # contract is to surface every launch failure as a terminal
+        # `plugin.failed` event with audit output, never to raise
+        # out of `invoke_plugin`. Treat malformed quoting the same
+        # way as the empty-command case below.
+        message = f"entrypoint command has malformed quoting: {exc}"
+        _emit(
+            _event_envelope(
+                event_type="plugin.failed",
+                manifest=manifest,
+                namespace=namespace,
+                command_name=command_name,
+                argv=argv,
+                trust_state=trust_state,
+                result={"status": "failed", "message": message},
+                provenance={"correlation_id": correlation_id},
+            )
+        )
+        return InvocationResult(
+            status="failed",
+            exit_code=126,
+            message=message,
+            events=tuple(emitted),
+        )
     if not cmd_template_parts:
         # The schema rejects an empty `command`, but a whitespace-only
         # value historically slipped through and `shlex.split(" ")` returns

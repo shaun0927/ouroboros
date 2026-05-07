@@ -44,10 +44,16 @@ except ImportError as exc:  # pragma: no cover
 SUPPORTED_SCHEMA_VERSIONS: tuple[str, ...] = ("0.1",)
 
 # Source types whose `path` must be a sandboxed relative slug — no absolute
-# paths and no parent-directory traversal. `local_path` resolves relative to
-# the manifest's directory; `plugin_home` resolves relative to the user's
-# plugin home. Either one becoming an absolute or escaping path is a real
-# trust-boundary leak, not a cosmetic issue.
+# paths and no parent-directory traversal. Both `local_path` and `plugin_home`
+# are resolved against the manifest file's parent directory at load time so
+# downstream consumers (firewall cwd, CLI inspect output) see a stable
+# absolute filesystem location regardless of the operator's current working
+# directory. `local_path` is the user-authored case; `plugin_home` is the
+# install-managed case, and the install/manager layer is responsible for
+# placing the manifest in the correct user plugin home before this loader
+# runs — at which point both source types share the same anchoring rule.
+# An absolute or escaping path here is a real trust-boundary leak, not a
+# cosmetic issue.
 _PATH_SANDBOXED_SOURCE_TYPES: frozenset[str] = frozenset({"local_path", "plugin_home"})
 
 

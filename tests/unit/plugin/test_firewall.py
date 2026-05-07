@@ -644,6 +644,88 @@ def test_missing_plugin_cwd_does_not_inherit_callers_cwd(tmp_path: Path) -> None
     assert types[-1] == "plugin.failed"
 
 
+def test_malformed_entrypoint_quoting_emits_failed_not_crash(tmp_path: Path) -> None:
+    """Regression: an `entrypoint.command` with malformed shell
+    quoting (unterminated quote) passes the schema's `\\S` pattern
+    check and `load_manifest()`, but `shlex.split()` raises
+    `ValueError` — so the firewall used to crash *after* having
+    emitted `plugin.invoked` and friends, leaving the audit log
+    partially written and bubbling the exception up to the caller.
+
+    The firewall contract is to convert every launch failure into
+    a terminal `plugin.failed` event with a clean audit trail and
+    a structured `InvocationResult`. This test asserts that the
+    `shlex.split` path now obeys that contract for malformed
+    quoting too.
+    """
+    from ouroboros.plugin.manifest import (
+        Capability,
+        CommandSpec,
+        Entrypoint,
+        PluginManifest,
+        SourceSpec,
+    )
+    from ouroboros.plugin.userlevel_registry import UserLevelProgramRegistry
+
+    # Build the manifest in-memory so the malformed `command` survives
+    # — the schema would reject a manifest with truly nonsense quoting,
+    # but a future schema relaxation, a fixture, or a mistake in the
+    # manager pipeline could still produce one. The firewall must
+    # tolerate it.
+    bad = PluginManifest(
+        schema_version="0.1",
+        name="github-pr-ops",
+        version="0.1.0",
+        source=SourceSpec(type="first_party"),  # no cwd anchoring needed
+        commands=(
+            CommandSpec(
+                namespace="github-pr",
+                name="review",
+                summary="x",
+                usage="x",
+                risk="read_only",
+                requires_confirmation=False,
+                arguments=(),
+            ),
+        ),
+        capabilities=(Capability(name="ledger", access="write", reason="x"),),
+        permissions=(),
+        entrypoint=Entrypoint(type="command", command='"unterminated'),
+    )
+    registry = UserLevelProgramRegistry()
+    program = registry.register(bad)
+
+    captured: dict = {"called": False}
+
+    def _runner(argv, *args, **kwargs):
+        # If the firewall reaches this, the shlex error wasn't caught
+        # and the runner is being invoked with garbage argv. Fail
+        # the test loudly rather than letting it pass silently.
+        captured["called"] = True
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=[],
+        trust_record=None,
+        event_sink=events.append,
+        correlation_id="corr-bad-quote",
+        subprocess_runner=_runner,
+    )
+
+    # The firewall short-circuited before launching the subprocess,
+    # so the runner must NOT have been called.
+    assert captured["called"] is False
+    # Terminal event sequence is invoked → permission_used* → failed.
+    types = [e["event_type"] for e in events]
+    assert types[-1] == "plugin.failed"
+    assert result.status == "failed"
+    assert result.exit_code == 126
+    assert "malformed" in result.message or "quoting" in result.message
+
+
 def test_whitespace_entrypoint_emits_failed_not_crash(tmp_path: Path) -> None:
     """Regression: an entrypoint command that's only whitespace passed
     `minLength: 1` schema validation in earlier revisions and made
