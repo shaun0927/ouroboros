@@ -54,7 +54,7 @@ async def _noop_run(self, state):  # noqa: ARG001
 
 @pytest.mark.parametrize(
     "runtime",
-    ["claude", "codex", "hermes", "gemini", "kiro"],
+    ["claude", "codex", "hermes", "gemini", "kiro", "copilot"],
 )
 def test_run_auto_keeps_authoring_in_process_for_non_opencode_runtimes(
     runtime: str,
