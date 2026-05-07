@@ -1549,87 +1549,47 @@ async def test_auto_pipeline_backfills_seed_origin_for_legacy_persisted_seed(tmp
     assert result.seed_origin == "auto_pipeline"
 
 
-@pytest.mark.asyncio
-async def test_auto_pipeline_does_not_overwrite_explicit_seed_origin_on_resume(tmp_path) -> None:
-    """An explicit non-default ``seed_origin`` must survive a resume."""
-    from ouroboros.auto.pipeline import AutoPipeline
-    from ouroboros.auto.state import (
-        AutoPhase,
-        AutoPipelineState,
-        AutoStore,
-        SeedOrigin,
-    )
-    from ouroboros.core.seed import (
-        EvaluationPrinciple,
-        ExitCondition,
-        OntologyField,
-        OntologySchema,
-        Seed,
-        SeedMetadata,
+def test_print_result_renders_seed_origin_line() -> None:
+    """The terminal CLI summary must surface the seed_origin field."""
+    import re
+
+    from ouroboros.auto.pipeline import AutoPipelineResult
+    from ouroboros.cli.commands.auto import _print_result
+    from ouroboros.cli.formatters import console
+
+    result = AutoPipelineResult(
+        status="complete",
+        auto_session_id="auto_x",
+        phase="complete",
+        grade="A",
+        seed_path="/tmp/seed.yaml",
+        seed_origin="auto_pipeline",
     )
 
-    seed = Seed(
-        goal="Build a CLI",
-        constraints=("Use existing project patterns",),
-        acceptance_criteria=("Command prints stable output",),
-        ontology_schema=OntologySchema(
-            name="CliTask",
-            description="CLI task ontology",
-            fields=(
-                OntologyField(
-                    name="command",
-                    field_type="string",
-                    description="Command",
-                ),
-            ),
-        ),
-        evaluation_principles=(
-            EvaluationPrinciple(
-                name="testability",
-                description="Observable behavior",
-                weight=1.0,
-            ),
-        ),
-        exit_conditions=(
-            ExitCondition(
-                name="verified",
-                description="Checks pass",
-                evaluation_criteria="All acceptance criteria pass",
-            ),
-        ),
-        metadata=SeedMetadata(ambiguity_score=0.12),
+    with console.capture() as capture:
+        _print_result(result, show_ledger=False)
+    output = re.sub(r"\x1b\[[0-9;]*m", "", capture.get())
+
+    assert "Seed origin: auto_pipeline" in output
+
+
+def test_mcp_format_result_renders_seed_origin_line() -> None:
+    """The MCP text body must surface the seed_origin field too."""
+    from ouroboros.auto.pipeline import AutoPipelineResult
+    from ouroboros.mcp.tools.auto_handler import _format_result
+
+    result = AutoPipelineResult(
+        status="complete",
+        auto_session_id="auto_x",
+        phase="complete",
+        grade="A",
+        seed_path="/tmp/seed.yaml",
+        seed_origin="auto_pipeline",
     )
 
-    class _StubInterviewDriver:
-        async def run(self, _state, _ledger):  # noqa: ARG002
-            raise AssertionError("interview driver must not run for this resume path")
+    text = _format_result(result)
 
-    async def fake_seed_generator(_session_id: str):  # noqa: ARG001
-        raise AssertionError("seed generator must not run when artifact is persisted")
-
-    store = AutoStore(tmp_path)
-    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
-    state.seed_artifact = seed.to_dict()
-    state.seed_path = str(tmp_path / "seed.yaml")
-    state.last_grade = "A"
-    state.seed_origin = SeedOrigin.EXTERNAL_AUTHORING
-    state.transition(AutoPhase.INTERVIEW, "primed")
-    state.transition(AutoPhase.SEED_GENERATION, "ready for seed generation")
-    state.transition(AutoPhase.REVIEW, "review queued")
-    state.transition(AutoPhase.COMPLETE, "skip-run requested")
-    store.save(state)
-
-    pipeline = AutoPipeline(
-        _StubInterviewDriver(),
-        fake_seed_generator,
-        store=store,
-        skip_run=True,
-    )
-
-    result = await pipeline.run(state)
-
-    assert state.seed_origin is SeedOrigin.EXTERNAL_AUTHORING
-    assert result.seed_origin == "external_authoring"
+    assert "Seed origin: auto_pipeline" in text
 
 
 @pytest.mark.asyncio

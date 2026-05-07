@@ -35,15 +35,20 @@ class AutoPolicy(StrEnum):
 class SeedOrigin(StrEnum):
     """Provenance of the persisted Seed for an auto session.
 
-    Distinguishes Seeds produced by the auto pipeline itself from those that
-    arrived through a side-channel authoring call (e.g. a manual
-    ``ouroboros_generate_seed`` invocation outside the pipeline). ``none``
-    means no Seed has been persisted yet for this session.
+    ``auto_pipeline`` marks a Seed produced by ``AutoPipeline.run()`` itself.
+    ``none`` means no Seed has been persisted yet for this session — the
+    schema default for legacy state files is also ``none`` and the pipeline
+    backfills ``auto_pipeline`` once on first post-PR resume of a session
+    that already had a ``seed_artifact`` or ``seed_path``.
+
+    Additional provenance values (e.g. for Seeds attached via a side-channel
+    ``ouroboros_generate_seed`` writer) are intentionally deferred until the
+    matching producer path lands; introducing an enum value without a writer
+    creates a public contract that the runtime cannot honor.
     """
 
     NONE = "none"
     AUTO_PIPELINE = "auto_pipeline"
-    EXTERNAL_AUTHORING = "external_authoring"
 
 
 DEFAULT_TIMEOUT_SECONDS_BY_PHASE: dict[str, int] = {
