@@ -682,12 +682,23 @@ _DESTRUCTIVE_BULK_NOUNS = (
     r"index|indexes|indices|"
     r"migration|migrations"
 )
-# When the question contains one of these non-data qualifiers the destructive-bulk
-# match is likely referring to a process artefact (release plan, docs, roadmap) rather
-# than schema/data destruction — skip the gate for those.
+# When the question contains one of these non-data qualifier phrases the
+# destructive-bulk match is referring to a process artefact (release plan, docs,
+# roadmap, …) rather than schema/data destruction — skip the gate for those.
+#
+# The qualifier is strictly phrase-scoped: bare tokens like ``documentation`` or
+# ``release plan`` anywhere in the sentence would let an actual destructive
+# operation slip past the gate (e.g. "Which tables should we drop according to
+# the documentation before redeploying?"). The exemption fires only when the
+# artefact is the explicit object of the drop/wipe — introduced by
+# ``from the …`` — which is the phrasing that signals "remove an entry from a
+# process artefact" rather than "delete data from a system". Authority/reference
+# phrasings (``according to the documentation``, ``per the release plan``,
+# ``in the documentation example``) do NOT count as a non-data qualifier.
 _DESTRUCTIVE_BULK_NON_DATA_QUALIFIERS = re.compile(
-    r"\b(release plan|from the docs|from the doc|from the plan|from the roadmap|"
-    r"from the backlog|from the changelog|from the spec|documentation)\b"
+    r"\bfrom\s+the\s+"
+    r"(?:release\s+plan|docs|doc|documentation|plan|roadmap|backlog|changelog|spec)"
+    r"\b"
 )
 
 

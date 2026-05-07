@@ -1140,6 +1140,38 @@ def test_auto_answerer_allows_docs_index_drop_question() -> None:
         assert answer.source != AutoAnswerSource.BLOCKER, question
 
 
+def test_auto_answerer_blocks_destructive_bulk_with_only_documentation_reference() -> None:
+    """Bare-token references to documentation must NOT bypass the destructive-bulk gate.
+
+    Earlier the non-data qualifier regex matched on bare tokens such as
+    ``documentation`` or ``release plan`` anywhere in the sentence. That allowed
+    real destructive operations to slip past the gate when the question merely
+    *referenced* documentation as an authority (e.g. "according to the
+    documentation") rather than describing the documentation as the artefact
+    being modified.
+
+    The qualifier is now phrase-scoped to ``from the …``/``in the …`` so the
+    exemption fires only when the artefact is the explicit object of the
+    drop/wipe.
+
+    Ref: ouroboros-agent[bot] BLOCKING on #738 — ``answerer.py:688``.
+    """
+    answerer = AutoAnswerer()
+    blocked_questions = (
+        "Which tables should we drop according to the documentation before redeploying?",
+        "Which tables should we drop per the release plan?",
+        "Should we wipe the user_data schema as described in the documentation example?",
+        "Per the documentation, which audit logs should we purge?",
+        "According to the docs, which tables should we drop?",
+    )
+
+    for question in blocked_questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build cleanup tooling"))
+        assert answer.source == AutoAnswerSource.BLOCKER, question
+        assert answer.blocker is not None, question
+        assert answer.blocker.reason == "destructive bulk data operation", question
+
+
 def test_auto_answerer_allows_product_semantics_questions_for_regulated_topics() -> None:
     """Product-feature questions that mention regulated nouns must NOT be blocked.
 
