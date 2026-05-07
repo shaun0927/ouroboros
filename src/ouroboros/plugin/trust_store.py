@@ -28,12 +28,35 @@ from datetime import UTC, datetime
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 
 TRUST_SCHEMA_VERSION = "0.1"
 
 # Default location root. Each plugin gets a subdirectory here.
 DEFAULT_TRUST_ROOT = Path.home() / ".ouroboros" / "plugins"
+
+# Plugin name pattern, matching plugin.schema.json `/name`. Enforced here at
+# the persistence-API boundary so that a plugin name with path separators or
+# `..` cannot escape the trust root via `<root>/<plugin>/trust.json` and
+# read/write/delete arbitrary files. Higher layers (manifest validation,
+# manager) also reject malformed names; this is defence in depth.
+_PLUGIN_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$")
+
+
+def _validate_plugin_name(plugin: str) -> None:
+    """Reject plugin identifiers that could escape the trust root.
+
+    Raises:
+        ValueError: if ``plugin`` does not match the locked manifest name
+            pattern (lowercase alphanumeric + dashes, 3-64 chars, no leading
+            or trailing dash, no path separators).
+    """
+    if not isinstance(plugin, str) or not _PLUGIN_NAME_RE.fullmatch(plugin):
+        raise ValueError(
+            f"invalid plugin name {plugin!r}: must match "
+            r"^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$"
+        )
 
 
 @dataclass(frozen=True)
@@ -71,6 +94,7 @@ class TrustStore:
 
     def read(self, plugin: str) -> TrustRecord | None:
         """Read the trust record for `plugin`, or None if not present."""
+        _validate_plugin_name(plugin)
         path = self._path(plugin)
         if not path.is_file():
             return None
@@ -155,6 +179,7 @@ class TrustStore:
         a per-plugin POSIX file lock so two concurrent `grant()` calls
         cannot drop one another's scope.
         """
+        _validate_plugin_name(plugin)
         when = when or datetime.now(tz=UTC)
         ts = when.strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -188,6 +213,7 @@ class TrustStore:
         per-plugin lock as `grant()` so a reset cannot race with a
         concurrent grant for the prior version.
         """
+        _validate_plugin_name(plugin)
         payload = {
             "schema_version": TRUST_SCHEMA_VERSION,
             "plugin": plugin,
@@ -208,6 +234,7 @@ class TrustStore:
         dropping grants. The lock makes the unlink/prune sequence
         observable as a single critical section.
         """
+        _validate_plugin_name(plugin)
         path = self._path(plugin)
         with self._grant_lock(plugin):
             if not path.is_file():
