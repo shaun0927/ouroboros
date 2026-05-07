@@ -1138,3 +1138,55 @@ def test_auto_answerer_allows_docs_index_drop_question() -> None:
         answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a docs site"))
         assert answer.blocker is None, question
         assert answer.source != AutoAnswerSource.BLOCKER, question
+
+
+def test_auto_answerer_allows_product_semantics_questions_for_regulated_topics() -> None:
+    """Product-feature questions that mention regulated nouns must NOT be blocked.
+
+    The risky-fallback gate targets compliance-policy decisions (how to store,
+    handle, retain, collect PII/HIPAA/GDPR data).  Questions that ask for
+    bounded product-behavior semantics — exporting a PII report, downloading a
+    GDPR export, showing SOX audit data — are asking for feature-level behavior
+    and must flow through to a generative product answer instead of BLOCKER.
+
+    Ref: ouroboros-agent[bot] BLOCKING on #738 — ``answerer.py:716``.
+    """
+    answerer = AutoAnswerer()
+    allowed_questions = (
+        "Should the app export PII reports?",
+        "Should users be able to download GDPR exports?",
+        "Should the dashboard display HIPAA audit data?",
+        "Should the system expose a SOX compliance report endpoint?",
+        "Should admins be able to view PII fields in the admin panel?",
+        "Should the app allow users to access their GDPR data?",
+    )
+
+    for question in allowed_questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a regulated data app"))
+        assert answer.blocker is None, question
+        assert answer.source != AutoAnswerSource.BLOCKER, question
+
+
+def test_auto_answerer_still_blocks_compliance_policy_regulated_questions() -> None:
+    """Compliance-policy questions must still be blocked after the product-semantics allowlist.
+
+    Ensure the new ``_is_safe_product_regulated_question`` allowlist does not
+    swallow questions that genuinely ask the auto pipeline to decide regulated-data
+    handling (storage, retention, collection, encryption policy).
+    """
+    answerer = AutoAnswerer()
+    blocked_questions = (
+        ("What PII should the system collect?", "regulated personal data handling"),
+        (
+            "Which fields are HIPAA regulated and how should we store them?",
+            "regulated data handling",
+        ),
+        ("How should the system handle GDPR data retention?", "regulated data handling"),
+        ("Which runtime should the HIPAA worker use?", "regulated data handling"),
+    )
+
+    for question, reason in blocked_questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a regulated data app"))
+        assert answer.source == AutoAnswerSource.BLOCKER, question
+        assert answer.blocker is not None, question
+        assert answer.blocker.reason == reason, question

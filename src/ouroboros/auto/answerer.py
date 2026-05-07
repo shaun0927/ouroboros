@@ -703,6 +703,66 @@ _RISKY_FALLBACK_PATTERNS: tuple[tuple[str, str], ...] = (
 )
 
 
+_REGULATED_NOUNS_RE = re.compile(
+    r"\b(pii|personally identifiable information|gdpr|hipaa|sox|pci[- ]?dss)\b"
+)
+_PRODUCT_SEMANTICS_REGULATED_VERBS_RE = re.compile(
+    r"\b(export|exports|exporting|exported|"
+    r"download|downloads|downloading|downloaded|"
+    r"render|renders|rendering|rendered|"
+    r"display|displays|displaying|displayed|"
+    r"show|shows|showing|shown|"
+    r"expose|exposes|exposing|exposed|"
+    r"support|supports|supporting|supported|"
+    r"enable|enables|enabling|enabled|"
+    r"allow|allows|allowing|allowed|"
+    r"view|views|viewing|viewed|"
+    r"access|accesses|accessing|accessed)\b"
+)
+_COMPLIANCE_POLICY_VERBS_RE = re.compile(
+    r"\b(store|stores|storing|stored|"
+    r"handle|handles|handling|handled|"
+    r"retain|retains|retaining|retained|"
+    r"collect|collects|collecting|collected|"
+    r"encrypt|encrypts|encrypting|encrypted|"
+    r"process|processes|processing|processed|"
+    r"transmit|transmits|transmitting|transmitted|"
+    r"disclose|discloses|disclosing|disclosed|"
+    r"share|shares|sharing|shared|"
+    r"manage|manages|managing|managed|"
+    r"govern|governs|governing|governed)\b"
+)
+# Broad product-question indicator: contains a modal/question word.  Looser than
+# ``_is_product_behavior_question`` so that phrasings like "Should users be able
+# to download …" are captured even when ``download`` is not in that helper's verb list.
+_PRODUCT_QUESTION_MODAL_RE = re.compile(r"\b(should|must|can|will|do|does|is|are)\b")
+
+
+def _is_safe_product_regulated_question(lowered: str) -> bool:
+    """Allow product-semantics questions that mention regulated-data nouns.
+
+    Auto mode must not decide compliance policy (how to store/handle/retain PII,
+    which fields are HIPAA-regulated, etc.), but it can answer bounded product
+    requirements questions such as "Should the app export PII reports?" or
+    "Should users be able to download GDPR exports?".  Those are asking for
+    feature-level behavior, not compliance-policy decisions.
+
+    Strategy: pass through when the question:
+      1. Mentions a regulated noun (PII/GDPR/HIPAA/SOX/PCI-DSS).
+      2. Contains a product-question modal (should/can/will/must/do/does/is/are).
+      3. Uses a product-semantics verb (export, download, display, show, view …).
+      4. Does NOT use a compliance-policy verb (store, handle, retain, collect,
+         encrypt, process …) that would require a regulated-data handling decision.
+    """
+    if not _REGULATED_NOUNS_RE.search(lowered):
+        return False
+    if not _PRODUCT_QUESTION_MODAL_RE.search(lowered):
+        return False
+    if _COMPLIANCE_POLICY_VERBS_RE.search(lowered):
+        return False
+    return bool(_PRODUCT_SEMANTICS_REGULATED_VERBS_RE.search(lowered))
+
+
 def _risky_fallback_blocker_for(question: str, lowered: str) -> AutoBlocker | None:
     """Return a blocker when a generative fallback answer would touch a high-risk topic.
 
@@ -720,10 +780,15 @@ def _risky_fallback_blocker_for(question: str, lowered: str) -> AutoBlocker | No
     allow/deny lists.
 
     Product-feature questions covered by existing safe-allowlists — such as
-    "should users be able to configure production credentials?" — are skipped
-    so the auto pipeline keeps answering them with feature semantics.
+    "should users be able to configure production credentials?" or
+    "should the app export PII reports?" — are skipped so the auto pipeline
+    keeps answering them with feature semantics.
     """
-    if _is_safe_product_branch_question(lowered) or _is_safe_product_sensitive_question(lowered):
+    if (
+        _is_safe_product_branch_question(lowered)
+        or _is_safe_product_sensitive_question(lowered)
+        or _is_safe_product_regulated_question(lowered)
+    ):
         return None
     for pattern, reason in _RISKY_FALLBACK_PATTERNS:
         if re.search(pattern, lowered):
