@@ -66,6 +66,15 @@ _INACTIVE_STATUSES: frozenset[LedgerStatus] = frozenset(
 )
 
 
+_RESOLVED_STATUSES: frozenset[LedgerStatus] = frozenset(
+    {
+        LedgerStatus.CONFIRMED,
+        LedgerStatus.DEFAULTED,
+        LedgerStatus.INFERRED,
+    }
+)
+
+
 @dataclass(slots=True)
 class LedgerEntry:
     """A single machine-readable fact in the Seed Draft Ledger."""
@@ -312,20 +321,21 @@ class SeedDraftLedger:
         """Return a bounded summary suitable for CLI/MCP output."""
         statuses = self.section_statuses()
         provenance = self._provenance_index()
-        evidence_backed = sorted(
-            {
-                section
-                for source in _EVIDENCE_BACKED_SOURCES
-                for section in provenance.get(source.value, ())
-            }
-        )
-        active_sections = {
-            name
-            for name, section in self.sections.items()
-            if any(entry.status not in _INACTIVE_STATUSES for entry in section.entries)
+        # Only resolved sections (CONFIRMED/DEFAULTED/INFERRED) are classified
+        # as evidence-backed or assumption-only.  Sections that are still
+        # MISSING/WEAK/CONFLICTING/BLOCKED at the aggregate level are reported
+        # via ``open_gaps`` instead, so a section with a defaulted entry plus a
+        # later blocker is not misrepresented as grounded.
+        resolved_sections = {
+            name for name, status in statuses.items() if status in _RESOLVED_STATUSES
         }
-        evidence_backed_set = set(evidence_backed)
-        assumption_only = sorted(active_sections - evidence_backed_set)
+        evidence_backed_set = {
+            section
+            for source in _EVIDENCE_BACKED_SOURCES
+            for section in provenance.get(source.value, ())
+        } & resolved_sections
+        evidence_backed = sorted(evidence_backed_set)
+        assumption_only = sorted(resolved_sections - evidence_backed_set)
         return {
             "complete_sections": [
                 name

@@ -1046,6 +1046,44 @@ def test_ledger_summary_excludes_inactive_entries_from_provenance() -> None:
     assert "constraints" not in summary["assumption_only_sections"]
 
 
+def test_ledger_summary_excludes_unresolved_sections_from_classification() -> None:
+    """Sections that are not aggregate-resolved must not surface as grounded.
+
+    A section can carry both a resolved entry (DEFAULTED) and a later blocker
+    (BLOCKED), in which case ``LedgerSection.status()`` returns ``BLOCKED``.
+    The provenance summary must respect the section's aggregate status so
+    consumers do not see ``constraints`` listed as "evidence-backed" or
+    "assumption-only" while the section is actually unresolved.
+    """
+    ledger = SeedDraftLedger.from_goal("Build hello CLI")
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="constraints.mvp",
+            value="Smallest safe MVP",
+            source=LedgerSource.CONSERVATIVE_DEFAULT,
+            confidence=0.8,
+            status=LedgerStatus.DEFAULTED,
+        ),
+    )
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="blocker.constraints",
+            value="needs human input",
+            source=LedgerSource.BLOCKER,
+            confidence=1.0,
+            status=LedgerStatus.BLOCKED,
+        ),
+    )
+
+    summary = ledger.summary()
+    assert ledger.sections["constraints"].status() == LedgerStatus.BLOCKED
+    assert "constraints" not in summary["evidence_backed_sections"]
+    assert "constraints" not in summary["assumption_only_sections"]
+    assert "constraints" in summary["open_gaps"]
+
+
 def test_ledger_summary_treats_non_goal_entries_as_evidence_backed() -> None:
     """Explicit non-goals are user-stated policy, not bare assumptions.
 
