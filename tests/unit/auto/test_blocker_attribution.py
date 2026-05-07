@@ -96,6 +96,124 @@ def test_authoring_backend_state_field_round_trips_through_persistence(tmp_path)
     assert reloaded.last_authoring_backend == "in-process (codex)"
 
 
+def test_transition_clears_authoring_backend_metadata() -> None:
+    """`transition()` resets `last_authoring_backend` so non-authoring blockers cannot inherit it.
+
+    Regression for #690 review feedback: after an authoring-side
+    timeout/blocker, a later `recover()` -> grade_gate /
+    seed_saver / run_starter failure must not look like it came from
+    the authoring backend. ``transition`` is the canonical seam where
+    the field is reset.
+    """
+    from ouroboros.auto.state import AutoPhase
+
+    state = _state("codex")
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.mark_blocked("interview.start timed out", tool_name="interview.start")
+    record_authoring_backend(state)
+    assert state.last_authoring_backend == "in-process (codex)"
+
+    # BLOCKED -> INTERVIEW recovery (the realistic post-blocker flow)
+    # must clear the field, so a later non-authoring blocker cannot
+    # inherit it.
+    state.recover(AutoPhase.INTERVIEW, "resuming after blocker")
+    assert state.last_authoring_backend is None
+
+
+def test_mark_blocked_after_transition_clears_then_record_repopulates() -> None:
+    """The reverse-order pattern (mark_blocked, then record) survives clearing."""
+    from ouroboros.auto.state import AutoPhase
+
+    state = _state("codex")
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.mark_blocked("interview.start timed out", tool_name="interview.start")
+    # mark_blocked already went through transition, so the previous
+    # value (if any) is cleared. The call sites in interview_driver /
+    # pipeline therefore call record_authoring_backend AFTER
+    # mark_blocked to repopulate the field.
+    assert state.last_authoring_backend is None
+    record_authoring_backend(state)
+    assert state.last_authoring_backend == "in-process (codex)"
+
+
+def test_non_authoring_mark_blocked_leaves_last_authoring_backend_unset() -> None:
+    """A non-authoring blocker (e.g. run_starter) must not inherit a stale value."""
+    from ouroboros.auto.state import AutoPhase
+
+    state = _state("codex")
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.mark_blocked("interview.start timed out", tool_name="interview.start")
+    record_authoring_backend(state)
+    assert state.last_authoring_backend == "in-process (codex)"
+
+    # Recover then transition into a non-authoring failure (e.g. run handoff).
+    state.recover(AutoPhase.INTERVIEW, "resume")
+    state.transition(AutoPhase.SEED_GENERATION, "regen")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.RUN, "running")
+    state.mark_blocked("run start failed: connection refused", tool_name="run_starter")
+    # Crucially: the run_starter site does NOT call
+    # record_authoring_backend, so the field must remain cleared.
+    assert state.last_authoring_backend is None
+
+
+def test_authoring_backend_propagates_to_pipeline_result(tmp_path) -> None:
+    """`AutoPipelineResult.last_authoring_backend` mirrors the recorded state field.
+
+    Drives the public ``_result`` constructor directly so the test
+    pins the response-boundary contract without booting the full
+    pipeline state machine.
+    """
+    from ouroboros.auto.ledger import SeedDraftLedger
+    from ouroboros.auto.pipeline import AutoPipeline
+    from ouroboros.auto.state import AutoPhase, AutoPipelineState
+
+    state = AutoPipelineState(goal="propagate", cwd=str(tmp_path))
+    state.runtime_backend = "codex"
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.mark_blocked("interview.start timed out", tool_name="interview.start")
+    record_authoring_backend(state)
+    assert state.last_authoring_backend == "in-process (codex)"
+
+    pipeline = AutoPipeline(
+        interview_driver=None,  # type: ignore[arg-type]
+        seed_generator=None,  # type: ignore[arg-type]
+    )
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    result = pipeline._result(state, ledger)
+
+    assert result.last_authoring_backend == "in-process (codex)"
+
+
+def test_authoring_backend_pipeline_result_is_none_for_non_authoring_blocker(tmp_path) -> None:
+    """When the failure is non-authoring, the result surface reports None.
+
+    Pins that ``AutoPipelineResult.last_authoring_backend`` faithfully
+    mirrors the cleared state field so consumers can rely on it as a
+    truthful "did the authoring backend cause this?" signal.
+    """
+    from ouroboros.auto.ledger import SeedDraftLedger
+    from ouroboros.auto.pipeline import AutoPipeline
+    from ouroboros.auto.state import AutoPhase, AutoPipelineState
+
+    state = AutoPipelineState(goal="propagate", cwd=str(tmp_path))
+    state.runtime_backend = "codex"
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "regen")
+    state.transition(AutoPhase.REVIEW, "review")
+    state.transition(AutoPhase.RUN, "running")
+    state.mark_blocked("run start failed: connection refused", tool_name="run_starter")
+
+    pipeline = AutoPipeline(
+        interview_driver=None,  # type: ignore[arg-type]
+        seed_generator=None,  # type: ignore[arg-type]
+    )
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    result = pipeline._result(state, ledger)
+
+    assert result.last_authoring_backend is None
+
+
 def test_legacy_persisted_state_loads_with_default_attribution(tmp_path) -> None:
     """Older auto sessions saved before this field exists must still load."""
     import json

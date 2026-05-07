@@ -272,6 +272,13 @@ class AutoPipelineState:
         self.updated_at = now
         self.last_progress_message = message
         self.last_error = error
+        # Authoring-backend attribution is scoped to the most recent
+        # authoring failure; reset on every transition so a later
+        # non-authoring blocker (grade_gate, seed_saver, run_starter)
+        # cannot inherit stale metadata. Authoring-side call sites must
+        # call ``record_authoring_backend(state)`` *after* mark_blocked
+        # / mark_failed to repopulate the field.
+        self.last_authoring_backend = None
 
     def mark_progress(self, message: str, *, tool_name: str | None = None) -> None:
         """Record non-terminal progress within the current phase."""
