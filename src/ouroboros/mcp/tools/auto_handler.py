@@ -398,12 +398,6 @@ def _format_result(result: AutoPipelineResult) -> str:
     if result.non_goals:
         lines.append("Non-goals:")
         lines.extend(f"- {item}" for item in result.non_goals)
-    if result.evidence_backed_sections or result.assumption_only_sections:
-        lines.append("Evidence:")
-        if result.evidence_backed_sections:
-            lines.append("  evidence-backed: " + ", ".join(result.evidence_backed_sections))
-        if result.assumption_only_sections:
-            lines.append("  assumption-only: " + ", ".join(result.assumption_only_sections))
     if result.blocker:
         lines.append(f"Blocker: {result.blocker}")
     lines.append(f"Resume: ooo auto --resume {result.auto_session_id}")
