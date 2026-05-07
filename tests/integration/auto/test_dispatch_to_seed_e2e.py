@@ -69,19 +69,11 @@ pytestmark = pytest.mark.integration
 # ---------------------------------------------------------------------------
 
 
-_FULLY_SPECIFIED_GOAL = (
-    "Build a CLI named hello that prints exactly hello followed by a newline "
-    "and exits 0. "
-    "Actor is a local developer running it from a unix shell. "
-    "Inputs are no CLI args and no stdin. "
-    "Outputs are stdout hello with a trailing newline, no stderr, exit code 0. "
-    "Runtime context is a temp scratch directory outside any repo, posix shell, no network. "
-    "Constraints are stdlib only and no real-project edits. "
-    "Non-goals are package publishing and network access. "
-    "Acceptance criteria are stdout equals hello newline and exit status is 0. "
-    "Verification plan is run the CLI and assert stdout, stderr, exit code. "
-    "Failure modes are missing newline or non-zero exit."
-)
+# The dispatch tests resolve the *real* packaged ``skills/`` directory shipped
+# from the repository root so a regression in ``skills/auto/SKILL.md`` is
+# caught here, rather than against a synthetic in-test copy.
+_PACKAGED_SKILLS_DIR = Path(__file__).resolve().parents[3] / "skills"
+_PACKAGED_AUTO_SKILL = _PACKAGED_SKILLS_DIR / "auto" / "SKILL.md"
 
 
 def _build_a_grade_seed(goal: str) -> Seed:
@@ -215,39 +207,6 @@ def _build_pipeline(
         skip_run=True,
     )
     return pipeline, store
-
-
-def _write_auto_skill(skills_dir: Path) -> None:
-    """Mirror the packaged ``auto`` SKILL.md frontmatter for the dispatch test.
-
-    Kept in sync with ``skills/auto/SKILL.md``: a regression in either side
-    (e.g. a renamed ``mcp_tool`` field, a dropped ``$goal``/``$CWD``
-    placeholder, or extra unmocked args) breaks the dispatch path tests.
-    """
-    skill_dir = skills_dir / "auto"
-    skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text(
-        "\n".join(
-            [
-                "---",
-                "name: auto",
-                'description: "Automatically converge from goal to A-grade Seed and execute it"',
-                "mcp_tool: ouroboros_auto",
-                "mcp_args:",
-                '  goal: "$goal"',
-                '  resume: "$resume"',
-                '  cwd: "$CWD"',
-                '  max_interview_rounds: "$max_interview_rounds"',
-                '  max_repair_rounds: "$max_repair_rounds"',
-                '  skip_run: "$skip_run"',
-                "---",
-                "",
-                "# auto",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -431,10 +390,15 @@ async def test_ooo_auto_dispatch_reaches_seed_via_runtime(
         (c) ``AutoHandler.handle`` / ``AutoHandler._run`` wiring,
     will surface here as either a router NotHandled/InvalidSkill, a missing
     runtime intercept, or a missing Seed in the final dispatch result.
+
+    The runtime is pointed at the *real* packaged ``skills/`` directory shipped
+    from the repository root so a rename/drop in any frontmatter key (e.g.
+    ``mcp_tool``, ``mcp_args.goal``, ``mcp_args.cwd``) regresses this test.
     """
-    skills_dir = tmp_path / "skills"
-    skills_dir.mkdir()
-    _write_auto_skill(skills_dir)
+    assert _PACKAGED_AUTO_SKILL.is_file(), (
+        f"packaged auto SKILL.md must exist at {_PACKAGED_AUTO_SKILL}"
+    )
+    skills_dir = _PACKAGED_SKILLS_DIR
 
     cwd = tmp_path / "project"
     cwd.mkdir()
@@ -487,18 +451,27 @@ async def test_ooo_auto_dispatch_reaches_seed_via_runtime(
     assert intercept.mcp_tool == "ouroboros_auto"
     assert intercept.command_prefix == "ooo auto"
 
+    # The packaged ``skills/auto/SKILL.md`` ships exactly six ``mcp_args``
+    # template keys. Lock the full set so a renamed/dropped key in the shipped
+    # frontmatter regresses this test.
     args = arguments_log[0]
+    assert set(args.keys()) == {
+        "goal",
+        "resume",
+        "cwd",
+        "max_interview_rounds",
+        "max_repair_rounds",
+        "skip_run",
+    }, (
+        f"packaged ooo auto frontmatter must declare exactly the documented "
+        f"mcp_args keys; got {sorted(args.keys())!r}"
+    )
     assert args["goal"] == user_goal, (
         f"resolve_skill_dispatch must inject the user goal via $goal; got {args!r}"
     )
     assert args["cwd"] == str(cwd), (
         f"resolve_skill_dispatch must inject runtime cwd via $CWD; got {args!r}"
     )
-    # The remaining frontmatter args are present even when unused by the user.
-    assert "resume" in args
-    assert "max_interview_rounds" in args
-    assert "max_repair_rounds" in args
-    assert "skip_run" in args
 
     # AutoHandler._run actually executed: stub AutoPipeline observed the state.
     assert captured.get("state_goal") == user_goal, (
@@ -594,29 +567,30 @@ async def test_sparse_goal_reaches_seed_via_interview_fill(tmp_path: Path) -> No
 
 # ---------------------------------------------------------------------------
 # Case 3 — unregistered MCP tool fails closed with the contract message and
-# does NOT create persisted auto session state.
+# never reaches the downstream handler/store construction path.
 # ---------------------------------------------------------------------------
 
 
 async def test_dispatch_fails_closed_when_ouroboros_auto_unregistered(tmp_path: Path) -> None:
     """``ooo auto`` must fail closed when the ``ouroboros_auto`` MCP tool is unregistered.
 
-    Asserts the actual user-visible contract phrasing (discovered in the
-    ``CodexCliRuntime._build_auto_dispatch_unavailable_message`` source —
-    Issue #637's literal phrase is reworded by the runtime as
-    "Cannot run ooo auto: required MCP tool ``ouroboros_auto`` is unavailable.")
-    and that no auto session state is persisted to the auto store on this
-    fail-closed path.
-    """
-    skills_dir = tmp_path / "skills"
-    skills_dir.mkdir()
-    _write_auto_skill(skills_dir)
+    The dispatch surface returns a fail-closed ``AgentMessage``; no
+    ``AutoHandler`` or ``AutoStore`` is constructed downstream because the
+    dispatcher raises before the runtime hands off to any handler. We therefore
+    rely on:
 
-    # Auto store rooted at tmp_path so we can assert no auto_*.json was written.
-    auto_store_root = tmp_path / "auto_store"
-    auto_store_root.mkdir()
-    pre_existing = sorted(auto_store_root.glob("auto_*.json"))
-    assert pre_existing == [], "tmp auto store must start empty for this test"
+    * ``dispatcher.assert_awaited_once()`` — proves the runtime did reach the
+      skill dispatch boundary, and
+    * ``mock_exec.assert_not_called()`` — proves no codex subprocess was
+      spawned and no real handler/store path was exercised,
+
+    plus the user-visible contract phrasing from
+    ``CodexCliRuntime._build_auto_dispatch_unavailable_message``.
+    """
+    assert _PACKAGED_AUTO_SKILL.is_file(), (
+        f"packaged auto SKILL.md must exist at {_PACKAGED_AUTO_SKILL}"
+    )
+    skills_dir = _PACKAGED_SKILLS_DIR
 
     cwd = tmp_path / "project"
     cwd.mkdir()
@@ -640,7 +614,8 @@ async def test_dispatch_fails_closed_when_ouroboros_auto_unregistered(tmp_path: 
         messages = [message async for message in runtime.execute_task("ooo auto Build a hello CLI")]
 
     dispatcher.assert_awaited_once()
-    # fail-closed unavailable dispatch must not spawn the codex subprocess
+    # fail-closed unavailable dispatch must not spawn the codex subprocess —
+    # this also proves no downstream handler/AutoStore path was constructed.
     mock_exec.assert_not_called()
 
     assert len(messages) == 1, f"expected single fail-closed result, got {messages!r}"
@@ -656,9 +631,3 @@ async def test_dispatch_fails_closed_when_ouroboros_auto_unregistered(tmp_path: 
     assert failure.data["error_type"] == "SkillDispatchUnavailable"
     assert failure.data["tool_name"] == "ouroboros_auto"
     assert failure.data["command_prefix"] == "ooo auto"
-
-    # No auto session state must be created on this fail-closed path.
-    after = sorted(auto_store_root.glob("auto_*.json"))
-    assert after == [], (
-        f"unavailable-dispatch must not create persisted auto session state; found: {after!r}"
-    )
