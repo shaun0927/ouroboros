@@ -8,10 +8,17 @@ CLI help text. All side-effects are confined to ``tmp_path``: no network, no
 real LLM, no real home directory.
 
 Cases:
-1. A pre-supplied goal that already names actor/inputs/outputs/runtime context
-   reaches the Seed phase and is persisted on disk.
-2. A sparse goal goes through interview-fill (canned answerer responses) and
-   still reaches the Seed phase.
+1. ``ooo auto "<fully specified goal>"`` enters through ``CodexCliRuntime.execute_task``,
+   traverses ``resolve_skill_dispatch`` (packaged ``auto`` SKILL.md frontmatter +
+   ``$goal``/``$CWD`` template normalization), reaches the real ``AutoHandler.handle``
+   /``AutoHandler._run``, and yields a Seed-bearing result. Real LLM/MCP/subprocess
+   side effects are stubbed *inside* the boundary (handlers + ``AutoPipeline``),
+   not around it. A regression in the packaged frontmatter, dispatch arg shape,
+   or ``AutoHandler`` wiring would make this test fail.
+2. A sparse goal still reaches Seed via the interview-fill ``AutoPipeline``. This
+   case stays a post-dispatch unit-style test (it does NOT enter via the runtime
+   boundary) — it covers the ledger-hydration + seed-generator wiring landed in
+   PR #652. Case 1 already covers the dispatch boundary itself.
 3. The deterministic ``ooo auto`` dispatch surface fails closed with the
    user-visible "ouroboros_auto is unavailable" contract message and does not
    create any persisted auto session state when the MCP tool is unregistered.
@@ -20,6 +27,7 @@ Cases:
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -36,7 +44,7 @@ from ouroboros.auto.ledger import (
     LedgerStatus,
     SeedDraftLedger,
 )
-from ouroboros.auto.pipeline import AutoPipeline
+from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
 from ouroboros.auto.seed_reviewer import SeedReview
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 from ouroboros.core.seed import (
@@ -47,7 +55,11 @@ from ouroboros.core.seed import (
     Seed,
     SeedMetadata,
 )
+from ouroboros.mcp.tools import auto_handler as auto_handler_module
+from ouroboros.mcp.tools.auto_handler import AutoHandler
+from ouroboros.orchestrator.adapter import AgentMessage
 from ouroboros.orchestrator.codex_cli_runtime import CodexCliRuntime
+from ouroboros.router import Resolved
 
 pytestmark = pytest.mark.integration
 
@@ -157,7 +169,7 @@ class _AGradeRepairer:
         return seed, review, []
 
 
-def _make_seed_saver(tmp_path: Path) -> tuple[callable, list[str]]:
+def _make_seed_saver(tmp_path: Path) -> tuple[Any, list[str]]:
     """Return a seed_saver and the list it appends each saved path to."""
     saved: list[str] = []
     seeds_dir = tmp_path / "seeds"
@@ -182,10 +194,10 @@ def _make_seed_saver(tmp_path: Path) -> tuple[callable, list[str]]:
 def _build_pipeline(
     *,
     tmp_path: Path,
-    interview_start,
-    interview_answer,
-    seed_generator,
-    seed_saver,
+    interview_start: Any,
+    interview_answer: Any,
+    seed_generator: Any,
+    seed_saver: Any,
 ) -> tuple[AutoPipeline, AutoStore]:
     store = AutoStore(tmp_path / "auto_store")
     driver = AutoInterviewDriver(
@@ -205,75 +217,315 @@ def _build_pipeline(
     return pipeline, store
 
 
+def _write_auto_skill(skills_dir: Path) -> None:
+    """Mirror the packaged ``auto`` SKILL.md frontmatter for the dispatch test.
+
+    Kept in sync with ``skills/auto/SKILL.md``: a regression in either side
+    (e.g. a renamed ``mcp_tool`` field, a dropped ``$goal``/``$CWD``
+    placeholder, or extra unmocked args) breaks the dispatch path tests.
+    """
+    skill_dir = skills_dir / "auto"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "\n".join(
+            [
+                "---",
+                "name: auto",
+                'description: "Automatically converge from goal to A-grade Seed and execute it"',
+                "mcp_tool: ouroboros_auto",
+                "mcp_args:",
+                '  goal: "$goal"',
+                '  resume: "$resume"',
+                '  cwd: "$CWD"',
+                '  max_interview_rounds: "$max_interview_rounds"',
+                '  max_repair_rounds: "$max_repair_rounds"',
+                '  skip_run: "$skip_run"',
+                "---",
+                "",
+                "# auto",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
 # ---------------------------------------------------------------------------
-# Case 1 — pre-supplied goal reaches Seed without needing the answerer.
+# Case 1 — ``ooo auto`` enters via CodexCliRuntime, traverses the real
+# router/AutoHandler dispatch boundary, and reaches the Seed phase.
 # ---------------------------------------------------------------------------
 
 
-async def test_pre_supplied_goal_reaches_seed_without_answerer(tmp_path: Path) -> None:
-    """A goal containing all required ledger sections must reach the Seed phase."""
+class _StubAuthoringHandler:
+    """Drop-in stub for ``InterviewHandler``/``GenerateSeedHandler``.
 
-    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
-        # The fully-specified goal hydrates the ledger; the interview backend is
-        # allowed to short-circuit and mark the interview complete on turn 1.
-        return InterviewTurn(
-            question="done",
-            session_id="interview_dispatch_e2e_1",
-            seed_ready=True,
-            completed=True,
+    AutoHandler builds these inside ``_run`` to drive the real authoring chain.
+    The test never lets execution reach ``AutoPipeline.run``, so the handlers
+    only need to satisfy attribute lookups and the matches-runtime check.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+        self.agent_runtime_backend = kwargs.get("agent_runtime_backend")
+        self.opencode_mode = kwargs.get("opencode_mode")
+        # Mirror the real handler attributes touched by the AutoHandler
+        # ``_handler_matches_runtime``/``_authoring_*_handler`` paths.
+        self.interview_engine = None
+        self.event_store = None
+        self.llm_adapter = None
+        self.llm_backend = kwargs.get("llm_backend")
+        self.data_dir = None
+        self.seed_generator = None
+
+
+class _StubExecuteSeedHandler(_StubAuthoringHandler):
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.mcp_manager = kwargs.get("mcp_manager")
+        self.mcp_tool_prefix = kwargs.get("mcp_tool_prefix", "")
+
+
+class _StubStartExecuteSeedHandler:
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+        self.execute_handler = kwargs.get("execute_handler")
+        self.event_store = kwargs.get("event_store")
+        self.job_manager = kwargs.get("job_manager")
+        self.agent_runtime_backend = kwargs.get("agent_runtime_backend")
+        self.opencode_mode = kwargs.get("opencode_mode")
+
+
+class _StubSeedRepairer:
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+
+
+def _install_auto_handler_stubs(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    tmp_path: Path,
+    seed_path: str,
+    captured: dict[str, Any],
+) -> None:
+    """Replace the in-process side-effecting deps inside ``AutoHandler._run``.
+
+    The real ``AutoHandler.handle`` and ``AutoHandler._run`` still execute. Only
+    the leaves that would otherwise spawn real LLM/MCP/subprocess work get
+    swapped out: authoring handlers, ``SeedRepairer``, and ``AutoPipeline``.
+    The stub ``AutoPipeline.run`` produces a complete A-grade ``AutoPipelineResult``
+    so the runtime sees a Seed-bearing dispatch result.
+    """
+
+    monkeypatch.setattr(auto_handler_module, "InterviewHandler", _StubAuthoringHandler)
+    monkeypatch.setattr(auto_handler_module, "GenerateSeedHandler", _StubAuthoringHandler)
+    monkeypatch.setattr(auto_handler_module, "ExecuteSeedHandler", _StubExecuteSeedHandler)
+    monkeypatch.setattr(
+        auto_handler_module, "StartExecuteSeedHandler", _StubStartExecuteSeedHandler
+    )
+    monkeypatch.setattr(auto_handler_module, "SeedRepairer", _StubSeedRepairer)
+
+    # Also replace the default AutoStore so no auto_*.json files leak into the
+    # real $HOME/.ouroboros/data path.
+    monkeypatch.setattr(
+        auto_handler_module, "AutoStore", lambda: AutoStore(tmp_path / "auto_store_default")
+    )
+
+    class _StubAutoPipeline:
+        def __init__(
+            self,
+            interview_driver: Any,
+            seed_generator: Any,
+            *,
+            run_starter: Any = None,
+            store: Any = None,
+            repairer: Any = None,
+            seed_saver: Any = None,
+            seed_loader: Any = None,
+            skip_run: bool = False,
+            **_: Any,
+        ) -> None:
+            captured["interview_driver"] = interview_driver
+            captured["seed_generator"] = seed_generator
+            captured["run_starter"] = run_starter
+            captured["store"] = store
+            captured["repairer"] = repairer
+            captured["seed_saver"] = seed_saver
+            captured["seed_loader"] = seed_loader
+            captured["skip_run"] = skip_run
+
+        async def run(self, state: AutoPipelineState) -> AutoPipelineResult:
+            captured["state_goal"] = state.goal
+            captured["state_cwd"] = state.cwd
+            captured["state_skip_run"] = state.skip_run
+            state.transition(AutoPhase.INTERVIEW, "stubbed interview start")
+            state.interview_session_id = "interview_dispatch_e2e_runtime"
+            state.transition(AutoPhase.SEED_GENERATION, "stubbed seed generation")
+            state.seed_id = "seed_dispatch_e2e_runtime"
+            state.seed_path = seed_path
+            state.transition(AutoPhase.REVIEW, "stubbed seed review")
+            state.last_grade = "A"
+            state.transition(AutoPhase.COMPLETE, "stubbed auto pipeline complete")
+            return AutoPipelineResult(
+                status="complete",
+                auto_session_id=state.auto_session_id,
+                phase="complete",
+                grade="A",
+                seed_path=seed_path,
+                interview_session_id=state.interview_session_id,
+                last_grade="A",
+            )
+
+    monkeypatch.setattr(auto_handler_module, "AutoPipeline", _StubAutoPipeline)
+
+
+def _make_auto_handler_dispatcher(
+    handler: AutoHandler,
+    *,
+    intercepts: list[Resolved],
+    arguments_log: list[dict[str, Any]],
+) -> Any:
+    """Build a ``skill_dispatcher`` that calls the real ``AutoHandler.handle``.
+
+    The runtime hands us the resolved skill metadata (after frontmatter +
+    template normalization). We forward the resolved ``mcp_args`` straight into
+    ``AutoHandler.handle`` and lift the resulting ``MCPToolResult`` back into a
+    final ``AgentMessage`` with the Seed metadata the runtime will yield.
+    """
+
+    async def dispatcher(intercept: Resolved, current_handle: Any) -> tuple[AgentMessage, ...]:
+        intercepts.append(intercept)
+        arguments = dict(intercept.mcp_args)
+        arguments_log.append(arguments)
+        result = await handler.handle(arguments)
+        if result.is_err:
+            raise result.error  # pragma: no cover - test should not hit this
+        tool_result = result.value
+        data: dict[str, Any] = {
+            "subtype": "error" if tool_result.is_error else "success",
+            "tool_name": intercept.mcp_tool,
+            "mcp_meta": dict(tool_result.meta),
+        }
+        data.update(dict(tool_result.meta))
+        return (
+            AgentMessage(
+                type="result",
+                content=tool_result.text_content or f"{intercept.mcp_tool} completed.",
+                data=data,
+                resume_handle=current_handle,
+            ),
         )
 
-    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
-        raise AssertionError("fully specified goal should not require any auto answerer turns")
+    return dispatcher
 
-    seed_generator_calls: list[str] = []
 
-    async def seed_generator(session_id: str) -> Seed:
-        seed_generator_calls.append(session_id)
-        return _build_a_grade_seed(_FULLY_SPECIFIED_GOAL)
+async def test_ooo_auto_dispatch_reaches_seed_via_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``ooo auto <goal>`` reaches the Seed phase through the real runtime/router/AutoHandler chain.
 
-    seed_saver, saved_paths = _make_seed_saver(tmp_path)
+    A regression in any of:
+        (a) the packaged ``skills/auto/SKILL.md`` frontmatter (mcp_tool name,
+            mcp_args keys, or template placeholders),
+        (b) ``resolve_skill_dispatch`` template normalization (``$goal`` /
+            ``$CWD``), or
+        (c) ``AutoHandler.handle`` / ``AutoHandler._run`` wiring,
+    will surface here as either a router NotHandled/InvalidSkill, a missing
+    runtime intercept, or a missing Seed in the final dispatch result.
+    """
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+    _write_auto_skill(skills_dir)
 
-    state = AutoPipelineState(goal=_FULLY_SPECIFIED_GOAL, cwd=str(tmp_path))
-    state.skip_run = True
+    cwd = tmp_path / "project"
+    cwd.mkdir()
 
-    pipeline, _store = _build_pipeline(
+    # Pre-write a Seed file path that the stubbed AutoPipeline will return.
+    seeds_dir = tmp_path / "seeds"
+    seeds_dir.mkdir()
+    seed_path = seeds_dir / "seed_dispatch_e2e_runtime.yaml"
+    seed_path.write_text("goal: stubbed\n", encoding="utf-8")
+
+    captured: dict[str, Any] = {}
+    _install_auto_handler_stubs(
+        monkeypatch,
         tmp_path=tmp_path,
-        interview_start=start,
-        interview_answer=answer,
-        seed_generator=seed_generator,
-        seed_saver=seed_saver,
+        seed_path=str(seed_path),
+        captured=captured,
     )
 
-    result = await pipeline.run(state)
+    # Real AutoHandler with a tmp-rooted AutoStore so it never touches $HOME.
+    auto_store = AutoStore(tmp_path / "auto_store")
+    handler = AutoHandler(store=auto_store)
 
-    assert state.phase in {AutoPhase.COMPLETE, AutoPhase.REVIEW}, (
-        f"pre-supplied goal should reach Seed/Complete, got {state.phase.value} "
-        f"(blocker: {state.last_error!r})"
+    intercepts: list[Resolved] = []
+    arguments_log: list[dict[str, Any]] = []
+    dispatcher = _make_auto_handler_dispatcher(
+        handler, intercepts=intercepts, arguments_log=arguments_log
     )
-    assert state.phase is not AutoPhase.BLOCKED
-    assert state.last_error is None, (
-        f"pre-supplied goal must not produce an auto error, got {state.last_error!r}"
+
+    runtime = CodexCliRuntime(
+        cli_path="codex",
+        cwd=str(cwd),
+        skills_dir=skills_dir,
+        skill_dispatcher=dispatcher,
     )
-    assert state.seed_id, "Seed id must be populated after Seed generation"
-    assert state.seed_path, "Seed path must be persisted after Seed generation"
 
-    seed_path = Path(state.seed_path)
-    assert seed_path.exists(), f"Seed file must exist on disk: {seed_path}"
-    assert seed_path.read_bytes(), "Seed file must be non-empty"
-    assert state.seed_path == saved_paths[0]
+    user_goal = "Build a hello CLI that prints hello and exits 0"
+    with patch(
+        "ouroboros.orchestrator.codex_cli_runtime.asyncio.create_subprocess_exec",
+    ) as mock_exec:
+        messages = [message async for message in runtime.execute_task(f"ooo auto {user_goal}")]
 
-    assert state.interview_session_id == "interview_dispatch_e2e_1"
-    assert seed_generator_calls == ["interview_dispatch_e2e_1"]
+    # The runtime must NOT spawn the codex subprocess for a successful skill
+    # intercept — the dispatch path is the only thing under test.
+    mock_exec.assert_not_called()
 
-    assert result.status == "complete"
-    assert result.grade == "A"
-    assert result.seed_path == state.seed_path
-    assert result.blocker is None
+    # Frontmatter resolution + ``$goal``/``$CWD`` template substitution.
+    assert intercepts, "skill_dispatcher must be awaited for ooo auto"
+    intercept = intercepts[0]
+    assert intercept.skill_name == "auto"
+    assert intercept.mcp_tool == "ouroboros_auto"
+    assert intercept.command_prefix == "ooo auto"
+
+    args = arguments_log[0]
+    assert args["goal"] == user_goal, (
+        f"resolve_skill_dispatch must inject the user goal via $goal; got {args!r}"
+    )
+    assert args["cwd"] == str(cwd), (
+        f"resolve_skill_dispatch must inject runtime cwd via $CWD; got {args!r}"
+    )
+    # The remaining frontmatter args are present even when unused by the user.
+    assert "resume" in args
+    assert "max_interview_rounds" in args
+    assert "max_repair_rounds" in args
+    assert "skip_run" in args
+
+    # AutoHandler._run actually executed: stub AutoPipeline observed the state.
+    assert captured.get("state_goal") == user_goal, (
+        "AutoHandler._run must construct AutoPipelineState with the dispatched goal"
+    )
+    assert captured.get("state_cwd") == str(cwd), (
+        "AutoHandler._run must thread runtime cwd into AutoPipelineState"
+    )
+
+    # The runtime must yield a single final result message carrying the Seed.
+    assert len(messages) == 1, f"expected single dispatch result, got {messages!r}"
+    final = messages[0]
+    assert final.is_final
+    assert not final.is_error, f"dispatch should succeed, got {final!r}"
+    assert final.data.get("tool_name") == "ouroboros_auto"
+    assert final.data.get("seed_path") == str(seed_path)
+    assert final.data.get("status") == "complete"
+    assert final.data.get("grade") == "A"
+    assert final.data.get("phase") == "complete"
 
 
 # ---------------------------------------------------------------------------
 # Case 2 — sparse goal still reaches Seed via the interview/answerer path.
+#
+# This is intentionally a post-dispatch unit-style test: it constructs
+# ``AutoPipeline`` directly to exercise the ledger-hydration + interview-fill
+# wiring landed in PR #652. The dispatch boundary itself is covered by Case 1.
 # ---------------------------------------------------------------------------
 
 
@@ -344,30 +596,6 @@ async def test_sparse_goal_reaches_seed_via_interview_fill(tmp_path: Path) -> No
 # Case 3 — unregistered MCP tool fails closed with the contract message and
 # does NOT create persisted auto session state.
 # ---------------------------------------------------------------------------
-
-
-def _write_auto_skill(skills_dir: Path) -> None:
-    """Mirror the packaged ``auto`` SKILL.md frontmatter for the dispatch test."""
-    skill_dir = skills_dir / "auto"
-    skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text(
-        "\n".join(
-            [
-                "---",
-                "name: auto",
-                'description: "Automatically converge from goal to A-grade Seed and execute it"',
-                "mcp_tool: ouroboros_auto",
-                "mcp_args:",
-                '  goal: "$goal"',
-                '  cwd: "$CWD"',
-                "---",
-                "",
-                "# auto",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
 
 
 async def test_dispatch_fails_closed_when_ouroboros_auto_unregistered(tmp_path: Path) -> None:
