@@ -52,6 +52,7 @@ never persist (tests, schema validators) keep the import surface small.
 from __future__ import annotations
 
 from collections.abc import Callable
+import copy
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 import uuid
@@ -114,7 +115,14 @@ def wrap_plugin_event(
         "aggregate_type": PLUGIN_AGGREGATE_TYPE,
         "aggregate_id": aggregate_id or correlation_id,
         "event_type": audit_event["event_type"],
-        "payload": dict(audit_event),  # shallow copy so callers can't mutate stored form
+        # Deep-copy because audit events carry nested dicts (`plugin`,
+        # `command`, `result`, `provenance`). A shallow `dict(...)` would
+        # share those nested objects, so a caller mutating
+        # `audit_event["plugin"]["name"]` after wrap would silently
+        # corrupt the persisted envelope payload. The dicts are tiny
+        # by contract (no raw stdout/stderr — see firewall bounds), so
+        # the deep copy is cheap and removes the foot-gun entirely.
+        "payload": copy.deepcopy(audit_event),
         "timestamp": audit_event["occurred_at"],
     }
 
@@ -255,7 +263,10 @@ def envelope_to_base_event(
         timestamp=timestamp,
         aggregate_type=PLUGIN_AGGREGATE_TYPE,
         aggregate_id=envelope["aggregate_id"],
-        data=dict(payload),  # frozen BaseEvent: defensive shallow copy
+        # Deep copy for the same reason as `wrap_plugin_event`: payload
+        # has nested dicts (plugin/command/result), and we don't want
+        # later mutation of the envelope to leak into the BaseEvent.
+        data=copy.deepcopy(payload),
     )
 
 

@@ -74,6 +74,14 @@ _STATE_FILE_ERRORS: tuple[type[Exception], ...] = (
     ValueError,  # schema_version mismatch raised by Lockfile.read / TrustStore.read
     tomllib.TOMLDecodeError,
     json.JSONDecodeError,
+    # Lockfile.read / TrustStore.read build dataclasses via unchecked
+    # `raw["field"]` lookups. A parseable-but-structurally-corrupt state
+    # file (missing `name`, wrong field type) therefore raises KeyError
+    # / TypeError. These commands are diagnostic — every shape of
+    # damaged state file must surface a friendly error, not a raw
+    # traceback.
+    KeyError,
+    TypeError,
     OSError,  # permission/IO errors on the state files themselves
 )
 
@@ -233,6 +241,16 @@ def inspect_command(
             f"{exc.json_pointer or '(root)'}: {exc.args[0] if exc.args else ''}"
         )
         raise typer.Exit(code=1) from exc
+    except OSError as exc:
+        # `load_manifest` opens the file directly; an unreadable manifest
+        # (wrong permissions, broken symlink, vanished plugin_home) bubbles
+        # raw OSError. Diagnostic CLI must convert that to a clean message.
+        print_error(
+            f"installed manifest is unreadable: {manifest_path}: {exc}\n"
+            f"  Check the plugin_home path and permissions; "
+            f"`ooo plugin inspect` cannot proceed without it."
+        )
+        raise typer.Exit(code=1) from exc
 
     record = _read_trust_or_exit(trust, name)
     granted = [g.scope for g in record.granted_scopes] if record else []
@@ -305,11 +323,12 @@ def list_command(
             manifest = load_manifest(manifest_path)
             trust_state = _trust_state_label(manifest, record)
             missing = _missing_required(manifest, record)
-        except PluginManifestError:
-            # Lockfile entry exists but the on-disk manifest is broken.
-            # We cannot prove "trusted" without the manifest, so report
-            # "installed" — the safer default — and surface the missing
-            # required-scope set as unknown.
+        except (PluginManifestError, OSError):
+            # Lockfile entry exists but the on-disk manifest is broken
+            # (schema-invalid) or unreadable (vanished/permissions). We
+            # cannot prove "trusted" without it, so report "installed"
+            # — the safer default — and surface the missing
+            # required-scope set as unknown rather than crash the row.
             trust_state = "installed"
             missing = []
         rows.append(

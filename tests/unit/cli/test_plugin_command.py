@@ -367,6 +367,99 @@ def test_inspect_stale_version_reports_installed(runner: CliRunner, tmp_path: Pa
     assert "github:read" in result.output
 
 
+def test_inspect_structurally_corrupt_lockfile_reports_friendly_error(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Regression: a parseable-but-structurally-corrupt plugins.lock
+    (TOML parses fine, but the [[plugin]] block is missing a required
+    field like `name`) used to raise a raw KeyError straight through
+    `inspect`/`list`. The friendly-error guard now covers KeyError /
+    TypeError too, since `Lockfile.read()` builds dataclasses via
+    unchecked `raw[...]` lookups."""
+    lock_path = tmp_path / "plugins.lock"
+    # Valid TOML, valid schema_version, but plugin block has no `name`.
+    lock_path.write_text(
+        'schema_version = "0.1"\n\n'
+        "[[plugin]]\n"
+        'version = "0.1.0"\n'
+        'source_kind = "local"\n'
+        'manifest_checksum = "sha256:0"\n'
+        'installed_at = "2026-05-08T00:00:00Z"\n'
+        'plugin_home = "/tmp/x"\n'
+    )
+    result = runner.invoke(
+        plugin_app,
+        [
+            "inspect",
+            "github-pr-ops",
+            "--lockfile",
+            str(lock_path),
+            "--trust-root",
+            str(tmp_path / "trust"),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "lockfile is unreadable" in result.output
+    assert "Traceback" not in result.output
+    # KeyError prints as the missing key — the operator needs to see it.
+    assert "name" in result.output
+
+
+def test_inspect_unreadable_manifest_reports_friendly_error(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Regression: an unreadable on-disk manifest (e.g. wrong perms)
+    used to escape `load_manifest` as a raw `OSError`. `inspect` is
+    a diagnostic command and must surface a clean message instead of
+    a raw traceback. We exercise the path with chmod 000.
+    """
+    import os
+    import sys
+
+    if sys.platform.startswith("win"):
+        pytest.skip("POSIX permission semantics required")
+    if os.geteuid() == 0:
+        pytest.skip("root bypasses POSIX file permissions")
+
+    plugin_home = tmp_path / "plugin_home"
+    manifest_path = _write_manifest(plugin_home, REFERENCE_MANIFEST)
+    lock_path = tmp_path / "plugins.lock"
+    Lockfile(lock_path).add(
+        LockEntry(
+            name="github-pr-ops",
+            version="0.1.0",
+            source_kind="local",
+            repository=None,
+            git_sha=None,
+            manifest_checksum="sha256:0",
+            installed_at="2026-05-08T00:00:00Z",
+            plugin_home=str(plugin_home),
+        )
+    )
+    # Strip read perms so `path.open()` raises PermissionError without
+    # tripping the `is_file()` early-exit check inside `load_manifest`.
+    original_mode = manifest_path.stat().st_mode
+    manifest_path.chmod(0o000)
+    try:
+        result = runner.invoke(
+            plugin_app,
+            [
+                "inspect",
+                "github-pr-ops",
+                "--lockfile",
+                str(lock_path),
+                "--trust-root",
+                str(tmp_path / "trust"),
+            ],
+        )
+    finally:
+        manifest_path.chmod(original_mode)
+
+    assert result.exit_code == 1
+    assert "manifest is unreadable" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_inspect_malformed_lockfile_reports_friendly_error(
     runner: CliRunner, tmp_path: Path
 ) -> None:

@@ -259,6 +259,47 @@ def test_envelope_to_base_event_round_trips_through_real_event_store() -> None:
     assert rebuilt_audit["command"] == audit["command"]
 
 
+def test_wrap_payload_is_deep_copied() -> None:
+    """Regression: `wrap_plugin_event` must defend against later
+    mutation of nested dicts in the original audit event.
+
+    The previous shallow `dict(audit_event)` copy still shared
+    `audit_event["plugin"]`, `["command"]`, `["result"]`, etc., so a
+    caller mutating `audit_event["plugin"]["name"]` after wrap would
+    silently corrupt the persisted envelope. The contract says the
+    payload is owned by the envelope; deep-copy enforces it.
+    """
+    audit = _audit_event("plugin.invoked")
+    env = wrap_plugin_event(audit, correlation_id="x")
+
+    # Mutate the nested dicts on the SOURCE — none of these mutations
+    # may leak into the envelope payload.
+    audit["plugin"]["name"] = "tampered"
+    audit["command"]["argv"].append("evil")
+    audit["result"]["status"] = "tampered"
+
+    assert env["payload"]["plugin"]["name"] == "github-pr-ops"
+    assert env["payload"]["command"]["argv"] == ["url"]
+    assert env["payload"]["result"]["status"] == "success"
+
+
+def test_envelope_to_base_event_data_is_deep_copied() -> None:
+    """Regression: `BaseEvent.data` must not alias the envelope's
+    payload. Mutating the envelope after the bridge runs must not
+    reach into the persisted event."""
+    from ouroboros.plugin.ledger_adapter import envelope_to_base_event
+
+    audit = _audit_event("plugin.completed")
+    env = wrap_plugin_event(audit, correlation_id="x")
+    base = envelope_to_base_event(env)
+
+    env["payload"]["plugin"]["name"] = "tampered"
+    env["payload"]["command"]["argv"].append("evil")
+
+    assert base.data["plugin"]["name"] == "github-pr-ops"
+    assert base.data["command"]["argv"] == ["url"]
+
+
 def test_envelope_to_base_event_preserves_audit_timestamp() -> None:
     """Regression: the bridge MUST carry the original audit time over to
     `BaseEvent.timestamp`. Without that, persisted rows inherit
