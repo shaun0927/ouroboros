@@ -717,7 +717,7 @@ _DESTRUCTIVE_BULK_NOUNS = (
 # suppress the destructive-bulk gate.
 _DESTRUCTIVE_BULK_NON_DATA_QUALIFIERS = re.compile(
     r"\b(?:from|in)\s+the\s+"
-    r"(?:release\s+plan|docs|doc|documentation|plan|roadmap|backlog|changelog|spec)"
+    r"(?:release\s+plan|docs|documentation|roadmap|backlog|changelog|spec)"
     r"\b"
 )
 
@@ -788,6 +788,24 @@ _COMPLIANCE_POLICY_ACTIVE_VERBS_RE = re.compile(
 # ``_is_product_behavior_question`` so that phrasings like "Should users be able
 # to download …" are captured even when ``download`` is not in that helper's verb list.
 _PRODUCT_QUESTION_MODAL_RE = re.compile(r"\b(should|must|can|will|do|does|is|are)\b")
+# Reject "compliance-scope-as-feature-flag" phrasings: a wide-coverage
+# enablement verb (``support`` / ``enable`` / ``allow``) directly followed by a
+# bare regulated noun with no further qualifying noun. Such prompts
+# ("Should the platform support HIPAA?", "Should the app enable GDPR?",
+# "Should the system allow PII?") are treating the entire compliance regime as
+# a feature toggle, which is a regulated-policy decision rather than a bounded
+# product-behavior question. The trailing negative lookahead ``(?!\s+[a-z])``
+# fires when the regulated noun is the last lexical token of the clause; if any
+# qualifying noun follows ("HIPAA audit logs", "GDPR consent banners", "PII
+# redaction in exports", "GDPR data") the question describes a concrete
+# product feature and is not rejected here.
+_BARE_COMPLIANCE_SCOPE_RE = re.compile(
+    r"\b(?:support|supports|supporting|supported|"
+    r"enable|enables|enabling|enabled|"
+    r"allow|allows|allowing|allowed)\s+"
+    r"(?:pii|personally identifiable information|gdpr|hipaa|sox|pci[- ]?dss)\b"
+    r"(?!\s+[a-z])"
+)
 
 
 def _is_safe_product_regulated_question(lowered: str) -> bool:
@@ -808,7 +826,12 @@ def _is_safe_product_regulated_question(lowered: str) -> bool:
          when mixed with product-semantics verbs (``How should the system store
          and display HIPAA files?``, ``Should we retain and export PII
          records?``),
-      4. uses a product-semantics verb (export, download, display, show, view …).
+      4. is NOT a bare compliance-scope-as-feature-flag phrasing
+         (``support|enable|allow`` + bare regulated noun with no qualifying
+         feature noun). ``Should the platform support HIPAA?`` and
+         ``Should the app enable GDPR?`` are framing the entire regulatory
+         regime as a toggle, which remains a compliance-policy decision.
+      5. uses a product-semantics verb (export, download, display, show, view …).
 
     Past-participle compliance forms (``stored``, ``encrypted``, ``retained``,
     …) are intentionally NOT in the negative list: in product-behavior questions
@@ -823,6 +846,8 @@ def _is_safe_product_regulated_question(lowered: str) -> bool:
     if not _PRODUCT_QUESTION_MODAL_RE.search(lowered):
         return False
     if _COMPLIANCE_POLICY_ACTIVE_VERBS_RE.search(lowered):
+        return False
+    if _BARE_COMPLIANCE_SCOPE_RE.search(lowered):
         return False
     return bool(_PRODUCT_SEMANTICS_REGULATED_VERBS_RE.search(lowered))
 
