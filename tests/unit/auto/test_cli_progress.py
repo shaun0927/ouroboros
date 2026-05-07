@@ -68,9 +68,7 @@ def test_cli_auto_help_documents_quiet_flag() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cli_run_auto_threads_progress_callback_to_pipeline(
-    monkeypatch, tmp_path
-) -> None:
+async def test_cli_run_auto_threads_progress_callback_to_pipeline(monkeypatch, tmp_path) -> None:
     captured: dict[str, object] = {}
 
     class FakePipeline:

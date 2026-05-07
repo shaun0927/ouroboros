@@ -394,9 +394,12 @@ def _make_progress_renderer(*, quiet: bool) -> AutoProgressCallback | None:
             label = f"repair round {event.round}"
         else:
             label = event.phase
-        # Escape the leading "[" so Rich treats "[auto]" as literal text
-        # rather than as a markup style name.
-        print_info(rf"\[auto] {label} — {event.message}")
+        # A live trace should be a single dim line per event, not a Rich
+        # panel — using ``console.print`` keeps the stream lightweight so
+        # consumers can grep on the ``[auto]`` prefix without parsing
+        # panel chrome. The leading ``[`` is escaped so Rich treats
+        # ``[auto]`` as literal text rather than as a markup style name.
+        console.print(rf"[dim]\[auto][/] {label} — {event.message}")
 
     return render
 
