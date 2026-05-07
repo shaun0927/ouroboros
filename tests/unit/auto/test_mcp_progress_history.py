@@ -288,6 +288,60 @@ async def test_auto_handler_meta_includes_terminal_phase_event_persisted_during_
 
 
 @pytest.mark.asyncio
+async def test_auto_pipeline_resume_does_not_synthesize_spurious_phase_event(
+    tmp_path,
+) -> None:
+    """A no-op re-run on a complete session must not append a duplicate phase event.
+
+    Regression for the bot finding that ``run()`` previously reset the
+    dedup trackers to ``None`` and then immediately fired ``_save()``,
+    so every resume — including resumes of already-terminal sessions —
+    appended a fresh ``phase`` event for the unchanged current phase.
+    That would cause the persisted history surfaced through MCP to grow
+    on every retry and to report fake transitions for state that did
+    not actually change.
+    """
+    from ouroboros.auto.pipeline import AutoPipeline
+    from ouroboros.auto.state import AutoPhase, AutoPipelineState
+
+    class _StubInterviewDriver:
+        async def run(self, _state, _ledger):  # noqa: ARG002
+            raise AssertionError("interview driver must not run on a complete session")
+
+    async def fake_seed_generator(_session_id):  # noqa: ARG001
+        raise AssertionError("seed generator must not run on a complete session")
+
+    store = AutoStore(tmp_path / "store")
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.transition(AutoPhase.INTERVIEW, "primed")
+    state.transition(AutoPhase.SEED_GENERATION, "ready")
+    state.transition(AutoPhase.REVIEW, "review queued")
+    state.transition(AutoPhase.COMPLETE, "skip-run requested")
+    # Pre-existing persisted history from the run that produced this
+    # session — the ``complete`` event already lives here.
+    state.progress_events = [
+        {
+            "phase": "complete",
+            "kind": "phase",
+            "message": "skip-run requested",
+            "round": None,
+            "grade": None,
+            "timestamp": "2026-05-01T12:30:00+00:00",
+        }
+    ]
+    store.save(state)
+
+    pipeline = AutoPipeline(_StubInterviewDriver(), fake_seed_generator, store=store)
+    await pipeline.run(state)
+
+    persisted = store.load(state.auto_session_id)
+    # No new entries: a no-op resume of an already-complete session
+    # produced no fresh transition.
+    assert len(persisted.progress_events) == 1
+    assert persisted.progress_events[0]["phase"] == "complete"
+
+
+@pytest.mark.asyncio
 async def test_auto_handler_meta_tolerates_unloadable_state_after_run(
     monkeypatch, tmp_path
 ) -> None:

@@ -89,9 +89,16 @@ class AutoPipeline:
 
     async def run(self, state: AutoPipelineState) -> AutoPipelineResult:
         """Run a bounded auto pipeline using injected side-effecting dependencies."""
-        self._last_emitted_phase = None
-        self._last_emitted_grade = None
-        self._last_emitted_repair = None
+        # Seed the dedup trackers from the *current* persisted state so a
+        # no-op resume — including a resume of an already-terminal session
+        # — does not synthesize a fake phase/grade/repair event for state
+        # that has not actually changed since the last run. The persisted
+        # progress_events log is the public history surfaced through MCP
+        # metadata, so spurious entries here would mislead clients that
+        # replay or render this history.
+        self._last_emitted_phase = state.phase.value
+        self._last_emitted_grade = state.last_grade
+        self._last_emitted_repair = state.repair_round if state.repair_round > 0 else None
         ledger = (
             SeedDraftLedger.from_dict(state.ledger)
             if state.ledger
