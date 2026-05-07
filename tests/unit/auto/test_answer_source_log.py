@@ -117,9 +117,7 @@ def test_cli_status_renders_recent_source_tagged_answers(monkeypatch, tmp_path) 
 
     monkeypatch.setattr("ouroboros.cli.commands.auto.AutoStore", lambda: store)
 
-    cli_result = CliRunner().invoke(
-        app, ["auto", "--resume", state.auto_session_id, "--status"]
-    )
+    cli_result = CliRunner().invoke(app, ["auto", "--resume", state.auto_session_id, "--status"])
     output = _strip_ansi(cli_result.output)
 
     assert cli_result.exit_code == 0
@@ -131,6 +129,38 @@ def test_cli_status_renders_recent_source_tagged_answers(monkeypatch, tmp_path) 
     assert "A: Local-only, no network calls" in output
 
 
+def test_cli_status_escapes_rich_markup_in_persisted_answer_text(monkeypatch, tmp_path) -> None:
+    """Backend question/answer text that contains ``[`` must not be parsed as Rich markup.
+
+    Without the escape, ``console.print`` would interpret ``[bold]`` as a
+    style and either swallow it from the output or raise a markup parse
+    error, making ``ooo auto --status`` brittle for sessions whose
+    interview text legitimately contains square brackets.
+    """
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
+    state.transition(AutoPhase.INTERVIEW, "asking interview round 4/12")
+    state.auto_answer_log = [
+        {
+            "round": 1,
+            "source": "repo_fact",
+            "question": "Use [bold]uv[/] toolchain or pip?",
+            "answer": "Use uv [from existing setup]",
+        },
+    ]
+    store.save(state)
+
+    monkeypatch.setattr("ouroboros.cli.commands.auto.AutoStore", lambda: store)
+
+    cli_result = CliRunner().invoke(app, ["auto", "--resume", state.auto_session_id, "--status"])
+    output = _strip_ansi(cli_result.output)
+
+    assert cli_result.exit_code == 0
+    # The literal bracketed segments must survive verbatim.
+    assert "[bold]uv[/]" in output
+    assert "[from existing setup]" in output
+
+
 def test_cli_status_omits_recent_section_when_log_empty(monkeypatch, tmp_path) -> None:
     store = AutoStore(tmp_path)
     state = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project")
@@ -139,9 +169,7 @@ def test_cli_status_omits_recent_section_when_log_empty(monkeypatch, tmp_path) -
 
     monkeypatch.setattr("ouroboros.cli.commands.auto.AutoStore", lambda: store)
 
-    cli_result = CliRunner().invoke(
-        app, ["auto", "--resume", state.auto_session_id, "--status"]
-    )
+    cli_result = CliRunner().invoke(app, ["auto", "--resume", state.auto_session_id, "--status"])
     output = _strip_ansi(cli_result.output)
 
     assert cli_result.exit_code == 0

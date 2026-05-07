@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 from typing import Annotated
 
+from rich.markup import escape as _rich_escape
 import typer
 
 from ouroboros.auto.adapters import (
@@ -347,9 +348,15 @@ def _print_status(state: AutoPipelineState) -> None:
         console.print(f"Recent auto answers (last {len(recent)}):")
         for entry in recent:
             round_value = entry.get("round", "?")
-            source = entry.get("source", "?")
-            question = entry.get("question", "")
-            answer = entry.get("answer", "")
+            source = _rich_escape(str(entry.get("source", "?")))
+            # Persisted question/answer text comes straight from the
+            # interview backend and may contain "[" / "]" sequences that
+            # Rich would otherwise interpret as markup, breaking the
+            # rendered text or raising a parse error. Escape both fields
+            # before printing so the status surface stays robust against
+            # arbitrary backend output.
+            question = _rich_escape(str(entry.get("question", "")))
+            answer = _rich_escape(str(entry.get("answer", "")))
             console.print(f"  round {round_value} \\[{source}] Q: {question}")
             console.print(f"    A: {answer}")
     console.print(f"Resume: [bold]ooo auto --resume {state.auto_session_id}[/]")
