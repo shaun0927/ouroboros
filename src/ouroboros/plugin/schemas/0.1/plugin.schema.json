@@ -46,7 +46,17 @@
         "repository": {
           "type": "string"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "local_path" } }, "required": ["type"] },
+          "then": { "required": ["path"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "plugin_home" } }, "required": ["type"] },
+          "then": { "required": ["path"] }
+        }
+      ]
     },
     "commands": {
       "type": "array",

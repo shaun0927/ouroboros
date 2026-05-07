@@ -111,11 +111,24 @@ def _trust_state_label(
     manifest: PluginManifest,
     trust_record: TrustRecord | None,
 ) -> str:
+    """Compute the audit `trust_state` label.
+
+    The label must agree with the result the firewall is about to record:
+    `trusted` is reserved for invocations that pass the trust check, i.e.
+    every `required: true` permission is covered by a granted scope.
+    Partial trust (some scopes granted, others missing) MUST NOT report
+    `trusted` — that would produce an internally contradictory event when
+    the firewall then emits `plugin.failed` with `result.status=blocked`.
+    """
     if manifest.source.type == "first_party":
         return "first_party"
-    if trust_record is not None and trust_record.granted_scopes:
-        return "trusted"
-    return "installed"
+    required = _required_permissions(manifest)
+    if trust_record is None:
+        return "installed"
+    if trust_record.missing(required):
+        # Some required scopes are still missing — not yet trusted.
+        return "installed"
+    return "trusted"
 
 
 def _missing_required(

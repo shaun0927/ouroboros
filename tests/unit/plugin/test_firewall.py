@@ -68,6 +68,17 @@ def _make_program(tmp_path: Path, payload: dict | None = None):
     return registry.register(manifest)
 
 
+def _make_partially_trusted_program(tmp_path: Path):
+    """Variant of _make_program with TWO required scopes, used to exercise
+    the partial-trust audit-event invariant."""
+    payload = json.loads(json.dumps(REFERENCE_MANIFEST))
+    payload["permissions"] = [
+        {"scope": "github:read", "risk": "read_only", "required": True},
+        {"scope": "github:pull_request:write", "risk": "destructive", "required": True},
+    ]
+    return _make_program(tmp_path, payload)
+
+
 def _fake_runner(
     *,
     returncode: int = 0,
@@ -131,6 +142,46 @@ def test_happy_path_emits_invoked_then_permission_then_completed(tmp_path: Path)
     assert "ok\\n" not in serialized
     # sha256 hash recorded in completed.provenance.
     assert "stdout_sha256" in events[-1]["provenance"]
+
+
+def test_partial_trust_reports_installed_not_trusted(tmp_path: Path) -> None:
+    """Partial trust must NOT report trust_state='trusted' on the blocked event.
+
+    Regression for ouroboros-agent[bot] BLOCKING finding on PR #749 commit
+    39ad604: when one of several required scopes is granted but others are
+    still missing, `_trust_state_label` previously returned `trusted`, so
+    the firewall emitted a `plugin.failed` event with
+    `result.status='blocked'` but `trust_state='trusted'`. That contradicts
+    the audit-event contract (`trusted` is reserved for invocations that
+    actually pass the trust check). The label now reflects coverage of all
+    required scopes.
+    """
+    program = _make_partially_trusted_program(tmp_path)
+    # Grant exactly ONE of the two required scopes — partial trust.
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+    )
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-partial",
+        subprocess_runner=_fake_runner(),
+    )
+    assert result.status == "blocked"
+    # The single emitted event is plugin.failed (status=blocked).
+    assert [e["event_type"] for e in events] == ["plugin.failed"]
+    failed = events[0]
+    assert failed["result"]["status"] == "blocked"
+    # The contradiction the bot flagged: trust_state must NOT be 'trusted'
+    # while the result is blocked. With the fix it reports 'installed'.
+    assert failed["trust_state"] == "installed"
 
 
 def test_trust_violation_only_emits_failed_no_invoked(tmp_path: Path) -> None:

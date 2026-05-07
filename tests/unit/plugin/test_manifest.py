@@ -202,6 +202,57 @@ def test_missing_file_reports_clean_error(tmp_path: Path) -> None:
     assert "not found" in excinfo.value.args[0]
 
 
+def test_local_path_source_requires_path(tmp_path: Path) -> None:
+    """source.type='local_path' without a `path` is rejected.
+
+    Regression for ouroboros-agent[bot] BLOCKING finding on PR #749 commit
+    39ad604: the schema previously only required `source.type`, so
+    `local_path` (and `plugin_home`) manifests with no `path` validated
+    fine but downstream install/launch had nothing to resolve. The schema
+    now applies an `if/then` constraint to require `path` for those types,
+    and the loader surfaces the violation with a JSON pointer to /source.
+    """
+    bad = json.loads(json.dumps(REFERENCE_MANIFEST))
+    bad["source"] = {"type": "local_path"}  # no `path`
+    with pytest.raises(PluginManifestError) as excinfo:
+        load_manifest(_write(tmp_path, bad))
+    assert excinfo.value.json_pointer.startswith("/source")
+    assert "path" in excinfo.value.args[0].lower()
+
+
+def test_plugin_home_source_requires_path(tmp_path: Path) -> None:
+    """source.type='plugin_home' also requires `path` (parallel to local_path)."""
+    bad = json.loads(json.dumps(REFERENCE_MANIFEST))
+    bad["source"] = {"type": "plugin_home"}
+    with pytest.raises(PluginManifestError) as excinfo:
+        load_manifest(_write(tmp_path, bad))
+    assert excinfo.value.json_pointer.startswith("/source")
+    assert "path" in excinfo.value.args[0].lower()
+
+
+def test_first_party_source_does_not_require_path(tmp_path: Path) -> None:
+    """source.type='first_party' is the documented exemption — `path` is
+    optional. Belt-and-suspenders check that the `if/then` schema branch
+    targets only `local_path` / `plugin_home` and does not regress the
+    locked first-party behaviour."""
+    fp = json.loads(json.dumps(REFERENCE_MANIFEST))
+    fp["name"] = "ooo-auto"
+    fp["source"] = {"type": "first_party"}
+    fp["permissions"] = []
+    fp["commands"] = [
+        {
+            "namespace": "auto",
+            "name": "run",
+            "summary": "Take a goal, run interview, produce Seed.",
+            "usage": "ooo auto <goal-text>",
+            "risk": "write",
+        }
+    ]
+    manifest = load_manifest(_write(tmp_path, fp))
+    assert manifest.source.type == "first_party"
+    assert manifest.source.path is None
+
+
 def test_capabilities_and_permissions_preserve_declaration_order(tmp_path: Path) -> None:
     """Capabilities and permissions are exposed in manifest declaration order.
 
