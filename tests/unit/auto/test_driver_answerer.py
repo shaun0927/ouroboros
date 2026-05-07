@@ -88,6 +88,56 @@ def test_answer_text_risk_does_not_let_placeholder_words_bypass_secrets() -> Non
     )
 
 
+def test_answer_text_risk_detects_known_provider_secret_shapes() -> None:
+    aws_id = "AKIA" + "IOSFODNN7EXAMPLE"
+    gh_pat_classic = "ghp_" + "a" * 36
+    gh_pat_fine = "github_pat_" + "a" * 50
+    slack_bot = "xoxb-" + "1234567890-1234567890-abcdefghijklmnop"
+    openai_key = "sk-" + "abcdefghijklmnopqrst1234"
+    cases = (
+        f"Use {aws_id} for the role.",
+        f"Token: {gh_pat_classic}",
+        f"Use {gh_pat_fine}",
+        f"Slack incoming hook {slack_bot}",
+        f"Provide API key {openai_key}.",
+    )
+    for text in cases:
+        assert (
+            classify_driver_answer_text_risk(text) == "actual answer contains secret or credential"
+        ), text
+
+
+def test_answer_text_risk_flags_rm_rf_paths_beyond_root() -> None:
+    assert (
+        classify_driver_answer_text_risk("Run rm -rf /opt/app/data to reset state.")
+        == "actual answer recommends destructive production action"
+    )
+    assert (
+        classify_driver_answer_text_risk("rm -rf ./build && rebuild")
+        == "actual answer recommends destructive production action"
+    )
+
+
+def test_answer_text_risk_flags_drop_and_truncate_sql_targets() -> None:
+    assert (
+        classify_driver_answer_text_risk("DROP TABLE users CASCADE;")
+        == "actual answer recommends destructive production action"
+    )
+    assert (
+        classify_driver_answer_text_risk("TRUNCATE TABLE accounts;")
+        == "actual answer recommends destructive production action"
+    )
+
+
+def test_answer_text_risk_allows_benign_credential_phrasing() -> None:
+    assert classify_driver_answer_text_risk("Bearer-style auth pattern is documented.") is None
+    assert (
+        classify_driver_answer_text_risk("The customer's old password was rotated months ago.")
+        is None
+    )
+    assert classify_driver_answer_text_risk("We support OAuth Bearer tokens generally.") is None
+
+
 def test_answer_text_risk_detects_env_var_and_dsn_secret_shapes() -> None:
     assert (
         classify_driver_answer_text_risk("Set OPENAI_API_KEY=fakekeyvalue1234567890 in env.")

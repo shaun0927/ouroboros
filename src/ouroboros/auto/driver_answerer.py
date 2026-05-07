@@ -254,7 +254,7 @@ def classify_driver_answer_text_risk(text: str) -> str | None:
     production_target = r"\b(production|prod|live|billing|database|db|credentials?)\b"
     if re.search(destructive_action, lowered) and re.search(production_target, lowered):
         return "actual answer recommends destructive production action"
-    if re.search(r"\brm\s+-rf\s+/(?:\s|$)", text) or re.search(
+    if re.search(r"\brm\s+-rf\b", text) or re.search(
         r"\b(drop|truncate)\s+(database|table)\b", lowered
     ):
         return "actual answer recommends destructive production action"
