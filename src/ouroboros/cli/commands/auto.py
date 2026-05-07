@@ -20,6 +20,7 @@ from ouroboros.auto.adapters import (
 )
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
+from ouroboros.auto.provenance import resolve_provenance
 from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 from ouroboros.cli.formatters import console
@@ -208,6 +209,7 @@ async def _run_auto(
     reconcile_source: str | None = None,
 ) -> AutoPipelineResult:
     store = AutoStore()
+    incoming_provenance = resolve_provenance()
     attach_requested = any(
         isinstance(item, str) and item.strip()
         for item in (attach_execution, attach_job, attach_session)
@@ -278,6 +280,20 @@ async def _run_auto(
     state.runtime_backend = runtime
     state.opencode_mode = opencode_mode
     state.skip_run = skip_run
+    if incoming_provenance is not None:
+        if resume and state.provenance is None:
+            msg = (
+                "cannot attach provenance on resume of a session originally "
+                "invoked without provenance; re-attribution would mislead audit"
+            )
+            raise ValueError(msg)
+        if state.provenance is not None and state.provenance != incoming_provenance:
+            msg = (
+                "provenance conflict on resume: persisted state recorded "
+                f"{state.provenance} but caller supplied {incoming_provenance}"
+            )
+            raise ValueError(msg)
+        state.provenance = incoming_provenance
 
     authoring_opencode_mode = "subprocess" if opencode_mode == "plugin" else opencode_mode
     interview = InterviewHandler(
@@ -363,6 +379,10 @@ def _print_status(state: AutoPipelineState) -> None:
     authoring, run_label = _format_runtime_labels(state.runtime_backend, state.opencode_mode)
     console.print(f"Authoring backend: [bold]{authoring}[/]")
     console.print(f"Run backend: [bold]{run_label}[/]")
+    invoked_by = state.invoked_by()
+    if invoked_by != "direct":
+        source = (state.provenance or {}).get("source", "unknown")
+        console.print(f"Invoked by: [bold]{invoked_by}[/] (source={_rich_escape(source)})")
     console.print(f"Last progress: {state.last_progress_message}")
     console.print(f"Last progress at: {state.last_progress_at}")
     if state.interview_session_id:
@@ -428,6 +448,9 @@ def _print_result(result: AutoPipelineResult, *, show_ledger: bool) -> None:
     authoring, run_label = _format_runtime_labels(result.runtime_backend, result.opencode_mode)
     console.print(f"Authoring backend: [bold]{authoring}[/]")
     console.print(f"Run backend: [bold]{run_label}[/]")
+    if result.invoked_by != "direct":
+        source = (result.provenance or {}).get("source", "unknown")
+        console.print(f"Invoked by: [bold]{result.invoked_by}[/] (source={_rich_escape(source)})")
     if result.grade:
         console.print(f"Seed grade: [bold]{result.grade}[/]")
     if result.interview_session_id:
