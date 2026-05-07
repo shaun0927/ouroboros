@@ -12,6 +12,11 @@ from __future__ import annotations
 import pytest
 
 from ouroboros.auto.state import AutoPipelineState, AutoStore
+from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
+from ouroboros.mcp.tools.execution_handlers import (
+    ExecuteSeedHandler,
+    StartExecuteSeedHandler,
+)
 from ouroboros.mcp.tools.subagent import should_dispatch_via_plugin
 
 
@@ -19,10 +24,39 @@ from ouroboros.mcp.tools.subagent import should_dispatch_via_plugin
     "runtime",
     ["claude", "codex", "hermes", "gemini", "copilot", "kiro"],
 )
-def test_runtime_persisted_on_state_for_authoring_and_handoff(runtime, tmp_path) -> None:
-    """For non-opencode runtimes, the same backend value is what the
-    authoring handler reads (state.runtime_backend) and what the run handoff
-    receives downstream. There is no per-phase override path."""
+def test_runtime_propagates_to_authoring_and_run_handoff(runtime: str) -> None:
+    """The same ``--runtime`` value reaches authoring (interview / Seed
+    generation) AND run-handoff (execute / start-execute) handlers. This
+    locks the contract documented in #690 — a future change that fans the
+    runtime out per phase will fail this test rather than silently drift.
+    """
+    interview = InterviewHandler(agent_runtime_backend=runtime)
+    generate = GenerateSeedHandler(agent_runtime_backend=runtime)
+    execute = ExecuteSeedHandler(agent_runtime_backend=runtime)
+    start_execute = StartExecuteSeedHandler(execute_handler=execute, agent_runtime_backend=runtime)
+
+    # Authoring side
+    assert interview.agent_runtime_backend == runtime
+    assert generate.agent_runtime_backend == runtime
+    # Run-handoff side
+    assert execute.agent_runtime_backend == runtime
+    assert start_execute.agent_runtime_backend == runtime
+    # Cross-phase invariant: every handler agrees on the runtime.
+    assert (
+        interview.agent_runtime_backend
+        == generate.agent_runtime_backend
+        == execute.agent_runtime_backend
+        == start_execute.agent_runtime_backend
+    )
+
+
+@pytest.mark.parametrize(
+    "runtime",
+    ["claude", "codex", "hermes", "gemini", "copilot", "kiro"],
+)
+def test_runtime_persisted_on_state_round_trip(runtime: str, tmp_path) -> None:
+    """``state.runtime_backend`` survives JSON round-trip — handlers that
+    read this field on resume see the original value."""
     store = AutoStore(tmp_path)
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
     state.runtime_backend = runtime
@@ -30,9 +64,6 @@ def test_runtime_persisted_on_state_for_authoring_and_handoff(runtime, tmp_path)
 
     loaded = store.load(state.auto_session_id)
     assert loaded.runtime_backend == runtime
-    # Authoring and run handoff both read state.runtime_backend; this is the
-    # whole contract that documentation #690 is trying to make legible.
-    assert loaded.runtime_backend == loaded.runtime_backend
 
 
 @pytest.mark.parametrize(
