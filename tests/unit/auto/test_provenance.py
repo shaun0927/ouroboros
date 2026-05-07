@@ -83,12 +83,28 @@ def test_load_from_env_returns_empty_on_non_object_payload() -> None:
     assert load_provenance_from_env(env) == {}
 
 
-def test_invoked_by_label_defaults_to_direct() -> None:
+def test_invoked_by_label_defaults_to_direct_when_provenance_absent() -> None:
+    # Empty / no provenance is a legitimate direct CLI run.
     assert invoked_by_label({}) == "direct"
     assert invoked_by_label(None) == "direct"
+    # Recognized value passes through.
     assert invoked_by_label({"invoked_by": "gateway"}) == "gateway"
-    # Unknown values fall back to direct so blocker output never lies.
-    assert invoked_by_label({"invoked_by": "totally-fake"}) == "direct"
+
+
+def test_invoked_by_label_returns_unknown_when_other_provenance_present() -> None:
+    """When provenance carries gateway-side metadata but no invoked_by, the
+    label MUST be 'unknown' rather than 'direct' — otherwise incident
+    analysis sees a falsely-direct invocation. (Bot-flagged in #717 review.)"""
+    # Recognized non-invoked_by keys persisted without invoked_by → unknown.
+    assert invoked_by_label({"source_platform": "discord-hermes"}) == "unknown"
+    assert (
+        invoked_by_label(
+            {"source_platform": "discord-hermes", "command_kind": "rewrite"}
+        )
+        == "unknown"
+    )
+    # Unknown / non-string invoked_by also yields unknown, not direct.
+    assert invoked_by_label({"invoked_by": "totally-fake"}) == "unknown"
 
 
 def test_state_persists_redacted_provenance(tmp_path) -> None:

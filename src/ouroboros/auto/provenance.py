@@ -102,17 +102,22 @@ def load_provenance_from_env(
 
 
 def invoked_by_label(provenance: Mapping[str, Any] | None) -> str:
-    """Return the human label for ``invoked_by``; ``"direct"`` when unknown.
+    """Return the human label for ``invoked_by``.
 
-    Used by CLI/blocker output to make rewrite-vs-direct provenance visible
-    without exposing any other metadata.
+    * No provenance at all → ``"direct"`` (legitimate direct CLI use).
+    * Provenance present with a recognized ``invoked_by`` → that value.
+    * Provenance present **without** a recognized ``invoked_by`` →
+      ``"unknown"``. Returning ``"direct"`` here would lie: a gateway can
+      persist ``source_platform`` / ``request_correlation_id`` / ``notes``
+      without an ``invoked_by`` field, and showing ``Invoked by: direct``
+      in incident analysis defeats the feature's purpose.
     """
     if not provenance:
         return "direct"
     value = provenance.get("invoked_by")
     if isinstance(value, str) and value in KNOWN_INVOKED_BY:
         return value
-    return "direct"
+    return "unknown"
 
 
 __all__ = [
