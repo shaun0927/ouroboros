@@ -202,6 +202,51 @@ def test_replace_with_changed_namespace_releases_old_namespace(tmp_path: Path) -
     assert other_found.name == "plugin-other"
 
 
+def test_register_rejects_name_namespace_cross_collision(tmp_path: Path) -> None:
+    """Registering a plugin whose name shadows another plugin's namespace
+    (or vice versa) must be rejected.
+
+    `lookup_command()` resolves namespaces before plugin names, so a
+    cross-collision makes one of the two programs unreachable through a
+    valid identifier. Pre-fix the registry only checked name-vs-name
+    and namespace-vs-namespace; this test pins the new cross-table
+    invariant.
+    """
+    registry = UserLevelProgramRegistry()
+
+    # Plugin A with namespace "shared-id" — claims the namespace.
+    a_payload = json.loads(json.dumps(REFERENCE_MANIFEST))
+    a_payload["name"] = "plugin-a"
+    a_payload["commands"][0]["namespace"] = "shared-id"
+    a = load_manifest(_write_manifest(tmp_path / "a", a_payload))
+    registry.register(a)
+
+    # Plugin B literally named "shared-id" — the existing namespace
+    # would shadow B from `lookup_command("shared-id")`.
+    b_payload = json.loads(json.dumps(REFERENCE_MANIFEST))
+    b_payload["name"] = "shared-id"
+    b_payload["commands"][0]["namespace"] = "different-ns"
+    b = load_manifest(_write_manifest(tmp_path / "b", b_payload))
+    with pytest.raises(RegistryError, match="collides with namespace"):
+        registry.register(b)
+
+    # And the reverse direction: a plugin with a namespace that matches
+    # an existing plugin's name must be rejected too.
+    registry2 = UserLevelProgramRegistry()
+    c_payload = json.loads(json.dumps(REFERENCE_MANIFEST))
+    c_payload["name"] = "shared-id"
+    c_payload["commands"][0]["namespace"] = "c-ns"
+    c = load_manifest(_write_manifest(tmp_path / "c", c_payload))
+    registry2.register(c)
+
+    d_payload = json.loads(json.dumps(REFERENCE_MANIFEST))
+    d_payload["name"] = "plugin-d"
+    d_payload["commands"][0]["namespace"] = "shared-id"
+    d = load_manifest(_write_manifest(tmp_path / "d", d_payload))
+    with pytest.raises(RegistryError, match="collides with existing plugin name"):
+        registry2.register(d)
+
+
 def test_skill_registry_unaffected(tmp_path: Path) -> None:
     """Test 10: existing skill registry tests still work — no state shared.
 

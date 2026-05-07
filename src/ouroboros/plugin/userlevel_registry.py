@@ -111,6 +111,28 @@ class UserLevelProgramRegistry:
                     f"refusing to register {manifest.name!r}"
                 )
 
+            # Reject identifier-shadowing across the by-name and
+            # by-namespace tables. `lookup_command()` resolves namespaces
+            # before plugin names, so:
+            #   * if `manifest.name` matches another plugin's namespace,
+            #     the plugin we are registering becomes unreachable by
+            #     name; and
+            #   * if the new `namespace` matches another plugin's name,
+            #     `lookup_command(name)` would suddenly resolve to this
+            #     plugin instead of the original one.
+            colliding_owner = self._namespace_owner.get(manifest.name)
+            if colliding_owner is not None and colliding_owner != manifest.name:
+                raise RegistryError(
+                    f"plugin name {manifest.name!r} collides with namespace "
+                    f"already owned by {colliding_owner!r}; pick a different name"
+                )
+            colliding_program = self._by_name.get(namespace)
+            if colliding_program is not None and colliding_program.name != manifest.name:
+                raise RegistryError(
+                    f"namespace {namespace!r} collides with existing plugin name "
+                    f"{colliding_program.name!r}; pick a different namespace"
+                )
+
             # When `replace=True` is used to update a plugin that previously
             # claimed a different namespace, drop the stale mapping so the
             # old namespace becomes free again. Without this, the old entry

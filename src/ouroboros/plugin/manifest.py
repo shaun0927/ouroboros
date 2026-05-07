@@ -288,6 +288,23 @@ def load_manifest(path: str | Path) -> PluginManifest:
     )
 
     commands = tuple(_build_command(c) for c in raw["commands"])
+    # Reject duplicate command names within a plugin. The JSON Schema
+    # enforces shape, but does not enforce uniqueness across the
+    # `commands` array. `RegisteredProgram.find_command()` returns the
+    # first match by name, so a duplicate would silently shadow a
+    # different command's risk level, confirmation policy, or arguments.
+    seen_command_names: set[str] = set()
+    for cmd in commands:
+        if cmd.name in seen_command_names:
+            idx = next(i for i, c in enumerate(commands) if c.name == cmd.name and c is cmd)
+            raise PluginManifestError(
+                f"duplicate command name {cmd.name!r}",
+                path=str(manifest_path),
+                json_pointer=f"/commands/{idx}/name",
+                expected="unique command name within the plugin",
+                got=f"second occurrence of {cmd.name!r}",
+            )
+        seen_command_names.add(cmd.name)
     capabilities = tuple(
         Capability(name=c["name"], access=c["access"], reason=c.get("reason", ""))
         for c in raw["capabilities"]

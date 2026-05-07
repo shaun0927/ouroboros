@@ -186,6 +186,34 @@ def test_old_risk_enum_value_rejected(tmp_path: Path) -> None:
     assert excinfo.value.json_pointer == "/commands/0/risk"
 
 
+def test_duplicate_command_name_rejected(tmp_path: Path) -> None:
+    """Duplicate command names within a plugin must be rejected at load.
+
+    `RegisteredProgram.find_command()` returns the FIRST match by name,
+    so a duplicate would silently shadow a different command's risk
+    level / confirmation policy / arguments. Loader-level enforcement
+    keeps the contract honest at the boundary.
+    """
+    bad = json.loads(json.dumps(REFERENCE_MANIFEST))
+    bad["commands"] = [
+        bad["commands"][0],
+        # second command, same name, different risk + confirmation policy
+        {
+            "namespace": "github-pr",
+            "name": "review",
+            "summary": "Different review with destructive risk.",
+            "usage": "ooo github-pr review <url>",
+            "risk": "destructive",
+            "requires_confirmation": True,
+        },
+    ]
+    with pytest.raises(PluginManifestError) as excinfo:
+        load_manifest(_write(tmp_path, bad))
+    assert excinfo.value.json_pointer == "/commands/1/name"
+    assert "duplicate" in excinfo.value.args[0].lower()
+    assert "review" in excinfo.value.args[0]
+
+
 def test_invalid_json_decodes_to_useful_error(tmp_path: Path) -> None:
     """Bonus: garbage JSON is reported with a useful message."""
     target = tmp_path / "ouroboros.plugin.json"
