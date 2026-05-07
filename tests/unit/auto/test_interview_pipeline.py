@@ -9,6 +9,7 @@ from ouroboros.auto.interview_driver import (
     AutoInterviewDriver,
     FunctionInterviewBackend,
     InterviewTurn,
+    interview_timeout_for_state,
 )
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
 from ouroboros.auto.pipeline import AutoPipeline
@@ -258,6 +259,55 @@ async def test_interview_driver_blocks_on_backend_timeout(tmp_path) -> None:
 
     assert result.status == "blocked"
     assert "timed out" in (result.blocker or "")
+
+
+def test_interview_timeout_for_state_uses_state_policy() -> None:
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp")
+    state.timeout_seconds_by_phase[AutoPhase.INTERVIEW.value] = 240
+    assert interview_timeout_for_state(state) == 240.0
+
+
+def test_interview_timeout_for_state_falls_back_when_invalid() -> None:
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp")
+    state.timeout_seconds_by_phase[AutoPhase.INTERVIEW.value] = 0
+    assert interview_timeout_for_state(state) == 60.0
+    state.timeout_seconds_by_phase.pop(AutoPhase.INTERVIEW.value, None)
+    assert interview_timeout_for_state(state) == 60.0
+    state.timeout_seconds_by_phase[AutoPhase.INTERVIEW.value] = True  # type: ignore[assignment]
+    assert interview_timeout_for_state(state) == 60.0
+
+
+@pytest.mark.asyncio
+async def test_interview_driver_blocker_records_state_policy_timeout_source(
+    tmp_path,
+) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        await asyncio.sleep(0.5)
+        return InterviewTurn("never returned", "interview_1")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", session_id, seed_ready=True)
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.timeout_seconds_by_phase[AutoPhase.INTERVIEW.value] = 1
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        timeout_seconds=interview_timeout_for_state(state),
+        timeout_source="state.timeout_seconds_by_phase[interview]",
+    )
+
+    # Force a tight per-call timeout for the test without re-validating state.
+    driver.timeout_seconds = 0.01
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "blocked"
+    blocker = result.blocker or ""
+    assert "timed out" in blocker
+    assert "source=state.timeout_seconds_by_phase[interview]" in blocker
+    assert state.last_tool_name == "interview.start"
 
 
 @pytest.mark.asyncio

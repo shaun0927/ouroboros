@@ -55,6 +55,24 @@ class AutoInterviewResult:
     blocker: str | None = None
 
 
+_DEFAULT_INTERVIEW_TIMEOUT_SECONDS = 60.0
+
+
+def interview_timeout_for_state(state: AutoPipelineState) -> float:
+    """Return the interview-phase timeout seconds derived from durable state policy.
+
+    Falls back to the historical default when the state's
+    ``timeout_seconds_by_phase[interview]`` entry is missing or invalid so that
+    legacy state files keep working after the wiring fix lands.
+    """
+    raw = state.timeout_seconds_by_phase.get(AutoPhase.INTERVIEW.value)
+    if isinstance(raw, bool):
+        return _DEFAULT_INTERVIEW_TIMEOUT_SECONDS
+    if isinstance(raw, (int, float)) and raw > 0:
+        return float(raw)
+    return _DEFAULT_INTERVIEW_TIMEOUT_SECONDS
+
+
 @dataclass(slots=True)
 class AutoInterviewDriver:
     """Drive an interview backend with conservative auto answers.
@@ -68,7 +86,8 @@ class AutoInterviewDriver:
     context_provider: Callable[[str], AutoAnswerContext] = repo_auto_answer_context
     gap_detector: GapDetector = field(default_factory=GapDetector)
     store: AutoStore | None = None
-    timeout_seconds: float = 60.0
+    timeout_seconds: float = _DEFAULT_INTERVIEW_TIMEOUT_SECONDS
+    timeout_source: str | None = None
     max_rounds: int = 12
 
     async def run(self, state: AutoPipelineState, ledger: SeedDraftLedger) -> AutoInterviewResult:
@@ -242,7 +261,13 @@ class AutoInterviewDriver:
         try:
             return await asyncio.wait_for(awaitable, timeout=self.timeout_seconds)
         except TimeoutError as exc:
-            msg = f"{tool_name} timed out after {self.timeout_seconds:.0f}s for {state.auto_session_id}"
+            source = (
+                f" (source={self.timeout_source})" if self.timeout_source else ""
+            )
+            msg = (
+                f"{tool_name} timed out after {self.timeout_seconds:.0f}s{source}"
+                f" for {state.auto_session_id}"
+            )
             raise TimeoutError(msg) from exc
 
     def _ensure_interview_phase(self, state: AutoPipelineState) -> None:

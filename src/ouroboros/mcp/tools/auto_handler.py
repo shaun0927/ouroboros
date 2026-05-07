@@ -15,7 +15,10 @@ from ouroboros.auto.adapters import (
     load_seed,
     save_seed,
 )
-from ouroboros.auto.interview_driver import AutoInterviewDriver
+from ouroboros.auto.interview_driver import (
+    AutoInterviewDriver,
+    interview_timeout_for_state,
+)
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
 from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.state import AutoPipelineState, AutoStore
@@ -169,6 +172,8 @@ class AutoHandler:
             HandlerInterviewBackend(interview_handler, cwd=cwd),
             store=store,
             max_rounds=max_interview_rounds,
+            timeout_seconds=interview_timeout_for_state(state),
+            timeout_source="state.timeout_seconds_by_phase[interview]",
         )
         pipeline = AutoPipeline(
             driver,
