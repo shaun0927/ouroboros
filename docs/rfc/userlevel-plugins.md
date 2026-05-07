@@ -424,8 +424,14 @@ subject is designed to defeat:
 2. **Code substitution under the same source** — modifying the
    entrypoint without touching the manifest produces a new
    `artifact_digest`, hence a new triple, hence un-trusted required
-   scopes. For `local_path` this is checked on every invocation; for
-   `plugin_home` and `first_party` it is checked at install / boot.
+   scopes. For `plugin_home` and `local_path` this is checked on
+   **every invocation** (the firewall recomputes the canonical-tarball
+   sha256 against the on-disk subtree before each call and fails
+   closed on drift, exactly as the per-source-type rule above
+   specifies). For `first_party` it is checked at **boot only**, on
+   the explicit grounds that the core release artifact is the unit of
+   trust there and tampering with it is out of scope for the plugin
+   firewall.
 
 Concrete obligations on the lifecycle commands:
 
