@@ -1346,10 +1346,20 @@ def test_auto_answerer_routes_safe_regulated_product_questions_to_product_behavi
     answerer = AutoAnswerer()
     ledger = SeedDraftLedger.from_goal("Build a regulated data app")
 
+    # Cover every verb in ``_PRODUCT_SEMANTICS_REGULATED_VERBS_RE`` so the
+    # allowlist↔router alignment is locked in and cannot drift silently for
+    # any single verb.
     cases = [
         ("Should users be able to download GDPR exports?", "gdpr"),
         ("Should admins be able to view PII fields in the admin panel?", "pii"),
         ("Should the app allow users to access their GDPR data?", "gdpr"),
+        ("Should the app export PII reports?", "pii"),
+        ("Should the app show PII reports?", "pii"),
+        ("Should the dashboard display HIPAA audit data?", "hipaa"),
+        ("Should the system render GDPR consent notices?", "gdpr"),
+        ("Should the platform expose a SOX compliance report endpoint?", "sox"),
+        ("Should the app support PII redaction in exports?", "pii"),
+        ("Should the system enable HIPAA audit log download?", "hipaa"),
     ]
 
     for question, regulated_noun in cases:
