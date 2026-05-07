@@ -379,6 +379,29 @@ from hijacking dispatch for a name like `auto` or `run`. Renaming on
 the plugin side (manifest `name` change ⇒ new `artifact_digest` ⇒ fresh
 trust subject) is the only path to install such a plugin.
 
+**Collisions detected at boot** (the upgrade case). The same uniqueness
+invariant MUST be enforced at boot, because a new core release can
+introduce a first-party program whose name collides with an
+already-installed third-party plugin from a previous release. When the
+firewall detects such a collision at boot:
+
+1. **First-party wins** for command dispatch — the new first-party
+   program is registered under that name. This preserves the release
+   contract: a core release is allowed to ship new commands.
+2. The conflicting third-party plugin is **auto-disabled** (its
+   `disabled: true` flag is set) and its required permissions are
+   stripped from the in-process trust table. It remains installed on
+   disk so the user does not lose data.
+3. The firewall MUST emit an explicit `plugin.failed` event with
+   `result.status="name_collision_with_first_party"` for the disabled
+   plugin, and `ooo plugin list` MUST surface the disabled state with
+   the reason. The plugin is not invocable until the user resolves the
+   conflict by `ooo plugin remove` (and, if desired, reinstalling
+   under a different name from a re-published catalog).
+
+There is no silent shadowing in either direction — install-time and
+boot-time both refuse the ambiguous state explicitly.
+
 **Trust identity is NOT the manifest `name`.** Manifest `name` controls
 the CLI namespace and the install-time uniqueness check; it does **not**
 identify the trust subject. Trust records — and the lockfile entries in
@@ -435,11 +458,17 @@ subject is designed to defeat:
 
 Concrete obligations on the lifecycle commands:
 
-- `ooo plugin remove <name>` MUST delete every trust record bound to
-  that plugin's current triple AND remove the installed snapshot (for
-  `plugin_home`) or the catalog registration (for `local_path`). No
-  "tombstone with implicit re-grant" behavior is permitted — uninstall
-  fully revokes.
+- `ooo plugin remove <name>` MUST delete **every trust record for the
+  install subject — past and present**, not only records bound to the
+  currently-active triple. Concretely, it deletes any lockfile entry
+  whose `(source.type, source_identity)` pair matches the removed
+  plugin (any historical `artifact_digest`), AND removes the installed
+  snapshot (for `plugin_home`) or the catalog registration (for
+  `local_path`). This closes the otherwise-silent regrant path where a
+  user could downgrade or reinstall back to an old digest and inherit
+  prior trust. No "tombstone with implicit re-grant" behavior is
+  permitted — uninstall fully revokes, including for any earlier
+  version of the same install subject.
 - `ooo plugin install` MUST compute the new triple (recomputing
   `artifact_digest` from the just-installed bytes, not copying it from
   upstream metadata) and, if any field differs from a previously-trusted
