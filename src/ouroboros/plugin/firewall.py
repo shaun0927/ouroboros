@@ -209,6 +209,19 @@ def invoke_plugin(
             message=f"unknown command {command_name!r} in namespace {namespace!r}",
         )
 
+    # Per Q00/ouroboros-plugins#9 Q4 lock: a version bump invalidates the
+    # trust record. The TrustStore enforces this at write time, but the
+    # firewall must also enforce it at INVOCATION time — otherwise a
+    # caller holding a stale `TrustRecord` (e.g. read before an upgrade,
+    # or for a different plugin name entirely) could authorize the new
+    # code with consent that was given to the old code. Treat any
+    # mismatched record as if no trust existed; the missing-permissions
+    # path then fires and the user is asked to re-grant.
+    if trust_record is not None and (
+        trust_record.plugin != manifest.name or trust_record.version != manifest.version
+    ):
+        trust_record = None
+
     trust_state = _trust_state_label(manifest, trust_record)
     risks = _scope_risk_index(manifest)
     emitted: list[dict] = []

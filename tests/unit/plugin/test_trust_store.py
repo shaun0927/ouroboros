@@ -89,17 +89,25 @@ def test_reset_for_version_bump(tmp_path: Path) -> None:
 
 
 def test_remove_drops_trust_file(tmp_path: Path) -> None:
-    """Test 6: remove() deletes the trust file and prunes the empty dir."""
+    """Test 6: remove() deletes the trust file.
+
+    The lock file (`trust.json.lock`) is intentionally retained — see
+    `TrustStore.remove` docstring for the cross-process race that
+    deleting it would reintroduce. The plugin directory therefore may
+    not be empty after `remove()`, so this test only asserts that the
+    trust record itself is gone.
+    """
     store = TrustStore(root=tmp_path)
     store.grant(plugin="X", version="0.1.0", scope="github:read", granted_by="u")
     file_path = tmp_path / "X" / "trust.json"
     assert file_path.is_file()
     assert store.remove("X") is True
     assert not file_path.exists()
-    # Directory pruned.
-    assert not file_path.parent.exists()
-    # Removing again is a no-op.
+    # Removing again is a no-op (file already gone).
     assert store.remove("X") is False
+    # Lock file is retained on purpose to keep cross-process flock
+    # synchronization sound.
+    assert (tmp_path / "X" / "trust.json.lock").exists()
 
 
 def test_unsupported_schema_version_rejected(tmp_path: Path) -> None:

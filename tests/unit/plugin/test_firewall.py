@@ -380,6 +380,85 @@ def test_entrypoint_missing_emits_failed_127(tmp_path: Path) -> None:
     assert "not found" in result.message.lower()
 
 
+def test_stale_trust_record_version_is_invalidated_at_invocation(tmp_path: Path) -> None:
+    """A `TrustRecord` whose version does not match the manifest must be
+    treated as if no trust existed.
+
+    Per Q00/ouroboros-plugins#9 Q4, a version bump invalidates trust.
+    `TrustStore` enforces that at write time, but the firewall must
+    also enforce it at INVOCATION time — otherwise a caller holding a
+    stale `TrustRecord` (e.g. read into memory before an upgrade) could
+    authorize the new code under consent given to the old code.
+    """
+    program = _make_program(tmp_path)  # manifest version = 0.1.0
+    # Hand-craft a stale TrustRecord that grants the required scope,
+    # but for a DIFFERENT version. The firewall must reject it.
+    from ouroboros.plugin.trust_store import GrantedScope, TrustRecord
+
+    stale = TrustRecord(
+        plugin="github-pr-ops",
+        version="0.0.9",  # manifest is 0.1.0 -> mismatch
+        granted_scopes=(
+            GrantedScope(
+                scope="github:read",
+                granted_at="2025-01-01T00:00:00Z",
+                granted_by="user:test",
+            ),
+        ),
+    )
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=stale,
+        event_sink=events.append,
+        correlation_id="corr-stale-version",
+        subprocess_runner=_fake_runner(),
+    )
+    assert result.status == "blocked"
+    assert "github:read" in result.message
+    types = [e["event_type"] for e in events]
+    assert types == ["plugin.failed"]
+    # The audit trail records "installed" (no live trust), not "trusted".
+    assert events[0]["trust_state"] == "installed"
+
+
+def test_trust_record_for_different_plugin_is_invalidated(tmp_path: Path) -> None:
+    """A `TrustRecord` whose `plugin` field doesn't match the manifest
+    name must also be treated as no trust.
+
+    Defense-in-depth against a caller passing the wrong record into
+    `invoke_plugin` (e.g. a bug in the CLI dispatch layer).
+    """
+    program = _make_program(tmp_path)  # manifest name = github-pr-ops
+    from ouroboros.plugin.trust_store import GrantedScope, TrustRecord
+
+    wrong_plugin = TrustRecord(
+        plugin="some-other-plugin",
+        version="0.1.0",
+        granted_scopes=(
+            GrantedScope(
+                scope="github:read",
+                granted_at="2025-01-01T00:00:00Z",
+                granted_by="user:test",
+            ),
+        ),
+    )
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=wrong_plugin,
+        event_sink=events.append,
+        correlation_id="corr-wrong-plugin",
+        subprocess_runner=_fake_runner(),
+    )
+    assert result.status == "blocked"
+    assert events[0]["trust_state"] == "installed"
+
+
 def test_required_permission_order_matches_manifest_declaration(tmp_path: Path) -> None:
     """Manifest declaration order must drive both the blocked-scope error
     message (which names the FIRST missing required scope) and the

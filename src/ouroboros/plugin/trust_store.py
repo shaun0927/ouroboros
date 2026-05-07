@@ -195,22 +195,22 @@ class TrustStore:
             self._write_atomic(plugin, payload)
 
     def remove(self, plugin: str) -> bool:
-        """Remove the trust file for `plugin`. Returns True if removed."""
+        """Remove the trust file for `plugin`. Returns True if removed.
+
+        The lock file is intentionally NOT unlinked. POSIX flocks are
+        inode-based: if `remove()` deleted `trust.json.lock` while still
+        holding the flock, another process arriving immediately after
+        could `open()` the path, create a *new* inode, and acquire an
+        independent flock on that new inode. Two writers would then run
+        concurrently and silently lose or resurrect trust state.
+        Keeping the lock file (a single empty marker file per plugin)
+        avoids that cross-process race entirely.
+        """
         with self._file_lock(plugin):
             path = self._path(plugin)
             if not path.is_file():
                 return False
             path.unlink()
-            # Best-effort: clean up the lock file as well.
-            try:
-                self._lock_path(plugin).unlink()
-            except FileNotFoundError:
-                pass
-            # Best-effort: remove the empty plugin dir if it's empty afterwards.
-            try:
-                path.parent.rmdir()
-            except OSError:
-                pass
             return True
 
 
