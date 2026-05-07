@@ -23,8 +23,8 @@ for the canonical meanings of `AgentRuntimeContext`, `ControlPlane`,
 ├─────────────────────────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                                     │
 │  ┌─────────────────────┐     ┌─────────────────────┐     ┌─────────────────────┐                 │
-│  │   SKILLS REGISTRY    │     │      CORE LAYER     │     │      PRESENTATION    │                 │
-│  │                     │     │                     │     │      LAYER           │                 │
+│  │  SKILLS & AGENTS    │     │      CORE LAYER     │     │      PRESENTATION    │                 │
+│  │     REGISTRY        │     │                     │     │      LAYER           │                 │
 │  │  ┌───────────────┐  │     │  ┌───────────────┐  │     │  ┌───────────────┐  │                 │
 │  │  │   Skills      │──┼─────┼─▶│   Seed Spec    │──┼─────┼─▶│   TUI Dashboard │  │                 │
 │  │  │   (9)         │  │     │  │   (Immutable)  │  │     │  │   (Textual)   │  │                 │
