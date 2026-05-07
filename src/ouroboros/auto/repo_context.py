@@ -56,30 +56,29 @@ def repo_auto_answer_context(cwd: str | Path) -> AutoAnswerContext:
     pyproject = root / "pyproject.toml"
     if pyproject.is_file():
         pyproject_data = _read_pyproject(pyproject)
-        if pyproject_data is None:
-            return AutoAnswerContext(repo_facts=facts, evidence=evidence)
-        project = _table(pyproject_data.get("project"))
+        if pyproject_data is not None:
+            project = _table(pyproject_data.get("project"))
 
-        requires_python = _clean_str(project.get("requires-python"))
-        if requires_python:
-            runtime_parts.append(f"Python project requiring {requires_python}")
-            strong_runtime_fact = True
-        elif project:
-            facts["project_kind"] = "Python project declared in pyproject.toml"
-            evidence["project_kind"] = ("pyproject.toml",)
+            requires_python = _clean_str(project.get("requires-python"))
+            if requires_python:
+                runtime_parts.append(f"Python project requiring {requires_python}")
+                strong_runtime_fact = True
+            elif project:
+                facts["project_kind"] = "Python project declared in pyproject.toml"
+                evidence["project_kind"] = ("pyproject.toml",)
 
-        package_manager = _python_package_manager(root, pyproject_data)
-        if package_manager:
-            facts["package_manager"] = package_manager
-            evidence["package_manager"] = ("pyproject.toml",)
-            runtime_parts.append(f"managed with {package_manager}")
+            package_manager = _python_package_manager(root, pyproject_data)
+            if package_manager:
+                facts["package_manager"] = package_manager
+                evidence["package_manager"] = ("pyproject.toml",)
+                runtime_parts.append(f"managed with {package_manager}")
 
-        framework = _framework(project)
-        if framework:
-            facts["framework"] = framework
-            evidence["framework"] = ("pyproject.toml",)
-            runtime_parts.append(f"using {framework}")
-            strong_runtime_fact = True
+            framework = _framework(project)
+            if framework:
+                facts["framework"] = framework
+                evidence["framework"] = ("pyproject.toml",)
+                runtime_parts.append(f"using {framework}")
+                strong_runtime_fact = True
 
     _add_javascript_facts(root, facts, evidence)
     _add_rust_facts(root, facts, evidence)
@@ -124,7 +123,10 @@ def _add_javascript_facts(
     scripts = data.get("scripts")
     if not isinstance(scripts, dict):
         return
-    script_runner = manager if not manager.startswith("ambiguous ") else "package"
+    if manager and not manager.startswith("ambiguous "):
+        script_runner = manager
+    else:
+        script_runner = "package"
     for script_name, fact_key in _SCRIPT_FACTS.items():
         value = _clean_str(scripts.get(script_name))
         if value:
@@ -295,7 +297,7 @@ def _javascript_package_manager(root: Path) -> tuple[str, tuple[str, ...]]:
     if matched:
         filename, manager = matched[0]
         return manager, ("package.json", filename)
-    return "npm/package.json", ("package.json",)
+    return "", ()
 
 
 def _framework(project: dict[str, Any]) -> str:

@@ -152,13 +152,35 @@ def test_repo_context_recognizes_compose_yml_hint(tmp_path) -> None:
 
 def test_repo_context_ignores_malformed_pyproject_conservatively(tmp_path) -> None:
     (tmp_path / "pyproject.toml").write_text("[project\n", encoding="utf-8")
-    (tmp_path / "src").mkdir()
-    (tmp_path / "tests").mkdir()
 
     context = repo_auto_answer_context(tmp_path)
 
     assert context.repo_facts == {}
     assert context.evidence == {}
+
+
+def test_repo_context_keeps_non_python_facts_when_pyproject_malformed(tmp_path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project\n", encoding="utf-8")
+    (tmp_path / "package.json").write_text(
+        json.dumps({"name": "demo-web", "scripts": {"test": "vitest run"}}),
+        encoding="utf-8",
+    )
+    (tmp_path / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n", encoding="utf-8")
+    (tmp_path / "Cargo.toml").write_text(
+        '[package]\nname = "demo-cli"\nversion = "0.1.0"\n', encoding="utf-8"
+    )
+    (tmp_path / "Dockerfile").write_text("FROM alpine\n", encoding="utf-8")
+
+    context = repo_auto_answer_context(tmp_path)
+
+    assert "runtime_context" not in context.repo_facts
+    assert "JavaScript/TypeScript project 'demo-web'" in context.repo_facts["project_kind"]
+    assert "Rust project 'demo-cli'" in context.repo_facts["project_kind"]
+    assert "pnpm" in context.repo_facts["package_manager"]
+    assert "Cargo" in context.repo_facts["package_manager"]
+    assert context.repo_facts["test_command"] == "pnpm script `test`: vitest run"
+    assert context.repo_facts["execution_hints"] == "Dockerfile present"
+    assert "pyproject.toml" not in context.evidence["project_kind"]
 
 
 def test_repo_context_ignores_malformed_package_json_conservatively(tmp_path) -> None:
@@ -170,3 +192,18 @@ def test_repo_context_ignores_malformed_package_json_conservatively(tmp_path) ->
     assert "project_kind" not in context.repo_facts
     assert "package_manager" not in context.repo_facts
     assert "test_command" not in context.repo_facts
+
+
+def test_repo_context_handles_javascript_without_lockfile(tmp_path) -> None:
+    (tmp_path / "package.json").write_text(
+        json.dumps({"name": "demo-web", "scripts": {"test": "vitest run"}}),
+        encoding="utf-8",
+    )
+
+    context = repo_auto_answer_context(tmp_path)
+
+    assert "runtime_context" not in context.repo_facts
+    assert context.repo_facts["project_kind"] == "JavaScript/TypeScript project 'demo-web'"
+    assert "package_manager" not in context.repo_facts
+    assert context.repo_facts["test_command"] == "package script `test`: vitest run"
+    assert context.evidence["test_command"] == ("package.json",)
