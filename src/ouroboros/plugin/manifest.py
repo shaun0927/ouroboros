@@ -442,6 +442,15 @@ def load_manifest(path: str | Path) -> PluginManifest:
     source_path = source_raw.get("path")
     if source_type in _PATH_SANDBOXED_SOURCE_TYPES and isinstance(source_path, str):
         _validate_sandboxed_path(source_path, source_type=source_type, manifest_path=manifest_path)
+        # Sandbox check guarantees the user-authored path is a safe
+        # relative slug (no traversal, no absolute, no Windows drive
+        # prefix). Now anchor it to the manifest's directory so the
+        # firewall's subprocess `cwd` doesn't depend on where the
+        # operator ran `ooo` from. The two steps are complementary:
+        # sandbox validates the on-disk text, this resolves it to a
+        # stable absolute filesystem location for runtime consumers.
+        candidate = (manifest_path.parent / source_path).resolve()
+        source_path = str(candidate)
     source = SourceSpec(
         type=source_type,
         path=source_path,

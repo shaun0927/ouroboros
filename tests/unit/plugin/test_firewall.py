@@ -470,10 +470,12 @@ def test_subprocess_runs_with_cwd_for_local_path_manifest(tmp_path: Path) -> Non
     subprocess is anchored there. The firewall must pass `cwd=...`
     to subprocess.run, not silently inherit the caller's cwd.
     """
-    # Use a real existing directory so the firewall's existence check
-    # accepts the path. tmp_path is the cleanest such directory.
+    # Use a sandboxed relative path that resolves into tmp_path. The
+    # manifest loader rejects absolute paths for `local_path` /
+    # `plugin_home` (#745 sandbox), and then anchors the relative slug
+    # to the manifest's directory — which is `tmp_path` for this test.
     payload = json.loads(json.dumps(REFERENCE_MANIFEST))
-    payload["source"] = {"type": "local_path", "path": str(tmp_path)}
+    payload["source"] = {"type": "local_path", "path": "."}
     program = _make_program(tmp_path, payload)
 
     captured: dict = {}

@@ -58,25 +58,37 @@ def _resolve_manifest_path(target: str) -> Path:
 
 
 def _load_with_friendly_error(target: str) -> PluginManifest:
-    """Load a manifest, printing a nicely-formatted error on failure."""
+    """Load a manifest, printing a nicely-formatted error on failure.
+
+    `load_manifest` already converts every load-time failure
+    (permission denied, JSON decode, schema violation, unsupported
+    schema_version) into a structured `PluginManifestError` with the
+    user-facing message in `args[0]`. The CLI surfaces that message as
+    the leading line so operators can tell "manifest is unreadable"
+    apart from "manifest invalid" without us re-deriving the
+    classification from `expected`/`got`.
+    """
     path = _resolve_manifest_path(target)
     try:
         return load_manifest(path)
     except PluginManifestError as exc:
         loc = exc.json_pointer if exc.json_pointer else "(root)"
+        message = exc.args[0] if exc.args else ""
+        # Most paths inside `load_manifest` already produce a self-
+        # describing message ("manifest is unreadable: …", "manifest is
+        # not valid JSON: …"). The jsonschema-driven validation path
+        # surfaces a raw schema error string (e.g. "'Bad Name' does
+        # not match '^[a-z…'"), which on its own does not say *what*
+        # is wrong. Add the "manifest invalid:" prefix only in that
+        # case so unreadable / decode-failure messages stay precise.
+        if not message.startswith("manifest"):
+            message = f"manifest invalid: {message}"
         print_error(
-            f"manifest invalid:\n  path: {exc.path}\n  at: {loc}\n  expected: {exc.expected}\n  got: {exc.got}"
-        )
-        raise typer.Exit(code=1) from exc
-    except OSError as exc:
-        # Mirror the inspect/list error path: `discover` is also a
-        # diagnostic command, so an unreadable manifest (broken
-        # symlink, wrong permissions, transient I/O) must surface as a
-        # clean message instead of bubbling a raw OSError.
-        print_error(
-            f"manifest is unreadable: {path}: {exc}\n"
-            f"  Check the path and file permissions; "
-            f"`ooo plugin discover` cannot proceed without it."
+            f"{message}\n"
+            f"  path: {exc.path}\n"
+            f"  at: {loc}\n"
+            f"  expected: {exc.expected}\n"
+            f"  got: {exc.got}"
         )
         raise typer.Exit(code=1) from exc
 

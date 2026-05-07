@@ -213,12 +213,16 @@ def test_plugin_home_source_requires_path(tmp_path: Path) -> None:
 
 
 def test_local_path_source_with_path_loads(tmp_path: Path) -> None:
-    """Positive control: source.type=local_path with `path` loads cleanly."""
+    """Positive control: source.type=local_path with `path` loads cleanly
+    and is normalized against the manifest's directory at load time."""
     fp = json.loads(json.dumps(REFERENCE_MANIFEST))
     fp["source"] = {"type": "local_path", "path": "plugins/whatever"}
     manifest = load_manifest(_write(tmp_path, fp))
     assert manifest.source.type == "local_path"
-    assert manifest.source.path == "plugins/whatever"
+    assert manifest.source.path is not None
+    resolved = Path(manifest.source.path)
+    assert resolved.is_absolute()
+    assert resolved == (tmp_path / "plugins" / "whatever").resolve()
 
 
 def test_old_risk_enum_value_rejected(tmp_path: Path) -> None:
@@ -304,12 +308,44 @@ def test_sandboxed_source_path_rejects_traversal(
 
 
 def test_plugin_home_with_relative_path_loads(tmp_path: Path) -> None:
-    """Positive control: a sandboxed relative `plugin_home` path loads."""
+    """Positive control: a sandboxed relative `plugin_home` path loads
+    and is normalized against the manifest's directory so downstream
+    consumers (firewall cwd, CLI inspect output) see a stable absolute
+    location regardless of the operator's current working directory.
+    """
     fp = json.loads(json.dumps(REFERENCE_MANIFEST))
     fp["source"] = {"type": "plugin_home", "path": "vendor/ooo-pr-ops"}
     manifest = load_manifest(_write(tmp_path, fp))
     assert manifest.source.type == "plugin_home"
-    assert manifest.source.path == "vendor/ooo-pr-ops"
+    assert manifest.source.path is not None
+    resolved = Path(manifest.source.path)
+    assert resolved.is_absolute()
+    assert resolved == (tmp_path / "vendor" / "ooo-pr-ops").resolve()
+
+
+def test_relative_source_path_resolves_to_absolute(tmp_path: Path) -> None:
+    """Regression for the d1511607 fix: a `source.path` like `"."` or
+    `"plugins/foo"` used to be passed through to the firewall verbatim,
+    so the subprocess `cwd` depended on where the operator ran `ooo`
+    from. The loader now anchors relative `source.path` to the manifest
+    file's directory at load time. Layered with the sandbox check from
+    #745, the input is validated as a safe relative slug *and* the
+    output is a stable absolute path for runtime consumers.
+    """
+    plugin_home = tmp_path / "plugins" / "github-pr-ops"
+    plugin_home.mkdir(parents=True)
+    payload = json.loads(json.dumps(REFERENCE_MANIFEST))
+    payload["source"] = {"type": "local_path", "path": "."}
+    manifest_path = _write(plugin_home, payload)
+
+    manifest = load_manifest(manifest_path)
+
+    assert manifest.source.path is not None
+    resolved = Path(manifest.source.path)
+    assert resolved.is_absolute(), "source.path must be normalized to absolute"
+    assert resolved == plugin_home.resolve(), (
+        f"source.path={resolved!r} did not resolve relative to manifest dir {plugin_home!r}"
+    )
 
 
 def test_vendored_schemas_are_packaged_resources() -> None:
