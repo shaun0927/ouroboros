@@ -53,6 +53,7 @@ _EVIDENCE_BACKED_SOURCES: frozenset[LedgerSource] = frozenset(
         LedgerSource.REPO_FACT,
         LedgerSource.EXISTING_CONVENTION,
         LedgerSource.INFERENCE,
+        LedgerSource.NON_GOAL,
     }
 )
 

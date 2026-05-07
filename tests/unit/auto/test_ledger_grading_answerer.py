@@ -1044,3 +1044,36 @@ def test_ledger_summary_excludes_inactive_entries_from_provenance() -> None:
     assert "runtime_context" not in summary["evidence_backed_sections"]
     assert "runtime_context" not in summary["assumption_only_sections"]
     assert "constraints" not in summary["assumption_only_sections"]
+
+
+def test_ledger_summary_treats_non_goal_entries_as_evidence_backed() -> None:
+    """Explicit non-goals are user-stated policy, not bare assumptions.
+
+    Both user-supplied non-goals (CONFIRMED) and auto-defaulted non-goals
+    (DEFAULTED) represent deliberate scope boundaries, so the section should
+    surface as evidence-backed rather than assumption-only.
+    """
+    explicit_ledger = SeedDraftLedger.from_goal(
+        "Build hello CLI. Non-goals are cloud sync and authentication."
+    )
+    explicit_summary = explicit_ledger.summary()
+
+    assert "non_goals" in explicit_summary["provenance"].get("non_goal", [])
+    assert "non_goals" in explicit_summary["evidence_backed_sections"]
+    assert "non_goals" not in explicit_summary["assumption_only_sections"]
+
+    defaulted_ledger = SeedDraftLedger.from_goal("Build hello CLI")
+    defaulted_ledger.add_entry(
+        "non_goals",
+        LedgerEntry(
+            key="non_goals.mvp_scope",
+            value="No cloud sync; no paid services.",
+            source=LedgerSource.NON_GOAL,
+            confidence=0.86,
+            status=LedgerStatus.DEFAULTED,
+        ),
+    )
+    defaulted_summary = defaulted_ledger.summary()
+
+    assert "non_goals" in defaulted_summary["evidence_backed_sections"]
+    assert "non_goals" not in defaulted_summary["assumption_only_sections"]
