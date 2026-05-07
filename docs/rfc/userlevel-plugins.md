@@ -302,12 +302,47 @@ manifest `name` field IS the user-facing command namespace, with no
 aliasing: a plugin named `github-pr-ops` is invoked as
 `ooo github-pr-ops <command> [args...]`, where `<command>` is one of
 the entries declared in the manifest's `commands` array (each `commands`
-entry's own `name` is the subcommand). Manifest `name` therefore doubles
-as a uniqueness key in the trust store and as the CLI namespace.
-Aliases, short names, and namespace collisions across repos are
-explicitly out of scope for v0 — if two installed plugins declare the
+entry's own `name` is the subcommand). Aliases and short names are
+explicitly out of scope for v0; if two installed plugins declare the
 same `name`, `ooo plugin install` MUST refuse the second one with a
 collision error.
+
+**Trust identity is NOT the manifest `name`.** Manifest `name` controls
+the CLI namespace and the install-time uniqueness check; it does **not**
+identify the trust subject. Trust records — and the lockfile entries in
+`~/.ouroboros/plugins.lock` — MUST be keyed by the tuple
+
+```text
+( source.type , source.url , manifest_digest )
+```
+
+where `manifest_digest` is the sha256 of the canonical-form manifest at
+install time (and `source.url` is normalized — scheme, host, path, no
+trailing `.git`, no fragment). This closes the permission-escalation
+path that would otherwise exist when a user runs `remove` + `add` and a
+different repository ships a plugin with the same `name`: the reinstalled
+plugin presents a different `(source.url, manifest_digest)` triple, so
+the firewall MUST treat its required scopes as untrusted and force a
+fresh `ooo plugin trust` decision before invocation.
+
+Concrete obligations on the lifecycle commands:
+
+- `ooo plugin remove <name>` MUST delete every trust record bound to
+  that plugin's current triple. No "tombstone with implicit re-grant"
+  behavior is permitted — uninstall fully revokes.
+- `ooo plugin install` MUST compute the new triple and, if any field
+  differs from a previously-trusted record for the same `name`, MUST
+  treat the install as a fresh trust subject (all `required: true`
+  permissions begin un-trusted).
+- `ooo plugin trust ...` writes a record bound to the current triple of
+  the named plugin. Trust does NOT carry across triple changes, ever,
+  including version bumps from the same source.url (digest changes ⇒
+  new trust subject).
+- The deferred `update` flow, when it lands, MUST surface the digest
+  change to the user and require explicit re-confirmation of any
+  permission whose risk class changed; until `update` exists, the
+  documented upgrade path is `remove` + `add`, which by construction
+  forces fresh trust grants.
 
 ```bash
 $ ooo plugin add https://github.com/Q00/ouroboros-plugins
