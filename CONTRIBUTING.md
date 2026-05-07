@@ -97,7 +97,18 @@ uv run ruff format src/ tests/
 
 # Type check
 uv run mypy src/ouroboros
+
+# ooo auto product boundary check (Q00/ouroboros#725)
+python3 scripts/check-auto-boundary.py
 ```
+
+The last command enforces that the `ooo auto` core source files do
+not introduce domain-specific keywords (`github`, `pull_request`,
+`jira`, `slack`, …). Domain workflows belong in UserLevel plugins,
+not in `ooo auto`. The CI workflow `ooo-auto-boundary` runs the same
+check on every PR. If a forbidden keyword is genuinely necessary on
+a line (rare), append `# domain-keyword-allowed: <reason>` and
+include rationale in the PR description.
 
 ### 6. Submit PR
 
