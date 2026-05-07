@@ -350,11 +350,17 @@ def list_command(
         elif manifest is not None:
             record = _read_trust_or_exit(trust, entry.name)
         else:
-            # Manifest unreadable — fall through to the
-            # safe-default branch below; reading trust here would still
-            # require an exit_or path, but we don't yet know the
-            # source.type, so skip and report stale-but-known state.
-            record = _read_trust_or_exit(trust, entry.name)
+            # Manifest unreadable: we can't tell whether this is a
+            # first-party plugin (trust ignored) or a third-party one
+            # whose grants need showing, and the row is already going
+            # to fall through to the safe-default "installed" branch
+            # below. Reading trust.json here would only add a second
+            # crash path — a corrupt trust.json on top of an
+            # unreadable manifest would abort the entire `list`
+            # output, which defeats the diagnostic purpose of the
+            # command. Skip the trust read and report the row as
+            # safely degraded.
+            record = None
 
         # Stale-version trust files: the firewall treats them as
         # invalidated, so the JSON view should not echo grants that

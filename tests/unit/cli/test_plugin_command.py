@@ -732,3 +732,71 @@ def test_list_json_partial_trust_reports_installed_not_trusted(
     # And the row exposes the firewall-blocking scopes as structured
     # output so consumers can pipe to jq for an automated re-trust step.
     assert row["missing_required_scopes"] == ["github:pull_request:write"]
+
+
+def test_list_survives_doubly_corrupt_row(runner: CliRunner, tmp_path: Path) -> None:
+    """Regression: when a row's on-disk manifest is unreadable, `list`
+    must NOT also try to read its trust.json — a second corrupt file
+    on the same row would otherwise abort the entire `list` output and
+    defeat the diagnostic purpose of the command. The unreadable-
+    manifest branch reports the row as "installed" with empty scopes
+    and falls through cleanly.
+    """
+    import os
+    import sys
+
+    if sys.platform.startswith("win"):
+        pytest.skip("POSIX permission semantics required")
+    if os.geteuid() == 0:
+        pytest.skip("root bypasses POSIX file permissions")
+
+    plugin_home = tmp_path / "ph"
+    manifest_path = _write_manifest(plugin_home, REFERENCE_MANIFEST)
+    lock_path = tmp_path / "plugins.lock"
+    trust_root = tmp_path / "trust"
+    Lockfile(lock_path).add(
+        LockEntry(
+            name="github-pr-ops",
+            version="0.1.0",
+            source_kind="local",
+            repository=None,
+            git_sha=None,
+            manifest_checksum="sha256:0",
+            installed_at="2026-05-08T00:00:00Z",
+            plugin_home=str(plugin_home),
+        )
+    )
+    # Corrupt the trust file (parses as JSON, but missing required keys)
+    # AND make the manifest unreadable. With the prior behavior the
+    # corrupt trust read would crash `list` even though the row was
+    # already lost to the unreadable manifest.
+    trust_path = trust_root / "github-pr-ops" / "trust.json"
+    trust_path.parent.mkdir(parents=True, exist_ok=True)
+    trust_path.write_text(json.dumps({"schema_version": "0.1"}))
+    original_mode = manifest_path.stat().st_mode
+    manifest_path.chmod(0o000)
+    try:
+        result = runner.invoke(
+            plugin_app,
+            [
+                "list",
+                "--json",
+                "--lockfile",
+                str(lock_path),
+                "--trust-root",
+                str(trust_root),
+            ],
+        )
+    finally:
+        manifest_path.chmod(original_mode)
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output.strip())
+    assert isinstance(data, list) and len(data) == 1
+    row = data[0]
+    assert row["trust_state"] == "installed"
+    # No grants are echoed because we couldn't verify them against a
+    # readable manifest — refusing to "lie about effective grants" is
+    # the same invariant `list_json_zeroes_stale_grants...` enforces.
+    assert row["granted_scopes"] == []
+    assert row["trust_version_stale"] is False
