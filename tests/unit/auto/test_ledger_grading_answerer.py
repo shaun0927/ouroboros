@@ -1253,6 +1253,59 @@ def test_auto_answerer_allows_product_questions_with_adjectival_compliance_verbs
         assert answer.source != AutoAnswerSource.BLOCKER, question
 
 
+def test_auto_answerer_routes_regulated_product_questions_before_io_or_runtime() -> None:
+    """Regulated-product questions must route to ``_product_behavior_answer()``
+    even when the prompt also matches the IO or runtime classifiers.
+
+    The router previously checked ``_is_actor_or_io_question`` and
+    ``_is_runtime_context_question`` before ``_is_product_behavior_question``,
+    so prompts like "What inputs should the GDPR export take?" or "Which
+    runtime should the GDPR export use?" got a generic IO/runtime template
+    and then bypassed the risky-fallback blocker via
+    ``_is_safe_product_regulated_question``. The result was a generic answer
+    that silently dropped the regulated-feature semantics from the ledger.
+
+    With ``_is_safe_product_regulated_question`` now checked first, those
+    prompts route through ``_product_behavior_answer()``: the answer source is
+    a feature-specific entry (``constraints.behavior.*`` /
+    ``acceptance.behavior.*``) and the regulated noun is preserved.
+
+    Ref: ouroboros-agent[bot] BLOCKING on #738 — ``answerer.py:837``.
+    """
+    answerer = AutoAnswerer()
+    ledger = SeedDraftLedger.from_goal("Build a regulated data app")
+
+    cases = [
+        ("What inputs should the GDPR export take?", "gdpr"),
+        ("What outputs should the PII export produce?", "pii"),
+        ("Which runtime should the GDPR export use?", "gdpr"),
+        ("What inputs should the HIPAA audit log download accept?", "hipaa"),
+    ]
+
+    for question, regulated_noun in cases:
+        answer = answerer.answer(question, ledger)
+
+        # Routed away from blocker
+        assert answer.blocker is None, question
+        assert answer.source != AutoAnswerSource.BLOCKER, question
+
+        # Routed to _product_behavior_answer(), not _io_actor_answer / _runtime_answer
+        update_keys = [u[1].key for u in answer.ledger_updates]
+        assert any("behavior." in k for k in update_keys), (
+            f"Expected behavior.* ledger key for {question!r}, got {update_keys}"
+        )
+        assert not any(k.startswith("io.") or k.startswith("runtime.") for k in update_keys), (
+            f"Question {question!r} fell through to IO/runtime answer "
+            f"(found IO/runtime ledger key in {update_keys})"
+        )
+
+        # Regulated noun preserved in answer text or ledger value
+        combined = answer.text + " ".join(u[1].value for u in answer.ledger_updates)
+        assert regulated_noun in combined.lower(), (
+            f"Regulated noun {regulated_noun!r} not preserved for {question!r}"
+        )
+
+
 def test_auto_answerer_blocks_mixed_intent_regulated_questions() -> None:
     """Mixed-intent questions with both product-semantics and active-form
     compliance verbs must remain blocked.

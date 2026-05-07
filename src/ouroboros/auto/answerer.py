@@ -115,7 +115,17 @@ class AutoAnswerer:
             return self._verification_answer(question)
         if _is_feature_acceptance_question(lowered):
             return self._feature_acceptance_answer(question)
-        if _is_actor_or_io_question(lowered):
+        # Regulated-product questions take precedence over the generic IO and
+        # runtime branches so that prompts such as "What inputs should the GDPR
+        # export take?" or "Which runtime should the GDPR export use?" reach
+        # _product_behavior_answer() with the regulated noun preserved instead
+        # of getting a generic IO/runtime template that strips the
+        # regulated-feature semantics. The risky-fallback gate below also
+        # consults _is_safe_product_regulated_question(), so this keeps the
+        # router and the safe-allowlist on the same answer path.
+        if _is_safe_product_regulated_question(lowered):
+            answer = self._product_behavior_answer(question)
+        elif _is_actor_or_io_question(lowered):
             answer = self._io_actor_answer(question)
         elif _is_runtime_context_question(lowered):
             answer = self._runtime_answer(question, context)
