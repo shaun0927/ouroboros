@@ -176,6 +176,49 @@ def test_first_party_source_branch(tmp_path: Path) -> None:
     assert manifest.source.repository is None
 
 
+def test_local_path_source_requires_path(tmp_path: Path) -> None:
+    """source.type=local_path must reject manifests that omit `path`.
+
+    Without the conditional `required`, a manifest like
+    `{"source": {"type": "local_path"}}` would validate and the loader
+    would return `SourceSpec(path=None)`, pushing the failure into
+    downstream code instead of catching it at load time.
+    """
+    bad = json.loads(json.dumps(REFERENCE_MANIFEST))
+    bad["source"] = {"type": "local_path"}
+    with pytest.raises(PluginManifestError) as excinfo:
+        load_manifest(_write(tmp_path, bad))
+    err = excinfo.value
+    assert err.json_pointer is not None
+    assert err.json_pointer.startswith("/source")
+    assert "path" in err.args[0]
+
+
+def test_plugin_home_source_requires_path(tmp_path: Path) -> None:
+    """source.type=plugin_home must also reject manifests that omit `path`.
+
+    plugin_home sources reference a slot under the user's plugin home
+    directory; the loader needs the relative path to resolve them.
+    """
+    bad = json.loads(json.dumps(REFERENCE_MANIFEST))
+    bad["source"] = {"type": "plugin_home"}
+    with pytest.raises(PluginManifestError) as excinfo:
+        load_manifest(_write(tmp_path, bad))
+    err = excinfo.value
+    assert err.json_pointer is not None
+    assert err.json_pointer.startswith("/source")
+    assert "path" in err.args[0]
+
+
+def test_local_path_source_with_path_loads(tmp_path: Path) -> None:
+    """Positive control: source.type=local_path with `path` loads cleanly."""
+    fp = json.loads(json.dumps(REFERENCE_MANIFEST))
+    fp["source"] = {"type": "local_path", "path": "plugins/whatever"}
+    manifest = load_manifest(_write(tmp_path, fp))
+    assert manifest.source.type == "local_path"
+    assert manifest.source.path == "plugins/whatever"
+
+
 def test_old_risk_enum_value_rejected(tmp_path: Path) -> None:
     """Test 11: command.risk='writes_state' rejected by 3-value enum
     (per Q00/ouroboros-plugins#10 lock)."""

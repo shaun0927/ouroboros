@@ -41,12 +41,34 @@
           "enum": ["local_path", "plugin_home", "first_party"]
         },
         "path": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "repository": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"type": {"const": "local_path"}},
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["type", "path"]
+          }
+        },
+        {
+          "if": {
+            "properties": {"type": {"const": "plugin_home"}},
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["type", "path"]
+          }
+        }
+      ]
     },
     "commands": {
       "type": "array",
