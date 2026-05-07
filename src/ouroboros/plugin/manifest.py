@@ -285,6 +285,24 @@ def load_manifest(path: str | Path) -> PluginManifest:
         repository=source_raw.get("repository"),
     )
 
+    # Reject duplicate command names within a manifest. `RegisteredProgram
+    # .find_command()` returns the first match by name, so a second command
+    # with the same name would be silently unreachable and its
+    # `risk` / `requires_confirmation` settings would be ignored — an
+    # API-contract ambiguity at the manifest boundary that should fail
+    # loud at load time, mirroring the per-permission/per-capability
+    # uniqueness already enforced below.
+    command_names_seen: set[str] = set()
+    for index, c in enumerate(raw["commands"]):
+        if c["name"] in command_names_seen:
+            raise PluginManifestError(
+                f"duplicate command name {c['name']!r}",
+                path=str(manifest_path),
+                json_pointer=f"/commands/{index}/name",
+                expected="unique command name across the array",
+                got=c["name"],
+            )
+        command_names_seen.add(c["name"])
     commands = tuple(_build_command(c) for c in raw["commands"])
 
     # Capabilities and permissions preserve manifest declaration order so the

@@ -163,6 +163,62 @@ def _grant_in_subprocess(root_str: str, plugin: str, version: str, scope: str) -
     )
 
 
+def _reset_in_subprocess(root_str: str, plugin: str, new_version: str) -> None:
+    from pathlib import Path
+
+    from ouroboros.plugin.trust_store import TrustStore
+
+    TrustStore(root=Path(root_str)).reset_for_version_bump(plugin, new_version)
+
+
+def test_concurrent_reset_and_grant_produce_valid_file(tmp_path: Path) -> None:
+    """`reset_for_version_bump` racing with concurrent `grant()` calls
+    must not corrupt the trust file or partially write across writers.
+
+    Regression for ouroboros-agent[bot] BLOCKING finding on PR #749 commit
+    e0112d3: previously `reset_for_version_bump()` and `remove()` did not
+    take the same per-plugin flock that `grant()` did, so an upgrade/reset
+    racing with `ooo plugin trust` could clobber state in either direction.
+    All three mutating operations now share the lock; under contention the
+    file must remain a well-formed JSON document with the correct
+    schema_version and a coherent (plugin, version) pair.
+    """
+    import json as _json
+    import multiprocessing as mp
+
+    plugin = "concurrent-reset"
+    ctx = mp.get_context("spawn")
+
+    # Seed the file at v1 with a starting scope so all three mutators
+    # operate on an existing record.
+    TrustStore(root=tmp_path).grant(
+        plugin=plugin, version="0.1.0", scope="github:read", granted_by="u"
+    )
+
+    workers = [
+        ctx.Process(target=_grant_in_subprocess, args=(str(tmp_path), plugin, "0.1.0", "a")),
+        ctx.Process(target=_reset_in_subprocess, args=(str(tmp_path), plugin, "0.2.0")),
+        ctx.Process(target=_grant_in_subprocess, args=(str(tmp_path), plugin, "0.1.0", "b")),
+        ctx.Process(target=_grant_in_subprocess, args=(str(tmp_path), plugin, "0.2.0", "c")),
+    ]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join(timeout=30)
+        assert w.exitcode == 0, f"worker failed: pid={w.pid} exit={w.exitcode}"
+
+    # The file must still be a syntactically valid JSON object with the
+    # expected top-level fields. Race-corrupted partial writes would fail
+    # here.
+    raw = (tmp_path / plugin / "trust.json").read_text()
+    payload = _json.loads(raw)
+    assert payload["plugin"] == plugin
+    assert payload["schema_version"] == "0.1"
+    assert payload["version"] in {"0.1.0", "0.2.0"}
+    # Read through the public API: it must succeed without raising.
+    assert TrustStore(root=tmp_path).read(plugin) is not None
+
+
 def test_grant_concurrent_writes_do_not_lose_scopes(tmp_path: Path) -> None:
     """Concurrent grant() calls for different scopes must all persist.
 

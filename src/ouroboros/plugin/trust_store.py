@@ -113,17 +113,18 @@ class TrustStore:
             raise
 
     @contextmanager
-    def _grant_lock(self, plugin: str) -> Iterator[None]:
-        """Hold an exclusive POSIX flock for the duration of a grant().
+    def _trust_lock(self, plugin: str) -> Iterator[None]:
+        """Hold an exclusive POSIX flock for the duration of a mutation.
 
-        The trust file is the source of truth for authorization, so the
-        read-modify-write sequence in `grant()` must be serialised across
-        processes — without this, two concurrent grants for different
-        scopes both read the same prior file and the second `os.replace`
-        wins, silently dropping the other scope. The lock is taken on a
-        sidecar `.lock` file in the plugin's trust directory; on platforms
-        without `fcntl` we degrade to last-writer-wins (no concurrent CLI
-        usage is expected outside POSIX).
+        The trust file is the source of truth for authorization, so every
+        mutating operation (`grant`, `reset_for_version_bump`, `remove`)
+        must be serialised across processes — without this, concurrent
+        writers both read the same prior file and the second `os.replace`
+        wins, silently dropping a previously granted scope or
+        reintroducing stale state. The lock is taken on a sidecar `.lock`
+        file in the plugin's trust directory; on platforms without
+        `fcntl` we degrade to last-writer-wins (no concurrent CLI usage
+        is expected outside POSIX).
         """
         plugin_dir = self.root / plugin
         plugin_dir.mkdir(parents=True, exist_ok=True)
@@ -159,7 +160,7 @@ class TrustStore:
         when = when or datetime.now(tz=UTC)
         ts = when.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        with self._grant_lock(plugin):
+        with self._trust_lock(plugin):
             existing = self.read(plugin)
             # Per Q00/ouroboros-plugins#9 Q4: version bump invalidates trust.
             if existing is not None and existing.version != version:
@@ -185,7 +186,8 @@ class TrustStore:
         """Invalidate trust because the plugin's version changed.
 
         Writes a new trust file with version=new_version and empty grants.
-        Per Q00/ouroboros-plugins#9 Q4 lock.
+        Per Q00/ouroboros-plugins#9 Q4 lock. Held under the per-plugin
+        trust lock so it cannot race a concurrent `grant()`.
         """
         payload = {
             "schema_version": TRUST_SCHEMA_VERSION,
@@ -193,22 +195,33 @@ class TrustStore:
             "version": new_version,
             "granted_scopes": [],
         }
-        self._write_atomic(plugin, payload)
+        with self._trust_lock(plugin):
+            self._write_atomic(plugin, payload)
 
     def remove(self, plugin: str) -> bool:
-        """Remove the trust file for `plugin`. Returns True if removed."""
+        """Remove the trust file for `plugin`. Returns True if removed.
+
+        Held under the per-plugin trust lock so it cannot race a
+        concurrent `grant()` or `reset_for_version_bump()` and re-create
+        a partially written file.
+        """
         path = self._path(plugin)
         if not path.is_file():
             return False
-        path.unlink()
-        # Best-effort: also drop the sidecar lock file so the plugin
-        # directory can be pruned cleanly when it's otherwise empty.
+        with self._trust_lock(plugin):
+            # Re-check under the lock — another writer may have removed
+            # the file between the precheck and acquisition.
+            if not path.is_file():
+                return False
+            path.unlink()
+        # Lock has been released, so the sidecar can now be removed and
+        # the directory pruned without holding the lock open on a file
+        # we are about to delete.
         lock_path = path.with_suffix(path.suffix + ".lock")
         try:
             lock_path.unlink()
         except FileNotFoundError:
             pass
-        # Best-effort: remove the empty plugin dir if it's empty afterwards.
         try:
             path.parent.rmdir()
         except OSError:

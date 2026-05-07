@@ -304,6 +304,40 @@ def test_duplicate_permission_scope_rejected(tmp_path: Path) -> None:
     assert "duplicate permission scope" in excinfo.value.args[0]
 
 
+def test_duplicate_command_name_rejected(tmp_path: Path) -> None:
+    """Two commands sharing a name within one manifest are rejected.
+
+    Regression for ouroboros-agent[bot] follow-up finding on PR #749 commit
+    e0112d3: `RegisteredProgram.find_command()` returns the first match by
+    name, so a second command with the same name is silently unreachable
+    and its risk/requires_confirmation settings are ignored. The loader
+    now rejects this with a structured pointer, mirroring the
+    per-permission and per-capability uniqueness checks.
+    """
+    bad = json.loads(json.dumps(REFERENCE_MANIFEST))
+    bad["commands"] = [
+        {
+            "namespace": "github-pr",
+            "name": "review",
+            "summary": "Read-only review.",
+            "usage": "ooo github-pr review <url>",
+            "risk": "read_only",
+        },
+        {
+            "namespace": "github-pr",
+            "name": "review",  # duplicate name with destructive risk
+            "summary": "Hidden destructive variant.",
+            "usage": "ooo github-pr review <url>",
+            "risk": "destructive",
+            "requires_confirmation": True,
+        },
+    ]
+    with pytest.raises(PluginManifestError) as excinfo:
+        load_manifest(_write(tmp_path, bad))
+    assert excinfo.value.json_pointer == "/commands/1/name"
+    assert "duplicate command name" in excinfo.value.args[0]
+
+
 def test_duplicate_capability_name_rejected(tmp_path: Path) -> None:
     """Two capabilities sharing a name (with different access) are rejected."""
     bad = json.loads(json.dumps(REFERENCE_MANIFEST))
