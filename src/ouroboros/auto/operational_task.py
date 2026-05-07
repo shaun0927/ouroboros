@@ -39,20 +39,25 @@ RISK_DESTRUCTIVE_CLOSE: Final[str] = "destructive_close"
 
 # Match GitHub PR / issue URLs. Capture only the canonical form to avoid
 # silently classifying e.g. doc links to ``/pulls`` index pages as PRs.
+#
+# Use a negative-lookahead ``(?!\d)`` after the captured digit run instead of
+# ``\b``: Python's ``\b`` treats Hangul (and other non-ASCII word characters)
+# as word characters, so ``/pull/1을 ...`` had no boundary between ``1`` and
+# ``을`` and the match silently failed. ``(?!\d)`` only forbids another digit,
+# which is the actual semantic we want.
 _PR_URL_RE = re.compile(
-    r"https?://github\.com/[\w\-.]+/[\w\-.]+/pull/(\d+)\b",
+    r"https?://github\.com/[\w\-.]+/[\w\-.]+/pull/(\d+)(?!\d)",
     re.IGNORECASE,
 )
-# Use an explicit URL-terminator group so the match works when the goal text
-# concatenates non-ASCII characters (e.g. Korean particles) directly after the
-# URL — Python's ``\b`` treats Hangul as a word character, so it would not
-# count as a boundary against ``s|의`` and the match would silently fail.
+# Index URL ends in literal ``pulls`` (no trailing digit), so an optional
+# URL-continuation group is enough; non-ASCII suffixes are not URL-safe and
+# implicitly terminate the match.
 _PR_INDEX_URL_RE = re.compile(
     r"https?://github\.com/[\w\-.]+/[\w\-.]+/pulls(?:[/?#][^\s)]*)?",
     re.IGNORECASE,
 )
 _ISSUE_URL_RE = re.compile(
-    r"https?://github\.com/[\w\-.]+/[\w\-.]+/issues/(\d+)\b",
+    r"https?://github\.com/[\w\-.]+/[\w\-.]+/issues/(\d+)(?!\d)",
     re.IGNORECASE,
 )
 
@@ -103,26 +108,37 @@ def _has_korean_keyword(text: str, keywords: tuple[str, ...]) -> bool:
 
 
 def _extract_targets(goal: str) -> tuple[tuple[str, ...], bool, bool, bool]:
-    """Return (urls, has_pr, has_pr_index, has_issue) preserving first-seen order."""
+    """Return (urls, has_pr, has_pr_index, has_issue) preserving first-seen order.
+
+    Implementation note: matches from all three URL classes are collected
+    together and sorted by their offset in the goal string. This guarantees
+    real first-appearance order across types — a goal like
+    ``see issues/9 then pull/1`` returns ``(issues/9, pull/1)``, not
+    ``(pull/1, issues/9)`` which an earlier per-class loop produced.
+    """
+    matches: list[tuple[int, str, str]] = []  # (start, kind, url)
+    for kind, pattern in (
+        ("pr", _PR_URL_RE),
+        ("pr_index", _PR_INDEX_URL_RE),
+        ("issue", _ISSUE_URL_RE),
+    ):
+        for match in pattern.finditer(goal):
+            matches.append((match.start(), kind, match.group(0)))
+    matches.sort(key=lambda triple: triple[0])
+
     seen: list[str] = []
     has_pr = False
     has_pr_index = False
     has_issue = False
-    for match in _PR_URL_RE.finditer(goal):
-        url = match.group(0)
+    for _start, kind, url in matches:
         if url not in seen:
             seen.append(url)
-        has_pr = True
-    for match in _PR_INDEX_URL_RE.finditer(goal):
-        url = match.group(0)
-        if url not in seen:
-            seen.append(url)
-        has_pr_index = True
-    for match in _ISSUE_URL_RE.finditer(goal):
-        url = match.group(0)
-        if url not in seen:
-            seen.append(url)
-        has_issue = True
+        if kind == "pr":
+            has_pr = True
+        elif kind == "pr_index":
+            has_pr_index = True
+        else:
+            has_issue = True
     return tuple(seen), has_pr, has_pr_index, has_issue
 
 
@@ -201,16 +217,13 @@ def classify_operational_task(goal: str) -> OperationalTaskClassification:
         risk = RISK_LOW
         requires_confirmation = False
 
-    # Operational signal alone reduces but does not eliminate the case for an
-    # interview: the pipeline owns that policy decision. We expose
-    # ``direct_run_allowed`` so it can choose; ``interview_required`` is only
-    # set when the operational signal is too thin to act on (no concrete
-    # target URL AND no destructive intent that demands confirmation).
-    interview_required = (
-        not (has_pr or has_pr_index or has_issue)
-        and not has_merge
-        and not has_close
-    )
+    # The operational path is only safe to skip the interview when the goal
+    # carries a concrete target URL. A destructive verb on its own ("merge it
+    # once CI is green", "close it") is not actionable — there is no object
+    # to operate on — so it falls back to interview-first regardless of risk
+    # label. (Bot-flagged in #719 review.)
+    has_target = has_pr or has_pr_index or has_issue
+    interview_required = not has_target
 
     return OperationalTaskClassification(
         kind=kind,

@@ -45,9 +45,7 @@ def test_pr_url_alone_allows_direct_run() -> None:
 
 
 def test_pr_url_with_review_keyword_marks_low_risk() -> None:
-    result = classify_operational_task(
-        "review and improve https://github.com/owner/repo/pull/1"
-    )
+    result = classify_operational_task("review and improve https://github.com/owner/repo/pull/1")
     assert result.kind == PR_URL
     assert result.side_effect_risk == RISK_LOW
     assert result.requires_confirmation is False
@@ -79,17 +77,13 @@ def test_korean_merge_intent_detected_with_pr_index_url() -> None:
 
 
 def test_close_keyword_marked_destructive_close() -> None:
-    result = classify_operational_task(
-        "close https://github.com/owner/repo/pull/2 — superseded"
-    )
+    result = classify_operational_task("close https://github.com/owner/repo/pull/2 — superseded")
     assert result.side_effect_risk == RISK_DESTRUCTIVE_CLOSE
     assert result.requires_confirmation is True
 
 
 def test_issue_url_alone_allows_direct_run() -> None:
-    result = classify_operational_task(
-        "look at https://github.com/owner/repo/issues/42"
-    )
+    result = classify_operational_task("look at https://github.com/owner/repo/issues/42")
     assert result.kind == ISSUE_URL
     assert result.direct_run_allowed is True
 
@@ -145,3 +139,70 @@ def test_classification_is_pure_and_repeatable() -> None:
 )
 def test_classification_kind_table(goal: str, expected_kind: str) -> None:
     assert classify_operational_task(goal).kind == expected_kind
+
+
+# ---------------------------------------------------------------------------
+# Bot review follow-ups (#719)
+# ---------------------------------------------------------------------------
+
+
+def test_targetless_merge_intent_falls_back_to_interview() -> None:
+    """`merge it once CI is green` has no URL — pipeline cannot act without a
+    target, so this MUST require the interview rather than entering the
+    direct path. (Bot-flagged in #719 review.)"""
+    result = classify_operational_task("merge it once CI is green")
+    assert result.kind == MERGE_INTENT
+    assert result.requires_confirmation is True
+    assert result.interview_required is True
+    assert result.direct_run_allowed is False
+
+
+def test_targetless_close_intent_falls_back_to_interview() -> None:
+    result = classify_operational_task("close it — superseded")
+    assert result.kind == MERGE_INTENT
+    assert result.side_effect_risk == RISK_DESTRUCTIVE_CLOSE
+    assert result.requires_confirmation is True
+    assert result.interview_required is True
+    assert result.direct_run_allowed is False
+
+
+def test_pr_url_recognized_with_korean_particle_suffix() -> None:
+    """A canonical PR URL immediately followed by a Hangul particle (which
+    Python regex treats as a word character) MUST still be detected — the
+    same boundary fix applied to /pulls index URLs is now applied to
+    /pull/<n>. (Bot-flagged in #719 review.)"""
+    result = classify_operational_task("https://github.com/o/r/pull/1을 리뷰해줘")
+    assert result.kind == PR_URL
+    assert result.targets == ("https://github.com/o/r/pull/1",)
+    assert result.interview_required is False
+
+
+def test_issue_url_recognized_with_korean_particle_suffix() -> None:
+    """Same boundary fix for /issues/<n> URLs."""
+    result = classify_operational_task("https://github.com/o/r/issues/42를 확인해줘")
+    assert result.kind == ISSUE_URL
+    assert result.targets == ("https://github.com/o/r/issues/42",)
+    assert result.interview_required is False
+
+
+def test_pr_url_does_not_match_partial_digit_run() -> None:
+    """The negative lookahead prevents `pull/1` from matching inside
+    `pull/12345` so the captured number is exactly the canonical id."""
+    result = classify_operational_task("review https://github.com/o/r/pull/12345")
+    assert result.targets == ("https://github.com/o/r/pull/12345",)
+
+
+def test_targets_preserve_first_seen_order_across_types() -> None:
+    """A goal mixing /issues/ and /pull/ URLs returns targets in actual
+    first-appearance order — the previous per-class loop returned them in
+    the wrong order. (Bot-flagged in #719 review.)"""
+    goal = (
+        "first https://github.com/o/r/issues/9 then "
+        "https://github.com/o/r/pull/1 and https://github.com/o/r/pulls"
+    )
+    result = classify_operational_task(goal)
+    assert result.targets == (
+        "https://github.com/o/r/issues/9",
+        "https://github.com/o/r/pull/1",
+        "https://github.com/o/r/pulls",
+    )
