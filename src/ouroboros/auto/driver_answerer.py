@@ -233,19 +233,19 @@ def classify_driver_answer_text_risk(text: str) -> str | None:
         return "actual answer contains secret or credential"
     if re.search(
         r"\b(password|passphrase|api[_ -]?key|access[_ -]?token|token|secret|credential)s?\b"
-        r"\s*(=|:)\s*['\"]?[^\s'\"<>]{12,}",
+        r"\s*(=|:)\s*['\"]?[^\s'\"<>]+",
         text,
         flags=re.IGNORECASE,
     ):
         return "actual answer contains secret or credential"
     if re.search(
         r"\b[A-Z][A-Z0-9_]*(?:API[_]?KEY|ACCESS[_]?KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL)\b"
-        r"\s*=\s*['\"]?[^\s'\"<>]{12,}",
+        r"\s*=\s*['\"]?[^\s'\"<>]+",
         text,
     ):
         return "actual answer contains secret or credential"
     if re.search(
-        r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s/@:]+:[^\s/@]{8,}@[^\s]+",
+        r"\b[A-Za-z][A-Za-z0-9+.-]*://[^\s/@:]+:[^\s/@]+@[^\s]+",
         text,
     ):
         return "actual answer contains secret or credential"

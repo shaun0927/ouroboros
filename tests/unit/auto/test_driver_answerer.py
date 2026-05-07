@@ -138,6 +138,32 @@ def test_answer_text_risk_allows_benign_credential_phrasing() -> None:
     assert classify_driver_answer_text_risk("We support OAuth Bearer tokens generally.") is None
 
 
+def test_answer_text_risk_detects_short_assigned_credentials() -> None:
+    """Regression for the bot's blocking finding on PR #683: short but
+    perfectly plausible credentials (e.g. ``password: hunter2``) used to
+    slip past the classifier because the generic-assignment rule required
+    12+ characters and the DSN rule required an 8+ character password.
+    Length thresholds were dropped so any explicit ``keyword: value``
+    credential leak is flagged.
+    """
+    assert (
+        classify_driver_answer_text_risk("Use password: hunter2 to access staging.")
+        == "actual answer contains secret or credential"
+    )
+    assert (
+        classify_driver_answer_text_risk("Set passphrase = letmein for the admin account.")
+        == "actual answer contains secret or credential"
+    )
+    assert (
+        classify_driver_answer_text_risk("token=abc123 should authenticate the request.")
+        == "actual answer contains secret or credential"
+    )
+    assert (
+        classify_driver_answer_text_risk("Connect via postgres://demo:hunter2@db.example/app.")
+        == "actual answer contains secret or credential"
+    )
+
+
 def test_answer_text_risk_detects_env_var_and_dsn_secret_shapes() -> None:
     assert (
         classify_driver_answer_text_risk("Set OPENAI_API_KEY=fakekeyvalue1234567890 in env.")
