@@ -146,6 +146,56 @@ def test_no_raw_token_in_persisted_file(tmp_path: Path) -> None:
         assert forbidden.lower() not in raw.lower(), f"forbidden marker {forbidden!r} in trust file"
 
 
+def test_concurrent_grants_do_not_lose_data(tmp_path: Path) -> None:
+    """Test 10: concurrent grants on the same plugin must not silently
+    drop scopes via read-modify-write race.
+
+    The pre-fix `grant()` did `self.read()` then `self._write_atomic()`
+    with no inter-thread serialization. Two concurrent grants would both
+    read the same baseline, append different scopes, and the later
+    `os.replace` would silently win — losing the earlier grant.
+
+    This test races N threads granting distinct scopes against a shared
+    trust file and asserts every scope survives. The fix uses an
+    exclusive `fcntl.flock` around the RMW.
+    """
+    import threading
+
+    store = TrustStore(root=tmp_path)
+    n_threads = 12
+    barrier = threading.Barrier(n_threads)
+    scopes = [f"capability:scope_{i:02d}" for i in range(n_threads)]
+    errors: list[BaseException] = []
+
+    def _worker(scope: str) -> None:
+        try:
+            barrier.wait(timeout=5)
+            store.grant(
+                plugin="X",
+                version="0.1.0",
+                scope=scope,
+                granted_by="user:test",
+            )
+        except BaseException as exc:  # noqa: BLE001 - propagate to assertion
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_worker, args=(s,)) for s in scopes]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert not errors, f"worker errors: {errors!r}"
+
+    final = store.read("X")
+    assert final is not None
+    persisted = {g.scope for g in final.granted_scopes}
+    assert persisted == set(scopes), (
+        f"lost scopes under concurrent grant: missing="
+        f"{set(scopes) - persisted}, extra={persisted - set(scopes)}"
+    )
+
+
 def test_missing_returns_required_in_input_order(tmp_path: Path) -> None:
     """Test 9: TrustRecord.missing() returns missing required scopes in
     the input iteration order — useful for predictable error messages."""

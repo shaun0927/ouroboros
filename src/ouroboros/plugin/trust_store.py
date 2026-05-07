@@ -21,7 +21,8 @@ from this store.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
@@ -67,6 +68,37 @@ class TrustStore:
 
     def _path(self, plugin: str) -> Path:
         return self.root / plugin / "trust.json"
+
+    def _lock_path(self, plugin: str) -> Path:
+        return self.root / plugin / "trust.json.lock"
+
+    @contextmanager
+    def _file_lock(self, plugin: str) -> Iterator[None]:
+        """Acquire an exclusive flock around read-modify-write operations.
+
+        Two concurrent `grant()` calls on the same plugin would otherwise
+        race the read-modify-write through `_write_atomic`'s `os.replace`,
+        silently dropping one writer's appended scope. The lock serializes
+        the whole RMW so the second writer reads the first writer's
+        result.
+
+        Falls through gracefully on platforms without `fcntl`. Mirrors the
+        approach used by `lockfile.Lockfile._file_lock`.
+        """
+        path = self._path(plugin)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            import fcntl
+        except ImportError:  # pragma: no cover - non-POSIX
+            yield
+            return
+        lock_path = self._lock_path(plugin)
+        with lock_path.open("w") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def read(self, plugin: str) -> TrustRecord | None:
         """Read the trust record for `plugin`, or None if not present."""
@@ -125,26 +157,31 @@ class TrustStore:
         when = when or datetime.now(tz=UTC)
         ts = when.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        existing = self.read(plugin)
-        # Per Q00/ouroboros-plugins#9 Q4: version bump invalidates trust.
-        if existing is not None and existing.version != version:
-            existing = None  # treat as fresh
+        with self._file_lock(plugin):
+            existing = self.read(plugin)
+            # Per Q00/ouroboros-plugins#9 Q4: version bump invalidates trust.
+            if existing is not None and existing.version != version:
+                existing = None  # treat as fresh
 
-        granted = list(existing.granted_scopes) if existing else []
-        if all(g.scope != scope for g in granted):
-            granted.append(GrantedScope(scope=scope, granted_at=ts, granted_by=granted_by))
+            granted = list(existing.granted_scopes) if existing else []
+            if all(g.scope != scope for g in granted):
+                granted.append(
+                    GrantedScope(scope=scope, granted_at=ts, granted_by=granted_by)
+                )
 
-        payload = {
-            "schema_version": TRUST_SCHEMA_VERSION,
-            "plugin": plugin,
-            "version": version,
-            "granted_scopes": [
-                {"scope": g.scope, "granted_at": g.granted_at, "granted_by": g.granted_by}
-                for g in granted
-            ],
-        }
-        self._write_atomic(plugin, payload)
-        return TrustRecord(plugin=plugin, version=version, granted_scopes=tuple(granted))
+            payload = {
+                "schema_version": TRUST_SCHEMA_VERSION,
+                "plugin": plugin,
+                "version": version,
+                "granted_scopes": [
+                    {"scope": g.scope, "granted_at": g.granted_at, "granted_by": g.granted_by}
+                    for g in granted
+                ],
+            }
+            self._write_atomic(plugin, payload)
+            return TrustRecord(
+                plugin=plugin, version=version, granted_scopes=tuple(granted)
+            )
 
     def reset_for_version_bump(self, plugin: str, new_version: str) -> None:
         """Invalidate trust because the plugin's version changed.
@@ -158,20 +195,27 @@ class TrustStore:
             "version": new_version,
             "granted_scopes": [],
         }
-        self._write_atomic(plugin, payload)
+        with self._file_lock(plugin):
+            self._write_atomic(plugin, payload)
 
     def remove(self, plugin: str) -> bool:
         """Remove the trust file for `plugin`. Returns True if removed."""
-        path = self._path(plugin)
-        if not path.is_file():
-            return False
-        path.unlink()
-        # Best-effort: remove the empty plugin dir if it's empty afterwards.
-        try:
-            path.parent.rmdir()
-        except OSError:
-            pass
-        return True
+        with self._file_lock(plugin):
+            path = self._path(plugin)
+            if not path.is_file():
+                return False
+            path.unlink()
+            # Best-effort: clean up the lock file as well.
+            try:
+                self._lock_path(plugin).unlink()
+            except FileNotFoundError:
+                pass
+            # Best-effort: remove the empty plugin dir if it's empty afterwards.
+            try:
+                path.parent.rmdir()
+            except OSError:
+                pass
+            return True
 
 
 __all__ = [
