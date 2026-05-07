@@ -342,6 +342,16 @@ def _print_status(state: AutoPipelineState) -> None:
         console.print(f"Run reconciled at: {state.run_reconciled_at}")
     if state.last_error:
         console.print(f"Blocker: [yellow]{state.last_error}[/]")
+    if state.auto_answer_log:
+        recent = state.auto_answer_log[-5:]
+        console.print(f"Recent auto answers (last {len(recent)}):")
+        for entry in recent:
+            round_value = entry.get("round", "?")
+            source = entry.get("source", "?")
+            question = entry.get("question", "")
+            answer = entry.get("answer", "")
+            console.print(f"  round {round_value} \\[{source}] Q: {question}")
+            console.print(f"    A: {answer}")
     console.print(f"Resume: [bold]ooo auto --resume {state.auto_session_id}[/]")
 
 
