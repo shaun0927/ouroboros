@@ -9,11 +9,7 @@ import yaml
 from ouroboros.auto.interview_driver import InterviewBackend, InterviewTurn
 from ouroboros.core.seed import Seed
 from ouroboros.mcp.errors import MCPServerError
-from ouroboros.mcp.tools.authoring_handlers import (
-    _DATA_DIR,
-    GenerateSeedHandler,
-    InterviewHandler,
-)
+from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
 from ouroboros.mcp.tools.execution_handlers import StartExecuteSeedHandler
 from ouroboros.mcp.types import MCPToolResult
 
@@ -104,11 +100,13 @@ class HandlerInterviewBackend(InterviewBackend):
         id may be retained on auto state after a driver-level
         ``asyncio.wait_for`` cancel — without this probe the driver cannot
         distinguish "handler crashed before persisting" from "handler
-        persisted then got cancelled".  See Q00/ouroboros#687.
+        persisted then got cancelled".  Routes through
+        ``InterviewHandler.resolved_state_dir`` so the probe always
+        targets the directory the engine actually writes to (Q00/ouroboros#723).
         """
         if not session_id:
             return False
-        state_dir = self.handler.data_dir or _DATA_DIR
+        state_dir = self.handler.resolved_state_dir()
         return (state_dir / f"interview_{session_id}.json").exists()
 
 

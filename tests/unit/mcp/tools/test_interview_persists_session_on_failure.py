@@ -200,3 +200,66 @@ async def test_subprocess_handler_rejects_interview_id_on_resume_action(tmp_path
 
     assert outcome.is_err
     assert "only valid for new interviews" in str(outcome.error)
+
+
+@pytest.mark.asyncio
+async def test_collision_check_targets_engine_state_dir_when_injected(tmp_path: Path) -> None:
+    """Collision detection must follow the engine's state_dir, not handler.data_dir.
+
+    Models the production wiring where ``create_ouroboros_server`` injects an
+    ``InterviewEngine`` with a custom ``state_dir`` while ``handler.data_dir``
+    may be unset or stale.  See Q00/ouroboros#723 review.
+    """
+    engine_dir = tmp_path / "engine"
+    handler_data_dir = tmp_path / "handler"
+    engine_dir.mkdir()
+    handler_data_dir.mkdir()
+
+    caller_id = "interview_0123456789abcdef"
+    # Pre-create the colliding file ONLY in the engine directory.
+    (engine_dir / f"interview_{caller_id}.json").write_text("{}", encoding="utf-8")
+
+    engine = _FakeInterviewEngine(state_dir=engine_dir)
+    handler = InterviewHandler(
+        interview_engine=engine,
+        agent_runtime_backend=None,
+        opencode_mode=None,
+        data_dir=handler_data_dir,
+    )
+
+    outcome = await handler.handle(
+        {
+            "initial_context": "Build a CLI",
+            "cwd": str(tmp_path),
+            "interview_id": caller_id,
+        }
+    )
+
+    assert outcome.is_err, "collision must be detected against the engine's state_dir"
+    assert "collide" in str(outcome.error)
+
+
+def test_handler_persistence_probe_routes_through_engine_state_dir(tmp_path: Path) -> None:
+    """``HandlerInterviewBackend.is_session_persisted`` must use the engine dir."""
+    from ouroboros.auto.adapters import HandlerInterviewBackend
+
+    engine_dir = tmp_path / "engine"
+    handler_data_dir = tmp_path / "handler"
+    engine_dir.mkdir()
+    handler_data_dir.mkdir()
+
+    sid = "interview_0123456789abcdef"
+    # Persisted only in the engine dir.
+    (engine_dir / f"interview_{sid}.json").write_text("{}", encoding="utf-8")
+
+    engine = _FakeInterviewEngine(state_dir=engine_dir)
+    handler = InterviewHandler(
+        interview_engine=engine,
+        agent_runtime_backend=None,
+        opencode_mode=None,
+        data_dir=handler_data_dir,
+    )
+    backend = HandlerInterviewBackend(handler, cwd=str(tmp_path))
+
+    assert backend.is_session_persisted(sid) is True
+    assert backend.is_session_persisted("interview_aaaaaaaaaaaaaaaa") is False

@@ -763,6 +763,20 @@ class InterviewHandler:
             await self._event_store.close()
             self._initialized = False
 
+    def resolved_state_dir(self) -> Path:
+        """Return the directory the handler actually writes interview state to.
+
+        Single source of truth for the interview persistence location used
+        by collision checks, the auto-driver persistence probe, and the
+        plugin/subprocess save paths.  When an ``InterviewEngine`` is
+        injected (e.g. by ``create_ouroboros_server`` with a custom
+        ``state_dir``), the engine's directory wins — the handler's own
+        ``data_dir`` may be stale or unset.  See Q00/ouroboros#723 review.
+        """
+        if self.interview_engine is not None:
+            return self.interview_engine.state_dir
+        return self.data_dir or _DATA_DIR
+
     async def _emit_event(self, event: Any) -> None:
         """Emit event to store. Swallows errors to not break interview flow."""
         try:
@@ -1076,9 +1090,7 @@ class InterviewHandler:
                         tool_name="ouroboros_interview",
                     )
                 )
-            collision_path = (
-                self.data_dir or _DATA_DIR
-            ) / f"interview_{suggested_interview_id}.json"
+            collision_path = self.resolved_state_dir() / f"interview_{suggested_interview_id}.json"
             if collision_path.exists():
                 return Result.err(
                     MCPToolError(
