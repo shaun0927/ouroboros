@@ -96,10 +96,13 @@ class AutoPipeline:
         self._save(state)
 
         if self.reconcile_run and state.phase == AutoPhase.COMPLETE:
-            reconciled = self._reconcile_run_if_requested(state)
+            reconciled, transient_blocker = self._reconcile_run_if_requested(state)
             if reconciled is not None:
                 self._save(state)
-                blocker = state.last_error if reconciled is False else None
+                if reconciled is False:
+                    blocker = transient_blocker or state.last_error
+                else:
+                    blocker = None
                 status_override = "blocked" if reconciled is False else None
                 return self._result(
                     state,
@@ -285,10 +288,11 @@ class AutoPipeline:
             if attached is not None:
                 self._save(state)
                 return self._result(state, ledger, review=review)
-            reconciled = self._reconcile_run_if_requested(state)
+            reconciled, transient_blocker = self._reconcile_run_if_requested(state)
             if reconciled is not None:
                 self._save(state)
-                return self._result(state, ledger, review=review, blocker=state.last_error)
+                blocker = transient_blocker or state.last_error
+                return self._result(state, ledger, review=review, blocker=blocker)
             if any((state.job_id, state.execution_id, state.run_session_id)):
                 state.run_handoff_status = "started"
                 state.run_handoff_guidance = None
@@ -473,12 +477,32 @@ class AutoPipeline:
             "Attached an externally verified execution handle to this auto session; "
             "resume will use the attached handle and will not start a duplicate run."
         )
+        # Successful attach supersedes any prior reconciliation outcome on the
+        # same unknown handoff, so clear stale reconciliation metadata to avoid
+        # surfacing contradictory state (attached + previous reconciliation failure).
+        state.run_reconciliation_status = None
+        state.run_reconciliation_source = None
+        state.run_reconciled_at = None
         state.transition(AutoPhase.COMPLETE, "attached existing execution handle")
         return True
 
-    def _reconcile_run_if_requested(self, state: AutoPipelineState) -> bool | None:
+    def _reconcile_run_if_requested(
+        self, state: AutoPipelineState
+    ) -> tuple[bool | None, str | None]:
+        """Run the generic reconciliation contract.
+
+        Returns ``(outcome, transient_blocker)``:
+
+        - ``outcome`` is ``None`` when reconcile was not requested, ``True`` for
+          a successful reconciliation, and ``False`` when the request fails.
+        - ``transient_blocker`` carries an invocation-only error message that
+          must be surfaced to the caller for the current call only. It is used
+          for failure paths (notably invalid-context against a terminal complete
+          session) where mutating ``state.last_error`` durably would leak the
+          error into every later plain ``--resume``/``--status`` response.
+        """
         if not self.reconcile_run:
-            return None
+            return None, None
         if state.run_handoff_status == "attached" and state.attached_run_handle:
             state.run_reconciliation_status = "attached"
             state.run_reconciliation_source = _optional_str(self.reconcile_source) or "attached_run"
@@ -496,7 +520,7 @@ class AutoPipeline:
                 state.transition(
                     AutoPhase.COMPLETE, "reconciled existing attached execution handle"
                 )
-            return True
+            return True, None
         if not state.run_start_attempted or state.run_handoff_status not in {
             "unknown_no_handle",
             "unknown_timeout",
@@ -510,12 +534,16 @@ class AutoPipeline:
             state.run_reconciled_at = utc_now_iso()
             state.run_handoff_guidance = msg
             if state.phase == AutoPhase.COMPLETE:
+                # Keep the terminal phase intact and avoid corrupting durable
+                # state.last_error: future plain --resume/--status calls must
+                # not report this per-invocation misuse as a steady-state
+                # blocker. The message is returned as a transient blocker so
+                # the current call still surfaces it via the result.
                 state.last_tool_name = "run_starter"
-                state.last_error = msg
                 state.mark_progress(msg, tool_name="run_starter")
-            else:
-                state.mark_blocked(msg, tool_name="run_starter")
-            return False
+                return False, msg
+            state.mark_blocked(msg, tool_name="run_starter")
+            return False, None
         state.run_reconciliation_status = "unsupported"
         state.run_reconciliation_source = _optional_str(self.reconcile_source) or "generic"
         state.run_reconciled_at = utc_now_iso()
@@ -526,7 +554,7 @@ class AutoPipeline:
             "reconciler that returns attached, not_found, ambiguous, or unsupported."
         )
         state.mark_blocked(state.run_handoff_guidance, tool_name="run_starter")
-        return False
+        return False, None
 
     def _save(self, state: AutoPipelineState) -> None:
         if self.store is not None:
