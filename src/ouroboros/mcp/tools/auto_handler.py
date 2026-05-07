@@ -17,6 +17,7 @@ from ouroboros.auto.adapters import (
 )
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
+from ouroboros.auto.progress import AutoProgressEvent
 from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 from ouroboros.config import get_opencode_mode
@@ -127,13 +128,14 @@ class AutoHandler:
         )
 
     async def handle(self, arguments: dict[str, Any]) -> Result[MCPToolResult, MCPServerError]:
+        progress_events: list[AutoProgressEvent] = []
         try:
-            result = await self._run(arguments)
+            result = await self._run(arguments, progress_events=progress_events)
         except Exception as exc:
             return Result.err(
                 MCPToolError(f"Auto pipeline failed: {exc}", tool_name="ouroboros_auto")
             )
-        meta = _result_meta(result)
+        meta = _result_meta(result, progress_events=progress_events)
         text = _format_result(result)
         if result.run_subagent is not None:
             meta["_subagent"] = result.run_subagent
@@ -146,7 +148,12 @@ class AutoHandler:
             )
         )
 
-    async def _run(self, arguments: dict[str, Any]) -> AutoPipelineResult:
+    async def _run(
+        self,
+        arguments: dict[str, Any],
+        *,
+        progress_events: list[AutoProgressEvent] | None = None,
+    ) -> AutoPipelineResult:
         store = self.store or AutoStore()
         resume = arguments.get("resume")
         requested_skip_run = bool(arguments.get("skip_run", False))
@@ -219,6 +226,7 @@ class AutoHandler:
             max_rounds=max_interview_rounds,
             timeout_seconds=state.phase_timeout_seconds(AutoPhase.INTERVIEW),
         )
+        progress_callback = progress_events.append if progress_events is not None else None
         pipeline = AutoPipeline(
             driver,
             HandlerSeedGenerator(generate_seed_handler),
@@ -234,11 +242,16 @@ class AutoHandler:
             attach_source=attach_source,
             reconcile_run=reconcile_run,
             reconcile_source=reconcile_source,
+            progress_callback=progress_callback,
         )
         return await pipeline.run(state)
 
 
-def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
+def _result_meta(
+    result: AutoPipelineResult,
+    *,
+    progress_events: list[AutoProgressEvent] | None = None,
+) -> dict[str, Any]:
     """Build MCP metadata for clients that render auto progress outside CLI text."""
     meta: dict[str, Any] = {
         "status": result.status,
@@ -271,7 +284,25 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
         meta["run_reconciliation_status"] = result.run_reconciliation_status
         meta["run_reconciliation_source"] = result.run_reconciliation_source
         meta["run_reconciled_at"] = result.run_reconciled_at
+    if progress_events:
+        meta["progress_events"] = [_progress_event_to_dict(event) for event in progress_events]
     return meta
+
+
+def _progress_event_to_dict(event: AutoProgressEvent) -> dict[str, Any]:
+    """Serialize a single AutoProgressEvent to a JSON-friendly dict.
+
+    The ``auto_session_id`` field is intentionally elided — it duplicates the
+    sibling top-level ``meta["auto_session_id"]`` for every entry.
+    """
+    return {
+        "phase": event.phase,
+        "kind": event.kind,
+        "message": event.message,
+        "round": event.round,
+        "grade": event.grade,
+        "timestamp": event.timestamp,
+    }
 
 
 def _resolved_opencode_mode(runtime_backend: str | None, opencode_mode: str | None) -> str | None:
