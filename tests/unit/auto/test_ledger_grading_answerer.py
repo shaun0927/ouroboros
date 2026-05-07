@@ -963,3 +963,84 @@ def test_auto_answerer_still_blocks_real_production_credential_authority() -> No
         answer = answerer.answer(question, SeedDraftLedger.from_goal("Deploy a service"))
         assert answer.blocker is not None
         assert answer.source == AutoAnswerSource.BLOCKER
+
+
+def test_ledger_summary_groups_active_sections_by_provenance_source() -> None:
+    ledger = SeedDraftLedger.from_goal("Build hello CLI")
+    ledger.add_entry(
+        "runtime_context",
+        LedgerEntry(
+            key="runtime.repo_fact",
+            value="Python 3.14",
+            source=LedgerSource.REPO_FACT,
+            confidence=0.9,
+            status=LedgerStatus.CONFIRMED,
+            evidence=["pyproject.toml"],
+        ),
+    )
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="constraints.mvp",
+            value="Smallest safe MVP",
+            source=LedgerSource.CONSERVATIVE_DEFAULT,
+            confidence=0.8,
+            status=LedgerStatus.DEFAULTED,
+        ),
+    )
+    ledger.add_entry(
+        "actors",
+        LedgerEntry(
+            key="actors.assumed",
+            value="Single local user",
+            source=LedgerSource.ASSUMPTION,
+            confidence=0.7,
+            status=LedgerStatus.DEFAULTED,
+        ),
+    )
+
+    summary = ledger.summary()
+    provenance = summary["provenance"]
+
+    assert "runtime_context" in provenance["repo_fact"]
+    assert "goal" in provenance["user_goal"]
+    assert "constraints" in provenance["conservative_default"]
+    assert "actors" in provenance["assumption"]
+    assert "runtime_context" in summary["evidence_backed_sections"]
+    assert "goal" in summary["evidence_backed_sections"]
+    assert "constraints" in summary["assumption_only_sections"]
+    assert "actors" in summary["assumption_only_sections"]
+    assert "runtime_context" not in summary["assumption_only_sections"]
+
+
+def test_ledger_summary_excludes_inactive_entries_from_provenance() -> None:
+    ledger = SeedDraftLedger.from_goal("Build hello CLI")
+    ledger.add_entry(
+        "runtime_context",
+        LedgerEntry(
+            key="runtime.weak_guess",
+            value="maybe Python",
+            source=LedgerSource.REPO_FACT,
+            confidence=0.4,
+            status=LedgerStatus.WEAK,
+        ),
+    )
+    ledger.add_entry(
+        "constraints",
+        LedgerEntry(
+            key="constraints.blocked",
+            value="needs human input",
+            source=LedgerSource.BLOCKER,
+            confidence=1.0,
+            status=LedgerStatus.BLOCKED,
+        ),
+    )
+
+    summary = ledger.summary()
+    provenance = summary["provenance"]
+
+    assert "runtime_context" not in provenance.get("repo_fact", [])
+    assert "constraints" not in provenance.get("blocker", [])
+    assert "runtime_context" not in summary["evidence_backed_sections"]
+    assert "runtime_context" not in summary["assumption_only_sections"]
+    assert "constraints" not in summary["assumption_only_sections"]

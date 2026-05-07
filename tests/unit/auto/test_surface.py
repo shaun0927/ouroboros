@@ -1225,3 +1225,70 @@ async def test_auto_handler_rejects_zero_loop_bounds() -> None:
         assert result.is_err
         assert field_name in str(result.error)
         assert ">= 1" in str(result.error)
+
+
+def test_format_result_renders_evidence_provenance_block() -> None:
+    from ouroboros.auto.pipeline import AutoPipelineResult
+    from ouroboros.mcp.tools.auto_handler import _format_result
+
+    result = AutoPipelineResult(
+        status="complete",
+        auto_session_id="auto_test",
+        phase="complete",
+        evidence_backed_sections=("goal", "runtime_context"),
+        assumption_only_sections=("constraints",),
+    )
+
+    text = _format_result(result)
+
+    assert "Evidence:" in text
+    assert "evidence-backed: goal, runtime_context" in text
+    assert "assumption-only: constraints" in text
+
+
+def test_format_result_omits_evidence_block_when_unknown() -> None:
+    from ouroboros.auto.pipeline import AutoPipelineResult
+    from ouroboros.mcp.tools.auto_handler import _format_result
+
+    result = AutoPipelineResult(
+        status="complete",
+        auto_session_id="auto_test",
+        phase="complete",
+    )
+
+    text = _format_result(result)
+
+    assert "Evidence:" not in text
+
+
+@pytest.mark.asyncio
+async def test_auto_handler_meta_exposes_provenance_breakdown(monkeypatch) -> None:
+    async def fake_run(self, arguments):  # noqa: ARG001
+        from ouroboros.auto.pipeline import AutoPipelineResult
+
+        return AutoPipelineResult(
+            status="complete",
+            auto_session_id="auto_test",
+            phase="complete",
+            provenance={
+                "user_goal": ("goal", "actors"),
+                "repo_fact": ("runtime_context",),
+                "conservative_default": ("constraints",),
+            },
+            evidence_backed_sections=("actors", "goal", "runtime_context"),
+            assumption_only_sections=("constraints",),
+        )
+
+    monkeypatch.setattr(AutoHandler, "_run", fake_run)
+
+    result = await AutoHandler().handle({"goal": "Build a CLI"})
+
+    assert result.is_ok
+    meta = result.value.meta
+    assert meta["provenance"] == {
+        "user_goal": ["goal", "actors"],
+        "repo_fact": ["runtime_context"],
+        "conservative_default": ["constraints"],
+    }
+    assert meta["evidence_backed_sections"] == ["actors", "goal", "runtime_context"]
+    assert meta["assumption_only_sections"] == ["constraints"]

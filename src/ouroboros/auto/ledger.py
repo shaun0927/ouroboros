@@ -47,6 +47,24 @@ REQUIRED_SECTIONS = (
 )
 
 
+_EVIDENCE_BACKED_SOURCES: frozenset[LedgerSource] = frozenset(
+    {
+        LedgerSource.USER_GOAL,
+        LedgerSource.REPO_FACT,
+        LedgerSource.EXISTING_CONVENTION,
+        LedgerSource.INFERENCE,
+    }
+)
+
+_INACTIVE_STATUSES: frozenset[LedgerStatus] = frozenset(
+    {
+        LedgerStatus.WEAK,
+        LedgerStatus.CONFLICTING,
+        LedgerStatus.BLOCKED,
+    }
+)
+
+
 @dataclass(slots=True)
 class LedgerEntry:
     """A single machine-readable fact in the Seed Draft Ledger."""
@@ -292,6 +310,21 @@ class SeedDraftLedger:
     def summary(self) -> dict[str, Any]:
         """Return a bounded summary suitable for CLI/MCP output."""
         statuses = self.section_statuses()
+        provenance = self._provenance_index()
+        evidence_backed = sorted(
+            {
+                section
+                for source in _EVIDENCE_BACKED_SOURCES
+                for section in provenance.get(source.value, ())
+            }
+        )
+        active_sections = {
+            name
+            for name, section in self.sections.items()
+            if any(entry.status not in _INACTIVE_STATUSES for entry in section.entries)
+        }
+        evidence_backed_set = set(evidence_backed)
+        assumption_only = sorted(active_sections - evidence_backed_set)
         return {
             "complete_sections": [
                 name
@@ -313,7 +346,20 @@ class SeedDraftLedger:
                 for entry in section.entries
                 if entry.key.startswith("risk.")
             ],
+            "provenance": provenance,
+            "evidence_backed_sections": evidence_backed,
+            "assumption_only_sections": assumption_only,
         }
+
+    def _provenance_index(self) -> dict[str, list[str]]:
+        """Group active section names by ledger source for #640 surface visibility."""
+        index: dict[str, set[str]] = {source.value: set() for source in LedgerSource}
+        for section in self.sections.values():
+            for entry in section.entries:
+                if entry.status in _INACTIVE_STATUSES:
+                    continue
+                index[entry.source.value].add(section.name)
+        return {key: sorted(values) for key, values in index.items() if values}
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize the ledger."""

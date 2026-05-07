@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from ouroboros.auto.grading import GradeGate
@@ -45,6 +45,9 @@ class AutoPipelineResult:
     assumptions: tuple[str, ...] = ()
     non_goals: tuple[str, ...] = ()
     blocker: str | None = None
+    provenance: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    evidence_backed_sections: tuple[str, ...] = ()
+    assumption_only_sections: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -384,6 +387,10 @@ class AutoPipeline:
         blocker: str | None = None,
         run_subagent: dict[str, Any] | None = None,
     ) -> AutoPipelineResult:
+        summary = ledger.summary()
+        provenance = {
+            source: tuple(sections) for source, sections in summary.get("provenance", {}).items()
+        }
         return AutoPipelineResult(
             status=state.phase.value,
             auto_session_id=state.auto_session_id,
@@ -405,6 +412,9 @@ class AutoPipeline:
             assumptions=tuple(ledger.assumptions()),
             non_goals=tuple(ledger.non_goals()),
             blocker=blocker or state.last_error,
+            provenance=provenance,
+            evidence_backed_sections=tuple(summary.get("evidence_backed_sections", ())),
+            assumption_only_sections=tuple(summary.get("assumption_only_sections", ())),
         )
 
     def _save(self, state: AutoPipelineState) -> None:

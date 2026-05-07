@@ -208,6 +208,14 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
         meta["run_handoff_status"] = result.run_handoff_status
     if result.run_handoff_guidance:
         meta["run_handoff_guidance"] = result.run_handoff_guidance
+    if result.provenance:
+        meta["provenance"] = {
+            source: list(sections) for source, sections in result.provenance.items()
+        }
+    if result.evidence_backed_sections:
+        meta["evidence_backed_sections"] = list(result.evidence_backed_sections)
+    if result.assumption_only_sections:
+        meta["assumption_only_sections"] = list(result.assumption_only_sections)
     return meta
 
 
@@ -390,6 +398,12 @@ def _format_result(result: AutoPipelineResult) -> str:
     if result.non_goals:
         lines.append("Non-goals:")
         lines.extend(f"- {item}" for item in result.non_goals)
+    if result.evidence_backed_sections or result.assumption_only_sections:
+        lines.append("Evidence:")
+        if result.evidence_backed_sections:
+            lines.append("  evidence-backed: " + ", ".join(result.evidence_backed_sections))
+        if result.assumption_only_sections:
+            lines.append("  assumption-only: " + ", ".join(result.assumption_only_sections))
     if result.blocker:
         lines.append(f"Blocker: {result.blocker}")
     lines.append(f"Resume: ooo auto --resume {result.auto_session_id}")
