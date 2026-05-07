@@ -44,6 +44,23 @@ class InterviewBackend(Protocol):
         """Return the outstanding question for a persisted interview session."""
 
 
+class InterviewBackendWithPrepare(InterviewBackend, Protocol):
+    """Optional protocol surface for backends that can split session creation
+    from the (potentially slow) first-question generation.
+
+    Backends that implement ``prepare`` MUST return a durable session id whose
+    follow-up state is recoverable via ``resume(session_id)``. The auto driver
+    persists this id to ``AutoPipelineState`` immediately, so a subsequent
+    timeout in ``start``/``resume`` does not strand the session without a
+    handle.
+    """
+
+    async def prepare(self, goal: str, *, cwd: str) -> str | None:
+        """Register an interview session and return its id without generating
+        the first question. Return ``None`` to fall back to the legacy
+        single-call ``start`` path."""
+
+
 @dataclass(frozen=True, slots=True)
 class AutoInterviewResult:
     """Result from running the bounded auto interview loop."""
@@ -95,6 +112,14 @@ class AutoInterviewDriver:
                     state.pending_question = turn.question
                     self._save(state)
             else:
+                prepared_id = await self._maybe_prepare_session(state)
+                if prepared_id is not None:
+                    state.interview_session_id = prepared_id
+                    state.mark_progress(
+                        "interview session prepared; awaiting first question",
+                        tool_name="interview.prepare",
+                    )
+                    self._save(state)
                 turn = _validate_turn(
                     await self._with_timeout(
                         self.backend.start(state.goal, cwd=state.cwd),
@@ -245,6 +270,26 @@ class AutoInterviewDriver:
             msg = f"{tool_name} timed out after {self.timeout_seconds:.0f}s for {state.auto_session_id}"
             raise TimeoutError(msg) from exc
 
+    async def _maybe_prepare_session(self, state: AutoPipelineState) -> str | None:
+        """Pre-register an interview session id when the backend supports it.
+
+        Backends without ``prepare`` keep the legacy single-call behavior. When
+        ``prepare`` raises or returns an invalid value, the driver also falls
+        back rather than blocking the session before ``start`` had a chance.
+        """
+        prepare = getattr(self.backend, "prepare", None)
+        if prepare is None:
+            return None
+        try:
+            prepared = await asyncio.wait_for(
+                prepare(state.goal, cwd=state.cwd), timeout=self.timeout_seconds
+            )
+        except (TimeoutError, Exception):
+            return None
+        if isinstance(prepared, str) and prepared.strip():
+            return prepared
+        return None
+
     def _ensure_interview_phase(self, state: AutoPipelineState) -> None:
         if state.phase == AutoPhase.CREATED:
             state.transition(AutoPhase.INTERVIEW, "starting auto interview")
@@ -266,10 +311,12 @@ class FunctionInterviewBackend:
         start: Callable[[str, str], Awaitable[InterviewTurn]],
         answer: Callable[[str, str], Awaitable[InterviewTurn]],
         resume: Callable[[str], Awaitable[InterviewTurn]] | None = None,
+        prepare: Callable[[str, str], Awaitable[str | None]] | None = None,
     ) -> None:
         self._start = start
         self._answer = answer
         self._resume = resume
+        self._prepare = prepare
 
     async def start(self, goal: str, *, cwd: str) -> InterviewTurn:
         return await self._start(goal, cwd)
@@ -282,6 +329,11 @@ class FunctionInterviewBackend:
             msg = "interview resume is unavailable because no pending question is persisted"
             raise RuntimeError(msg)
         return await self._resume(session_id)
+
+    async def prepare(self, goal: str, *, cwd: str) -> str | None:
+        if self._prepare is None:
+            return None
+        return await self._prepare(goal, cwd)
 
 
 def _can_steer_with_gap_prompt(question: str) -> bool:

@@ -261,6 +261,107 @@ async def test_interview_driver_blocks_on_backend_timeout(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_interview_driver_persists_session_id_before_first_question(
+    tmp_path,
+) -> None:
+    """A backend that supports prepare() must have its session id persisted
+    before start() runs so a first-question timeout still leaves a resumable
+    handle on the auto state."""
+
+    async def prepare(goal: str, cwd: str) -> str | None:  # noqa: ARG001
+        return "interview_pre_42"
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        await asyncio.sleep(0.5)
+        return InterviewTurn("never returned", "interview_pre_42")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", session_id, seed_ready=True)
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    store = AutoStore(tmp_path)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer, prepare=prepare),
+        store=store,
+        timeout_seconds=0.05,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "blocked"
+    assert state.interview_session_id == "interview_pre_42"
+    persisted = store.load(state.auto_session_id)
+    assert persisted.interview_session_id == "interview_pre_42"
+    assert state.last_tool_name == "interview.start"
+
+
+@pytest.mark.asyncio
+async def test_interview_driver_falls_back_when_prepare_returns_none(
+    tmp_path,
+) -> None:
+    """Backends without prepare (or returning None) keep the legacy behavior."""
+    started = False
+
+    async def prepare(goal: str, cwd: str) -> str | None:  # noqa: ARG001
+        return None
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        nonlocal started
+        started = True
+        return InterviewTurn("First?", "interview_legacy", seed_ready=False)
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer, prepare=prepare),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+        timeout_seconds=1,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert started is True
+    assert result.status in {"seed_ready", "blocked"}
+    assert state.interview_session_id == "interview_legacy"
+
+
+@pytest.mark.asyncio
+async def test_interview_driver_falls_back_when_prepare_raises(tmp_path) -> None:
+    """Exceptions from prepare must not block the session — fall back to
+    start() so backends rolling out prepare incrementally are safe."""
+
+    async def prepare(goal: str, cwd: str) -> str | None:  # noqa: ARG001
+        raise RuntimeError("prepare not implemented yet")
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("First?", "interview_after_raise", seed_ready=False)
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", session_id, seed_ready=True, completed=True)
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer, prepare=prepare),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+        timeout_seconds=1,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert state.interview_session_id == "interview_after_raise"
+    assert result.status in {"seed_ready", "blocked"}
+
+
+@pytest.mark.asyncio
 async def test_interview_driver_supplies_bounded_repo_facts_to_answerer(tmp_path) -> None:
     (tmp_path / "pyproject.toml").write_text(
         "\n".join(
