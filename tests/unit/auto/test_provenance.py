@@ -98,9 +98,7 @@ def test_invoked_by_label_returns_unknown_when_other_provenance_present() -> Non
     # Recognized non-invoked_by keys persisted without invoked_by → unknown.
     assert invoked_by_label({"source_platform": "discord-hermes"}) == "unknown"
     assert (
-        invoked_by_label(
-            {"source_platform": "discord-hermes", "command_kind": "rewrite"}
-        )
+        invoked_by_label({"source_platform": "discord-hermes", "command_kind": "rewrite"})
         == "unknown"
     )
     # Unknown / non-string invoked_by also yields unknown, not direct.
