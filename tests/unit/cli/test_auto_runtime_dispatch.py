@@ -66,9 +66,7 @@ def test_run_auto_keeps_authoring_in_process_for_non_opencode_runtimes(
         patch("ouroboros.cli.commands.auto.InterviewHandler", handlers["interview"]),
         patch("ouroboros.cli.commands.auto.GenerateSeedHandler", handlers["generate"]),
         patch("ouroboros.cli.commands.auto.ExecuteSeedHandler", handlers["execute"]),
-        patch(
-            "ouroboros.cli.commands.auto.StartExecuteSeedHandler", handlers["start_execute"]
-        ),
+        patch("ouroboros.cli.commands.auto.StartExecuteSeedHandler", handlers["start_execute"]),
         patch("ouroboros.cli.commands.auto.AutoPipeline.run", new=_noop_run),
     ):
         asyncio.run(
@@ -122,9 +120,7 @@ def test_run_auto_demotes_persisted_opencode_plugin_to_subprocess(tmp_path) -> N
         patch("ouroboros.cli.commands.auto.InterviewHandler", handlers["interview"]),
         patch("ouroboros.cli.commands.auto.GenerateSeedHandler", handlers["generate"]),
         patch("ouroboros.cli.commands.auto.ExecuteSeedHandler", handlers["execute"]),
-        patch(
-            "ouroboros.cli.commands.auto.StartExecuteSeedHandler", handlers["start_execute"]
-        ),
+        patch("ouroboros.cli.commands.auto.StartExecuteSeedHandler", handlers["start_execute"]),
         patch("ouroboros.cli.commands.auto.AutoPipeline.run", new=_noop_run),
     ):
         store_cls.return_value = store
@@ -173,9 +169,7 @@ def test_run_auto_keeps_opencode_subprocess_in_process(tmp_path) -> None:
         patch("ouroboros.cli.commands.auto.InterviewHandler", handlers["interview"]),
         patch("ouroboros.cli.commands.auto.GenerateSeedHandler", handlers["generate"]),
         patch("ouroboros.cli.commands.auto.ExecuteSeedHandler", handlers["execute"]),
-        patch(
-            "ouroboros.cli.commands.auto.StartExecuteSeedHandler", handlers["start_execute"]
-        ),
+        patch("ouroboros.cli.commands.auto.StartExecuteSeedHandler", handlers["start_execute"]),
         patch("ouroboros.cli.commands.auto.AutoPipeline.run", new=_noop_run),
     ):
         store_cls.return_value = store
