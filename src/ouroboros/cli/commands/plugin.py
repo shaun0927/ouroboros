@@ -362,11 +362,26 @@ def _looks_like_url(target: str) -> bool:
     return target.startswith(("http://", "https://", "git+http://", "git+https://", "git@"))
 
 
+def _normalize_clone_url(target: str) -> str:
+    """Strip the Python-style `git+` prefix that pip/uv accept but Git itself
+    does not understand.
+
+    `_looks_like_url()` accepts `git+https://...` / `git+http://...` / `git+ssh://`
+    forms because users routinely paste them from Python packaging tooling. The
+    underlying `git clone` rejects that prefix though — we normalize at the
+    transport boundary so the prefix is purely a CLI convenience.
+    """
+    for prefix in ("git+https://", "git+http://", "git+ssh://", "git+"):
+        if target.startswith(prefix):
+            return target[len("git+"):]
+    return target
+
+
 def _shallow_clone(repo_url: str, dest: Path) -> str:
     """Run `git clone --depth 1` into `dest`. Returns the resolved git SHA."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
-        ["git", "clone", "--depth", "1", repo_url, str(dest)],
+        ["git", "clone", "--depth", "1", _normalize_clone_url(repo_url), str(dest)],
         check=True,
         capture_output=True,
         text=True,
@@ -382,19 +397,33 @@ def _shallow_clone(repo_url: str, dest: Path) -> str:
 
 
 def _enumerate_catalog(repo_root: Path) -> list[PluginManifest]:
-    """Read every `plugins/<name>/ouroboros.plugin.json` from a checked-out repo."""
+    """Read every `plugins/<name>/ouroboros.plugin.json` from a checked-out repo.
+
+    Invalid sibling manifests must NOT block installing valid plugins from
+    a mixed-quality repo. Each parse error is surfaced as a yellow `skip:`
+    warning so the user sees what was bypassed; the function only fails if
+    nothing at all parsed.
+    """
     plugins_dir = repo_root / "plugins"
     if not plugins_dir.is_dir():
         print_error(f"no `plugins/` directory in {repo_root}")
         raise typer.Exit(code=1)
     manifests: list[PluginManifest] = []
+    skipped: list[tuple[str, str]] = []
     for entry in sorted(plugins_dir.iterdir()):
         manifest_path = entry / "ouroboros.plugin.json"
         if not manifest_path.is_file():
             continue
-        manifests.append(load_manifest(manifest_path))
+        try:
+            manifests.append(load_manifest(manifest_path))
+        except PluginManifestError as exc:
+            loc = exc.json_pointer or "(root)"
+            msg = exc.args[0] if exc.args else "invalid manifest"
+            skipped.append((entry.name, f"{loc}: {msg}"))
+    for dir_name, reason in skipped:
+        console.print(f"  [yellow]skip[/]: {dir_name}: invalid manifest ({reason})")
     if not manifests:
-        print_error(f"no manifests found under {plugins_dir}")
+        print_error(f"no valid manifests found under {plugins_dir}")
         raise typer.Exit(code=1)
     return manifests
 

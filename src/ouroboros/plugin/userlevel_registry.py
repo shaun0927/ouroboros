@@ -111,6 +111,15 @@ class UserLevelProgramRegistry:
                     f"refusing to register {manifest.name!r}"
                 )
 
+            # If we are replacing an entry that previously owned a different
+            # namespace, release that stale namespace so it is freeable by
+            # another plugin and so `get_by_namespace(old_ns)` no longer
+            # returns this program. Without this, the registry retains a
+            # phantom owner record after a valid replace operation.
+            if existing is not None and existing.namespace != namespace:
+                if self._namespace_owner.get(existing.namespace) == manifest.name:
+                    del self._namespace_owner[existing.namespace]
+
             program = RegisteredProgram(manifest=manifest)
             self._by_name[manifest.name] = program
             self._namespace_owner[namespace] = manifest.name

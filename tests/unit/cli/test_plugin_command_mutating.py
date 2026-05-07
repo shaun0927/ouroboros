@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 
 import pytest
 from typer.testing import CliRunner
@@ -595,6 +596,120 @@ def test_disable_honors_trust_root_override(
     assert result.exit_code == 0, result.output
     assert not (paths["trust_root"] / "github-pr-ops" / "trust.json").exists()
     assert "github-pr-ops" in Lockfile(paths["lockfile"]).read()
+
+
+def test_add_normalizes_git_plus_https_url(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`git+https://...` install strings must be normalized to `https://...`
+    before being passed to `git clone` — the `git+` prefix is a Python
+    packaging convention that Git itself rejects.
+
+    Regression catch for the bot's BLOCKING finding on plugin.py:361.
+    """
+    paths = _common_paths(tmp_path)
+
+    # Capture every subprocess.run() invocation so we can assert what URL
+    # actually reaches `git clone`.
+    seen_argvs: list[list[str]] = []
+
+    real_run = subprocess.run
+
+    def _spy(argv, *args, **kwargs):
+        seen_argvs.append(list(argv))
+        # Materialize the "cloned" repo on disk so the rest of the flow
+        # finds a catalog. Exit early before the second `git rev-parse`
+        # call by writing a fake .git so cwd works.
+        if argv[:3] == ["git", "clone", "--depth"]:
+            dest = Path(argv[-1])
+            (dest / "plugins" / "github-pr-ops").mkdir(parents=True, exist_ok=True)
+            (dest / "plugins" / "github-pr-ops" / "ouroboros.plugin.json").write_text(
+                json.dumps(REFERENCE_MANIFEST)
+            )
+            (dest / ".git").mkdir(exist_ok=True)
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+        if argv[:2] == ["git", "rev-parse"]:
+            return subprocess.CompletedProcess(
+                args=argv, returncode=0, stdout="deadbeef\n", stderr=""
+            )
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(
+        "ouroboros.cli.commands.plugin.subprocess.run", _spy
+    )
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "add",
+            "git+https://github.com/Q00/ouroboros-plugins.git",
+            "--plugin",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--cache-root",
+            str(tmp_path / "cache"),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    # Find the `git clone ...` invocation and confirm the URL had `git+`
+    # stripped before reaching git.
+    clone_calls = [a for a in seen_argvs if a[:2] == ["git", "clone"]]
+    assert len(clone_calls) == 1, f"expected exactly one clone call, got {clone_calls}"
+    cloned_url = clone_calls[0][-2]  # url is second-to-last (dest is last)
+    assert cloned_url == "https://github.com/Q00/ouroboros-plugins.git", cloned_url
+    assert not cloned_url.startswith("git+"), cloned_url
+
+
+def test_add_skips_invalid_sibling_manifest_in_catalog(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """A repo with one good plugin and one bad sibling manifest must allow
+    `--plugin <good-one>` to proceed. The invalid sibling is reported as a
+    `skip:` warning rather than aborting the whole install.
+
+    Regression catch for the bot's follow-up on plugin.py:384 (catalog-wide
+    pre-validation blocking installs from mixed-quality repos).
+    """
+    repo_root = tmp_path / "repo"
+    plugins_dir = repo_root / "plugins"
+    plugins_dir.mkdir(parents=True)
+    # Good sibling.
+    good_dir = plugins_dir / "github-pr-ops"
+    good_dir.mkdir()
+    (good_dir / "ouroboros.plugin.json").write_text(json.dumps(REFERENCE_MANIFEST))
+    # Bad sibling — fails schema validation (name violates pattern).
+    bad_dir = plugins_dir / "broken-one"
+    bad_dir.mkdir()
+    (bad_dir / "ouroboros.plugin.json").write_text(
+        json.dumps({**REFERENCE_MANIFEST, "name": "Broken Name"})
+    )
+    paths = _common_paths(tmp_path)
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "add",
+            str(repo_root),
+            "--plugin",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    # Bad sibling was reported but did not block the install.
+    assert "skip" in result.output
+    assert "broken-one" in result.output
+    # Good plugin landed in the lockfile.
+    entries = Lockfile(paths["lockfile"]).read()
+    assert "github-pr-ops" in entries
+    assert "broken-one" not in entries
 
 
 def test_remove_uninstalled_errors(runner: CliRunner, tmp_path: Path) -> None:
