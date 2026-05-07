@@ -203,6 +203,19 @@ def invoke_plugin(
             message=f"unknown command {command_name!r} in namespace {namespace!r}",
         )
 
+    # Defense-in-depth: a TrustRecord must positively identify the plugin
+    # and version it was granted for. A record from a previous version (the
+    # locked Q4 says version-bumps invalidate trust) or a record loaded for
+    # a different plugin that happens to grant the same scope strings must
+    # NOT authorize execution. Mismatched records are dropped here so the
+    # downstream check sees no trust and fails the call closed. Per the
+    # documented "single chokepoint" contract, the firewall — not callers —
+    # owns this invariant.
+    if trust_record is not None and (
+        trust_record.plugin != manifest.name or trust_record.version != manifest.version
+    ):
+        trust_record = None
+
     trust_state = _trust_state_label(manifest, trust_record)
     risks = _scope_risk_index(manifest)
     emitted: list[dict] = []

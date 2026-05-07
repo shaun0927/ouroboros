@@ -150,3 +150,50 @@ def test_missing_returns_required_in_input_order(tmp_path: Path) -> None:
     # `github:read` is granted; the others are missing.
     missing = record.missing(["github:pull_request:write", "github:read", "shell:execute"])
     assert missing == ["github:pull_request:write", "shell:execute"]
+
+
+def _grant_in_subprocess(root_str: str, plugin: str, version: str, scope: str) -> None:
+    """Module-level worker so multiprocessing.spawn can pickle it on macOS."""
+    from pathlib import Path
+
+    from ouroboros.plugin.trust_store import TrustStore
+
+    TrustStore(root=Path(root_str)).grant(
+        plugin=plugin, version=version, scope=scope, granted_by="user:test"
+    )
+
+
+def test_grant_concurrent_writes_do_not_lose_scopes(tmp_path: Path) -> None:
+    """Concurrent grant() calls for different scopes must all persist.
+
+    Regression for ouroboros-agent[bot] BLOCKING finding on PR #749 commit
+    78698d0: the read-modify-write in `grant()` was previously unguarded,
+    so two processes granting different scopes in parallel could both
+    read the same prior file and the second `os.replace()` would silently
+    drop the other writer's scope. The store now holds an exclusive
+    POSIX flock around the sequence; this test exercises the protection
+    by spawning several processes concurrently and asserting all scopes
+    survive in the final trust file.
+    """
+    import multiprocessing as mp
+
+    scopes = [f"github:scope-{i}" for i in range(6)]
+    ctx = mp.get_context("spawn")  # cross-platform; matches macOS default
+    procs = [
+        ctx.Process(
+            target=_grant_in_subprocess,
+            args=(str(tmp_path), "concurrent-plugin", "0.1.0", scope),
+        )
+        for scope in scopes
+    ]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=30)
+        assert p.exitcode == 0, f"worker failed: pid={p.pid} exit={p.exitcode}"
+
+    record = TrustStore(root=tmp_path).read("concurrent-plugin")
+    assert record is not None
+    persisted = {g.scope for g in record.granted_scopes}
+    missing = set(scopes) - persisted
+    assert not missing, f"concurrent grants dropped scopes: {sorted(missing)}"

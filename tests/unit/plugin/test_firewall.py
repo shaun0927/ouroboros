@@ -10,7 +10,7 @@ from ouroboros.plugin.firewall import (
     invoke_plugin,
 )
 from ouroboros.plugin.manifest import load_manifest
-from ouroboros.plugin.trust_store import TrustStore
+from ouroboros.plugin.trust_store import GrantedScope, TrustRecord, TrustStore
 from ouroboros.plugin.userlevel_registry import (
     UserLevelProgramRegistry,
 )
@@ -142,6 +142,69 @@ def test_happy_path_emits_invoked_then_permission_then_completed(tmp_path: Path)
     assert "ok\\n" not in serialized
     # sha256 hash recorded in completed.provenance.
     assert "stdout_sha256" in events[-1]["provenance"]
+
+
+def test_trust_record_for_wrong_plugin_is_rejected(tmp_path: Path) -> None:
+    """A TrustRecord whose plugin name does not match must NOT authorize.
+
+    Regression for ouroboros-agent[bot] BLOCKING finding on PR #749 commit
+    78698d0: the firewall is the documented authorization chokepoint, so
+    it must reject mismatched records before any scope check. Previously
+    a record loaded for a different plugin that happened to grant the
+    same scope strings would pass `_missing_required` and authorise the
+    invocation. Now the record is dropped and the call is blocked closed.
+    """
+    program = _make_program(tmp_path)  # plugin name = "github-pr-ops"
+    # A record granting the same scope, but for a *different* plugin.
+    foreign = TrustStore(root=tmp_path / "trust").grant(
+        plugin="some-other-plugin",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+    )
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=foreign,
+        event_sink=events.append,
+        correlation_id="corr-foreign",
+        subprocess_runner=_fake_runner(),
+    )
+    # The record must be ignored, so the call falls into the missing-
+    # required-scope branch and is blocked closed.
+    assert result.status == "blocked"
+    assert [e["event_type"] for e in events] == ["plugin.failed"]
+    assert events[0]["trust_state"] == "installed"
+
+
+def test_trust_record_for_wrong_version_is_rejected(tmp_path: Path) -> None:
+    """A stale TrustRecord (older version) must NOT authorize the new
+    version. Locked Q4 says version-bumps invalidate trust, and the
+    firewall must defend that even if a caller hands it a stale record.
+    """
+    program = _make_program(tmp_path)  # plugin version = "0.1.0"
+    stale = TrustRecord(
+        plugin="github-pr-ops",
+        version="0.0.9",  # older version
+        granted_scopes=(
+            GrantedScope(scope="github:read", granted_at="2025-01-01T00:00:00Z", granted_by="u"),
+        ),
+    )
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=stale,
+        event_sink=events.append,
+        correlation_id="corr-stale",
+        subprocess_runner=_fake_runner(),
+    )
+    assert result.status == "blocked"
+    assert [e["event_type"] for e in events] == ["plugin.failed"]
+    assert events[0]["trust_state"] == "installed"
 
 
 def test_partial_trust_reports_installed_not_trusted(tmp_path: Path) -> None:
