@@ -1016,10 +1016,13 @@ class InterviewHandler:
                         "Optional caller-supplied id for a brand-new interview. "
                         "Must match the server format 'interview_<16 lowercase hex>' "
                         "and must NOT collide with an existing interview file. "
-                        "Only honoured for the start action; ignored for resume/answer. "
+                        "Only valid for the start action — supplying it together with "
+                        "session_id (resume) or answer is rejected with an error to "
+                        "prevent silent identifier hijacking; do not preserve this "
+                        "argument across turns. "
                         "Used by the bounded auto driver to pre-allocate the id so a "
-                        "driver-level cancel cannot leave auto state out of sync with the "
-                        "persisted interview file (see Q00/ouroboros#687)."
+                        "driver-level cancel cannot leave auto state out of sync with "
+                        "the persisted interview file (see Q00/ouroboros#687)."
                     ),
                     required=False,
                 ),
