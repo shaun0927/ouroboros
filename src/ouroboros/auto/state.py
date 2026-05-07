@@ -40,6 +40,93 @@ DEFAULT_TIMEOUT_SECONDS_BY_PHASE: dict[str, int] = {
     AutoPhase.RUN.value: 60,
 }
 
+# Allowed keys for the optional gateway-provenance metadata recorded on auto state.
+# Strict allowlist: anything not listed here is dropped during redaction so that
+# tokens, credentials, or raw user utterances cannot be persisted by accident.
+PROVENANCE_ALLOWED_KEYS: frozenset[str] = frozenset(
+    {
+        "source",
+        "rewrite",
+        "original_utterance_hash",
+        "channel_id_hash",
+        "user_id_hash",
+        "platform_message_id",
+        "gateway_version",
+    }
+)
+
+# Per-key validators. Each returns the cleaned value or raises ValueError.
+_PROVENANCE_HEX_KEYS = {
+    "original_utterance_hash",
+    "channel_id_hash",
+    "user_id_hash",
+}
+_PROVENANCE_MAX_LENGTHS = {
+    "source": 32,
+    "platform_message_id": 64,
+    "gateway_version": 32,
+    "original_utterance_hash": 128,
+    "channel_id_hash": 128,
+    "user_id_hash": 128,
+}
+# Surface a clear ImportError instead of a runtime KeyError when the allowlist
+# grows but a length cap is not added alongside it.
+assert (PROVENANCE_ALLOWED_KEYS - {"rewrite"}).issubset(  # noqa: S101
+    _PROVENANCE_MAX_LENGTHS.keys()
+), "every non-rewrite provenance key needs an entry in _PROVENANCE_MAX_LENGTHS"
+
+
+def _clean_provenance_value(key: str, value: Any) -> Any:
+    if key == "rewrite":
+        if not isinstance(value, bool):
+            msg = "provenance.rewrite must be a boolean"
+            raise ValueError(msg)
+        return value
+    if not isinstance(value, str):
+        msg = f"provenance.{key} must be a string"
+        raise ValueError(msg)
+    cleaned = value.strip()
+    if not cleaned:
+        msg = f"provenance.{key} must be a non-empty string"
+        raise ValueError(msg)
+    limit = _PROVENANCE_MAX_LENGTHS[key]
+    if len(cleaned) > limit:
+        msg = f"provenance.{key} exceeds {limit}-character limit"
+        raise ValueError(msg)
+    if key in _PROVENANCE_HEX_KEYS:
+        lowered = cleaned.lower()
+        if not all(c in "0123456789abcdef" for c in lowered):
+            msg = f"provenance.{key} must be a lowercase hex digest"
+            raise ValueError(msg)
+        return lowered
+    if any(c.isspace() or not c.isprintable() for c in cleaned):
+        msg = f"provenance.{key} must be printable without whitespace"
+        raise ValueError(msg)
+    return cleaned
+
+
+def redact_provenance(raw: Any) -> dict[str, Any] | None:
+    """Return an allowlisted, type-checked provenance dict (or None).
+
+    Unknown keys are silently dropped so that callers cannot smuggle private
+    data via ad-hoc fields. Validation errors on allowed keys raise instead of
+    being swallowed so that bad gateway integrations surface early.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        msg = "provenance must be an object or null"
+        raise ValueError(msg)
+    cleaned: dict[str, Any] = {}
+    for key, value in raw.items():
+        if key not in PROVENANCE_ALLOWED_KEYS:
+            continue
+        cleaned[key] = _clean_provenance_value(key, value)
+    if not cleaned:
+        return None
+    return cleaned
+
+
 TERMINAL_PHASES = {AutoPhase.COMPLETE, AutoPhase.BLOCKED, AutoPhase.FAILED}
 _ALLOWED_TRANSITIONS: dict[AutoPhase, set[AutoPhase]] = {
     AutoPhase.CREATED: {AutoPhase.INTERVIEW, AutoPhase.BLOCKED, AutoPhase.FAILED},
@@ -133,6 +220,10 @@ class AutoPipelineState:
     timeout_seconds_by_phase: dict[str, int] = field(
         default_factory=lambda: dict(DEFAULT_TIMEOUT_SECONDS_BY_PHASE)
     )
+    # Optional provenance metadata supplied by an external gateway when it
+    # rewrote a natural-language request into ``ooo auto`` shell command. None
+    # for direct CLI invocations so legacy state files load unchanged.
+    provenance: dict[str, Any] | None = None
 
     def phase_timeout_seconds(self, phase: AutoPhase) -> float:
         """Return the configured timeout for ``phase`` in seconds.
@@ -221,6 +312,7 @@ class AutoPipelineState:
         payload.setdefault("run_reconciliation_status", None)
         payload.setdefault("run_reconciliation_source", None)
         payload.setdefault("run_reconciled_at", None)
+        payload.setdefault("provenance", None)
         required_fields = {item.name for item in fields(cls)}
         missing_fields = sorted(required_fields - payload.keys())
         if missing_fields:
@@ -304,6 +396,14 @@ class AutoPipelineState:
         if not isinstance(self.run_subagent, dict):
             msg = "run_subagent must be an object"
             raise ValueError(msg)
+        if self.provenance is not None:
+            if not isinstance(self.provenance, dict):
+                msg = "provenance must be an object or null"
+                raise ValueError(msg)
+            cleaned = redact_provenance(self.provenance)
+            if cleaned != self.provenance:
+                msg = "provenance contains unallowed keys; pass through redact_provenance() before persisting"
+                raise ValueError(msg)
         if self.ledger:
             try:
                 from ouroboros.auto.ledger import SeedDraftLedger
