@@ -1674,6 +1674,124 @@ async def test_auto_pipeline_resets_seed_origin_when_invalid_artifact_is_wiped(t
 
 
 @pytest.mark.asyncio
+async def test_auto_pipeline_backfills_seed_origin_for_seed_path_only_resume(tmp_path) -> None:
+    """Resume that only carries ``seed_path`` (no ``seed_artifact``) must backfill provenance.
+
+    Pre-PR auto pipelines were the only writer of ``seed_path`` via
+    ``seed_saver``, so a session that resumes through the loader path
+    with ``seed_origin=none`` is by definition a legacy session whose
+    Seed was authored by the auto pipeline. The new CLI/MCP surfaces
+    must not report ``none`` for it.
+    """
+    from ouroboros.auto.grading import GradeResult, SeedGrade
+    from ouroboros.auto.ledger import SeedDraftLedger
+    from ouroboros.auto.pipeline import AutoPipeline
+    from ouroboros.auto.seed_repairer import RepairResult
+    from ouroboros.auto.seed_reviewer import SeedReview
+    from ouroboros.auto.state import (
+        AutoPhase,
+        AutoPipelineState,
+        AutoStore,
+        SeedOrigin,
+    )
+    from ouroboros.core.seed import (
+        EvaluationPrinciple,
+        ExitCondition,
+        OntologyField,
+        OntologySchema,
+        Seed,
+        SeedMetadata,
+    )
+
+    seed = Seed(
+        goal="Build a CLI",
+        constraints=("Use existing project patterns",),
+        acceptance_criteria=("Command prints stable output",),
+        ontology_schema=OntologySchema(
+            name="CliTask",
+            description="CLI task ontology",
+            fields=(OntologyField(name="command", field_type="string", description="Command"),),
+        ),
+        evaluation_principles=(
+            EvaluationPrinciple(name="testability", description="Observable behavior", weight=1.0),
+        ),
+        exit_conditions=(
+            ExitCondition(
+                name="verified",
+                description="Checks pass",
+                evaluation_criteria="All acceptance criteria pass",
+            ),
+        ),
+        metadata=SeedMetadata(ambiguity_score=0.12),
+    )
+
+    class _StubInterviewDriver:
+        async def run(self, _state, _ledger):  # noqa: ARG002
+            raise AssertionError("interview driver must not run on the seed_path resume")
+
+    async def fake_seed_generator(_session_id):  # noqa: ARG001
+        raise AssertionError("seed generator must not run when seed_path is persisted")
+
+    def fake_seed_saver(_seed):
+        return str(tmp_path / "seed.yaml")
+
+    def fake_seed_loader(_path):
+        return seed
+
+    class _PassingReviewer:
+        def review(self, _seed, *, ledger=None):  # noqa: ARG002
+            grade = GradeResult(grade=SeedGrade.A, scores={}, may_run=True)
+            return SeedReview(grade_result=grade, findings=())
+
+    class _PassingRepairer:
+        def converge(self, seed_in, *, ledger=None):
+            review = _PassingReviewer().review(seed_in, ledger=ledger)
+            return (
+                seed_in,
+                review,
+                [
+                    RepairResult(
+                        changed=False,
+                        seed=seed_in,
+                        applied_repairs=(),
+                        unresolved_findings=(),
+                    )
+                ],
+            )
+
+    store = AutoStore(tmp_path / "store")
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    # Loader path: only seed_path is persisted, seed_artifact is empty,
+    # seed_origin is at the legacy default ``none``.
+    state.seed_path = str(tmp_path / "seed.yaml")
+    state.last_grade = "A"
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    state.ledger = ledger.to_dict()
+    state.transition(AutoPhase.INTERVIEW, "primed")
+    state.transition(AutoPhase.SEED_GENERATION, "ready for seed generation")
+    state.transition(AutoPhase.REVIEW, "review queued")
+    state.skip_run = True
+    assert state.seed_origin is SeedOrigin.NONE
+    store.save(state)
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        fake_seed_generator,
+        store=store,
+        seed_saver=fake_seed_saver,
+        seed_loader=fake_seed_loader,
+        skip_run=True,
+        reviewer=_PassingReviewer(),
+        repairer=_PassingRepairer(),
+    )
+
+    result = await pipeline.run(state)
+
+    assert state.seed_origin is SeedOrigin.AUTO_PIPELINE
+    assert result.seed_origin == "auto_pipeline"
+
+
+@pytest.mark.asyncio
 async def test_auto_pipeline_marks_seed_origin_after_seed_generation(tmp_path) -> None:
     from ouroboros.auto.ledger import SeedDraftLedger
     from ouroboros.auto.pipeline import AutoPipeline

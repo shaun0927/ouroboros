@@ -424,6 +424,15 @@ class AutoPipeline:
             )
             self._save(state)
             return None
+        # Loader-based resume paths previously left ``seed_origin`` at the
+        # legacy default ``none`` even though a Seed had clearly been
+        # persisted by an earlier auto pipeline run (the Seed file at
+        # ``seed_path`` was written by ``seed_saver``). Backfill the
+        # provenance once on first post-PR resume so the new CLI/MCP
+        # surfaces don't keep reporting an inaccurate ``none`` for valid
+        # resumed sessions. Existing non-default values are preserved.
+        if state.seed_origin is SeedOrigin.NONE:
+            state.seed_origin = SeedOrigin.AUTO_PIPELINE
         return seed
 
     def _result(
