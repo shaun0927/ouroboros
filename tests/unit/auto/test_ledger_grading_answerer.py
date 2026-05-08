@@ -645,6 +645,38 @@ def test_auto_answerer_routes_multilingual_questions_by_ledger_intent() -> None:
         assert expected_sections <= updated_sections, question
 
 
+def test_auto_answerer_multilingual_permission_questions_route_to_product_behavior() -> None:
+    """Multilingual permission/product-behavior questions must NOT misroute to
+    actor/IO just because they contain an actor noun + interrogative.  Without
+    multilingual product-behavior detection the classifier was asymmetric:
+    actor cues recognised non-English wording but PRODUCT_BEHAVIOR did not, so
+    questions like ``Quels utilisateurs peuvent supprimer des branches?`` and
+    ``哪些用户可以删除分支?`` silently injected ``actors``/``inputs``/``outputs``
+    assumptions instead of preserving the requested authorization behavior.
+    Flagged by ouroboros-agent on commit 4694da0.
+    """
+    answerer = AutoAnswerer()
+    questions = (
+        "Quels utilisateurs peuvent supprimer des branches?",
+        "哪些用户可以删除分支?",
+        "어떤 사용자가 브랜치를 삭제할 수 있나요?",
+        "Welche Benutzer dürfen Branches löschen?",
+        "¿Qué usuarios pueden eliminar ramas?",
+    )
+
+    for question in questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a CLI"))
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+
+        assert answer.blocker is None, question
+        # Product-behavior contract is preserved (constraints + acceptance) and
+        # actor/IO assumptions are NOT injected.
+        assert {"constraints", "acceptance_criteria"} <= updated_sections, (question, updated_sections)
+        assert "actors" not in updated_sections, question
+        assert "inputs" not in updated_sections, question
+        assert "outputs" not in updated_sections, question
+
+
 def test_auto_answerer_property_lookup_cues_do_not_misroute_to_intent_handlers() -> None:
     """Broad cue substrings (``input``, ``output``, ``repository``, ``architecture``)
     must not by themselves trigger ACTOR_IO or RUNTIME_CONTEXT routing.  These

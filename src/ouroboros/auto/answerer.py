@@ -689,7 +689,7 @@ def _classify_question_intents(question: str) -> frozenset[QuestionIntent]:
         intents.add(QuestionIntent.ACTOR_IO)
     if _has_runtime_context_intent(lowered):
         intents.add(QuestionIntent.RUNTIME_CONTEXT)
-    if _is_product_behavior_question(lowered):
+    if _has_product_behavior_intent(lowered):
         intents.add(QuestionIntent.PRODUCT_BEHAVIOR)
 
     return frozenset(intents)
@@ -892,6 +892,96 @@ def _has_runtime_context_intent(lowered: str) -> bool:
     if not _contains_intent_cue(lowered, QuestionIntent.RUNTIME_CONTEXT):
         return False
     return _has_runtime_selection_shape(lowered)
+
+
+# Cross-lingual permission/action shape for product-behavior questions.  The
+# strict English ``_is_product_behavior_question()`` covers
+# ``can|should|must|...`` paired with mutation/visibility verbs.  Without an
+# equivalent multilingual layer, non-English permission questions like
+# ``Quels utilisateurs peuvent supprimer des branches?`` or
+# ``哪些用户可以删除分支?`` collide with the new actor cues — they get the
+# ACTOR_IO intent only, and the answerer injects ``actors``/``inputs``/
+# ``outputs`` assumptions instead of preserving the requested authorization
+# behavior in the ledger contract.  These patterns add the missing
+# multilingual coverage so PRODUCT_BEHAVIOR wins routing precedence as
+# intended.  This is a direct response to ouroboros-agent's design note that
+# the classifier and the route recognizers were asymmetric.
+_MULTILINGUAL_PRODUCT_BEHAVIOR_PATTERNS: tuple[str, ...] = (
+    # Spanish: pueden/puede/deben/debe/podrán/podrían + mutation/visibility verb
+    r"\b(pueden|puede|podr[áa]n?|podr[íi]an|deben|debe|deber[áa]n?|deber[íi]an?)\b"
+    r"[^?]*?\b(eliminar|borrar|crear|editar|modificar|actualizar|enviar|generar|"
+    r"exportar|descargar|ver|acceder|aprobar|rechazar|cancelar|asignar|notificar|"
+    r"configurar|mostrar|guardar|almacenar|leer)\b",
+    # French: peut/peuvent/doit/doivent/pourra/devraient + mutation/visibility verb.
+    # Hyphenated subject pronouns ("doit-il", "peut-on") are split by the
+    # ``\b`` word boundary.
+    r"\b(peut|peuvent|doit|doivent|pourra|pourront|pourraient|"
+    r"devrait|devraient|peut[- ]on)\b"
+    r"[^?]*?\b(supprimer|effacer|cr[ée]er|modifier|mettre[- ]?[àa][- ]?jour|"
+    r"envoyer|exporter|t[ée]l[ée]charger|voir|consulter|acc[ée]der|approuver|"
+    r"rejeter|annuler|assigner|notifier|configurer|afficher|stocker|enregistrer|"
+    r"lire)\b",
+    # German: können/kann/dürfen/darf/sollen/soll/müssen/muss + mutation verb
+    r"\b(k[öo]nnen|kann|d[üu]rfen|darf|sollen|soll|sollte|sollten|m[üu]ssen|"
+    r"muss|m[üu]sste|m[üu]ssten)\b"
+    r"[^?]*?\b(l[öo]schen|entfernen|erstellen|anlegen|bearbeiten|aktualisieren|"
+    r"senden|exportieren|herunterladen|anzeigen|sehen|zugreifen|genehmigen|"
+    r"ablehnen|stornieren|zuweisen|benachrichtigen|konfigurieren|generieren|"
+    r"speichern|lesen)\b",
+    # Korean: action noun + Korean verb-formation morpheme (하|할|되|돼|됨|
+    # 됩|됐|할까|하나|하지|되나|되어야) + (later) a permission/modal cue.
+    # Anchoring on the verb morpheme prevents noun substrings like ``저장``
+    # inside ``저장소`` (repository) or ``읽`` inside ``읽기`` from falsely
+    # triggering the pattern on runtime/IO questions.
+    r"(삭제|제거|생성|편집|수정|업데이트|전송|다운로드|표시|보기|접근|"
+    r"승인|거부|취소|할당|알림|구성|설정|저장|읽기|보내기|만들기|받기|"
+    r"내보내기|내려받기|로그인|로그아웃|업로드)"
+    r"(?:하|할|함|되|됨|돼|됩|됐|할까|하나|하지|되나|되어야)"
+    r"[^?]*?(수\s*있|수\s*없|해야|해도|가능|있나|있을까|할까|허용|허락)",
+    r"(수\s*있|수\s*없|해야|해도|가능|있나|있을까|할까|허용|허락)"
+    r"[^?]*?(삭제|제거|생성|편집|수정|업데이트|전송|다운로드|표시|보기|"
+    r"접근|승인|거부|취소|할당|알림|구성|설정|저장|읽기|보내기|만들기|"
+    r"받기|내보내기|내려받기|로그인|로그아웃|업로드)"
+    r"(?:하|할|함|되|됨|돼|됩|됐)",
+    # Japanese: action verb + できる/できます/してもよい/可能/していい (or reverse).
+    r"(削除|消去|作成|作る|追加|編集|更新|送信|送る|エクスポート|表示|見|"
+    r"アクセス|承認|却下|キャンセル|割り当て|通知|設定|構成|生成|"
+    r"ダウンロード|保存|読)"
+    r"[^?]*?(できる|できます|できますか|してもよい|してよい|可能|していい|"
+    r"してください|すべき|すべきか)",
+    r"(できる|できます|できますか|してもよい|してよい|可能|していい|"
+    r"すべき|すべきか)"
+    r"[^?]*?(削除|消去|作成|作る|追加|編集|更新|送信|送る|エクスポート|"
+    r"表示|見|アクセス|承認|却下|キャンセル|割り当て|通知|設定|構成|"
+    r"生成|ダウンロード|保存|読)",
+    # Chinese (simplified + traditional): permission modal + mutation verb,
+    # or mutation verb + permission modal.
+    r"(可以|可|应该|應該|必须|必須|能|能否|应當|應當|該|应|须|須)"
+    r"[^?]*?(删除|刪除|创建|建立|创|建|添加|编辑|編輯|更新|修改|发送|"
+    r"發送|发|導出|导出|匯出|下载|下載|查看|访问|訪問|批准|拒绝|拒絕|"
+    r"取消|分配|通知|配置|生成|存储|存儲|读取|讀取|显示|顯示)",
+    r"(删除|刪除|创建|建立|创|建|添加|编辑|編輯|更新|修改|发送|發送|发|"
+    r"導出|导出|匯出|下载|下載|查看|访问|訪問|批准|拒绝|拒絕|取消|分配|"
+    r"通知|配置|生成|存储|存儲|读取|讀取|显示|顯示)"
+    r"[^?]*?(可以|可|应该|應該|必须|必須|能|能否|应當|應當|該|应|须|須)",
+)
+
+
+def _has_product_behavior_intent(lowered: str) -> bool:
+    """Classify product-behavior intent across English and other languages.
+
+    Without multilingual coverage the classifier becomes asymmetric: actor and
+    runtime cues recognise non-English wording but PRODUCT_BEHAVIOR does not,
+    so non-English permission / behavior questions get misrouted to ACTOR_IO
+    or RUNTIME_CONTEXT (e.g. ``"哪些用户可以删除分支?"`` writing
+    ``actors``/``inputs``/``outputs`` instead of preserving the requested
+    authorization behavior).  This helper restores symmetry.
+    """
+    if _is_product_behavior_question(lowered):
+        return True
+    return any(
+        re.search(pattern, lowered) for pattern in _MULTILINGUAL_PRODUCT_BEHAVIOR_PATTERNS
+    )
 
 
 def _is_verification_question(lowered: str) -> bool:
