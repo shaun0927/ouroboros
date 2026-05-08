@@ -868,15 +868,19 @@ def _mark_unknown_run_handoff(
     if status == "unknown_timeout":
         state.run_handoff_guidance = (
             "Run starter timed out before a durable tracking handle was captured. "
-            "The runtime may still have created an execution. Resume will not start "
-            "another run automatically or risk duplicate execution; inspect the "
-            "runtime for an existing execution before rerunning manually."
+            "The runtime may still have created an execution. Resume will attempt "
+            "exactly one automatic retry reusing the same idempotency key (state."
+            "auto_session_id) so the server-side handler can short-circuit a "
+            "duplicate enqueue. After that retry budget is exhausted the pipeline "
+            "blocks and any further resume requires manual inspection."
         )
         return
     state.run_handoff_guidance = (
         "Run starter was attempted, but no durable tracking handle was captured. "
-        "Resume will not start another run automatically or risk duplicate execution; "
-        "inspect the runtime for an existing execution before rerunning manually."
+        "Resume will attempt exactly one automatic retry reusing the same "
+        "idempotency key (state.auto_session_id) so the server-side handler can "
+        "short-circuit a duplicate enqueue. After that retry budget is exhausted "
+        "the pipeline blocks and any further resume requires manual inspection."
     )
 
 
