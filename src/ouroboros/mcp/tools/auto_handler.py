@@ -381,6 +381,18 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
         meta["run_reconciliation_status"] = result.run_reconciliation_status
         meta["run_reconciliation_source"] = result.run_reconciliation_source
         meta["run_reconciled_at"] = result.run_reconciled_at
+    # Q00/ouroboros#773 (review-4): surface Ralph handoff tracking handles on
+    # the MCP result contract. Without these, plugin-mode dispatches and
+    # mid-loop checkpoints expose no structured handle for clients to monitor
+    # or correlate the Ralph work, forcing them to read local state files
+    # out-of-band. Each field is emitted only when populated so default-off
+    # ``complete_product=False`` runs keep the legacy meta shape byte-identical.
+    if result.ralph_job_id:
+        meta["ralph_job_id"] = result.ralph_job_id
+    if result.ralph_lineage_id:
+        meta["ralph_lineage_id"] = result.ralph_lineage_id
+    if result.ralph_dispatch_mode:
+        meta["ralph_dispatch_mode"] = result.ralph_dispatch_mode
     # Always emit the ledger-provenance surface so MCP clients can distinguish
     # "computed and empty" (no resolved sections yet, or no per-source split
     # available) from "field not provided at all".  Empty containers are part
@@ -651,6 +663,14 @@ def _format_result(result: AutoPipelineResult) -> str:
         lines.append(f"Run reconciliation status: {result.run_reconciliation_status}")
         lines.append(f"Run reconciliation source: {result.run_reconciliation_source}")
         lines.append(f"Run reconciled at: {result.run_reconciled_at}")
+    if result.ralph_dispatch_mode or result.ralph_job_id or result.ralph_lineage_id:
+        lines.append("Ralph handoff:")
+        if result.ralph_dispatch_mode:
+            lines.append(f"  dispatch_mode: {result.ralph_dispatch_mode}")
+        if result.ralph_job_id:
+            lines.append(f"  job_id: {result.ralph_job_id}")
+        if result.ralph_lineage_id:
+            lines.append(f"  lineage_id: {result.ralph_lineage_id}")
     if result.assumptions:
         lines.append("Assumptions:")
         lines.extend(f"- {item}" for item in result.assumptions)

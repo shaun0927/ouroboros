@@ -118,3 +118,74 @@ def test_handle_meta_resume_command_present_for_partial_resume() -> None:
     meta = _invoke(handler)
     assert meta["resume_capability"] == "partial_resume"
     assert meta["resume_command"] == "ooo auto --resume auto_mcp"
+
+
+# --- Ralph handoff meta surface (#773 review-4) -----------------------------
+
+
+def _ralph_result(
+    *,
+    job_id: str | None = "job_ralph_xyz",
+    lineage_id: str | None = "ralph-seed_test_001-auto_abcd",
+    dispatch_mode: str | None = "job",
+) -> AutoPipelineResult:
+    return AutoPipelineResult(
+        status="complete",
+        auto_session_id="auto_ralph",
+        phase="complete",
+        resume_capability=AutoResumeCapability.NONE,
+        ralph_job_id=job_id,
+        ralph_lineage_id=lineage_id,
+        ralph_dispatch_mode=dispatch_mode,
+    )
+
+
+def test_handle_meta_includes_ralph_handoff_handles_when_present() -> None:
+    """Bot review-4 blocking finding: MCP clients must be able to monitor and
+    correlate the Ralph loop they just dispatched. Without ``ralph_job_id`` /
+    ``ralph_lineage_id`` / ``ralph_dispatch_mode`` on the meta surface, plugin
+    delegations and mid-loop checkpoints expose no structured handle and
+    clients are forced to read local state files out-of-band.
+    """
+    handler = _StubAutoHandler(_ralph_result())
+    meta = _invoke(handler)
+    assert meta["ralph_job_id"] == "job_ralph_xyz"
+    assert meta["ralph_lineage_id"] == "ralph-seed_test_001-auto_abcd"
+    assert meta["ralph_dispatch_mode"] == "job"
+
+
+def test_handle_meta_includes_plugin_dispatch_mode() -> None:
+    """Plugin-mode delegations have ``job_id=None`` but still need a tracking
+    surface. ``lineage_id`` and ``dispatch_mode`` carry the correlation."""
+    handler = _StubAutoHandler(_ralph_result(job_id=None, dispatch_mode="plugin"))
+    meta = _invoke(handler)
+    assert "ralph_job_id" not in meta
+    assert meta["ralph_lineage_id"] == "ralph-seed_test_001-auto_abcd"
+    assert meta["ralph_dispatch_mode"] == "plugin"
+
+
+def test_handle_meta_omits_ralph_handles_for_legacy_complete_product_off() -> None:
+    """``complete_product=False`` runs must keep the meta shape byte-identical
+    to pre-#773 — none of the three Ralph fields appear when null."""
+    handler = _StubAutoHandler(_ralph_result(job_id=None, lineage_id=None, dispatch_mode=None))
+    meta = _invoke(handler)
+    assert "ralph_job_id" not in meta
+    assert "ralph_lineage_id" not in meta
+    assert "ralph_dispatch_mode" not in meta
+
+
+def test_format_result_renders_ralph_handoff_block_when_present() -> None:
+    """Human-readable text mirrors the structured meta so operators tailing
+    the MCP response without a JSON parser still see the Ralph handles."""
+    output = _format_result(_ralph_result(dispatch_mode="plugin", job_id=None))
+
+    assert "Ralph handoff:" in output
+    assert "dispatch_mode: plugin" in output
+    assert "lineage_id: ralph-seed_test_001-auto_abcd" in output
+    assert "job_id:" not in output  # plugin mode has no job
+
+
+def test_format_result_omits_ralph_block_when_no_handoff() -> None:
+    output = _format_result(_ralph_result(job_id=None, lineage_id=None, dispatch_mode=None))
+
+    assert "Ralph handoff:" not in output
