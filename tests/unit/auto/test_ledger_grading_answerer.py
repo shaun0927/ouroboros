@@ -700,6 +700,36 @@ def test_auto_answerer_cjk_property_lookup_does_not_misroute_to_runtime() -> Non
         assert "runtime_context" not in updated_sections, (question, updated_sections)
 
 
+def test_auto_answerer_user_settings_questions_route_to_product_behavior() -> None:
+    """``"What user settings should be displayed?"`` and ``"Which user fields
+    should be editable?"`` are product-behavior questions about a user-facing
+    feature, not actor / IO contract questions.  Flagged by ouroboros-agent
+    on commit 8e0d789 — the bare ``"what user"`` / ``"which user"`` actor
+    cues caused these to misroute to ``_io_actor_answer``.  Routing now
+    drops those cues and ``_is_product_behavior_question`` recognises
+    past-participle forms (``displayed`` / ``shown`` / ``stored`` / etc.).
+    """
+    answerer = AutoAnswerer()
+    questions = (
+        "What user settings should be displayed?",
+        "Which user settings should be displayed?",
+        "Which user fields should be shown?",
+    )
+    for question in questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a CLI"))
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+        assert answer.blocker is None, question
+        # Must NOT inject actor / IO assumptions for a settings/fields question.
+        assert "actors" not in updated_sections, (question, updated_sections)
+        assert "inputs" not in updated_sections, (question, updated_sections)
+        assert "outputs" not in updated_sections, (question, updated_sections)
+        # Should preserve the requested behavior in constraints + acceptance.
+        assert {"constraints", "acceptance_criteria"} <= updated_sections, (
+            question,
+            updated_sections,
+        )
+
+
 def test_auto_answerer_english_user_actor_questions_route_to_actor_io() -> None:
     """Common English actor questions like ``"Who is the primary user?"`` and
     ``"Which user is the primary user?"`` must populate ``actors`` /

@@ -868,8 +868,13 @@ _ACTOR_NOUN_CUES: tuple[str, ...] = (
 
 _ACTOR_QUESTION_CUES: tuple[str, ...] = (
     "who",
-    "which user",
-    "what user",
+    # NB: bare ``"which user"`` and ``"what user"`` are intentionally NOT
+    # in this list — combined with the ``user`` / ``users`` actor noun
+    # cues they would silently misroute product-behavior questions like
+    # ``"What user settings should be displayed?"`` and ``"Which user
+    # fields should be editable?"`` into ``_io_actor_answer()``.  Specific
+    # actor phrases (``"primary user"`` / ``"end user"``) stay because
+    # they are unambiguous "who is the user" questions.
     "primary user",
     "end user",
     "quién",
@@ -1342,7 +1347,16 @@ def _is_product_behavior_question(lowered: str) -> bool:
         )
         or re.search(
             r"\b(should|must|can|will|do|does|is|are)\b.+\b(be|become)\s+"
-            r"(editable|edited|deleted|removed|trackable|tracked|enforced|configurable|visible|searchable|exportable|importable)\b",
+            r"(editable|edited|deleted|removed|trackable|tracked|enforced|"
+            r"configurable|visible|searchable|exportable|importable|"
+            # Past-participle forms of common product/UI verbs so questions
+            # like ``"What user settings should be displayed?"`` and
+            # ``"Which fields should be shown?"`` route to PRODUCT_BEHAVIOR
+            # instead of falling through to ``_default_answer`` once the
+            # actor cue path is no longer matched.
+            r"displayed|shown|rendered|hidden|stored|saved|sent|received|"
+            r"returned|generated|created|updated|imported|exported|"
+            r"validated|verified|confirmed|approved|notified)\b",
             lowered,
         )
         or re.search(
