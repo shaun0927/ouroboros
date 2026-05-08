@@ -225,6 +225,7 @@ class RalphHandler:
                 skip_qa=config.skip_qa,
                 project_dir=config.project_dir,
                 max_generations=config.max_generations,
+                per_iteration_timeout_seconds=config.per_iteration_timeout_seconds,
             )
             await self._event_store.initialize()
             await emit_subagent_dispatched_event(

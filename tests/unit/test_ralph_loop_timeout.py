@@ -153,3 +153,54 @@ async def test_ralph_handler_rejects_non_numeric_per_iteration_timeout() -> None
 
     assert result.is_err
     assert "per_iteration_timeout_seconds must be a number" in str(result.error)
+
+
+@pytest.mark.asyncio
+async def test_plugin_dispatch_forwards_per_iteration_timeout_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plugin-mode dispatch must forward per_iteration_timeout_seconds.
+
+    Wiring lock for #784 review-1: when ``should_dispatch_via_plugin`` returns
+    True, the produced ``_subagent`` payload context must include
+    ``per_iteration_timeout_seconds``. Otherwise the public stop-reason
+    contract (``iteration_timeout``) is silently dropped on the plugin path
+    and the child session can hang indefinitely.
+    """
+    import json as _json
+
+    from ouroboros.mcp.tools import ralph_handlers as _ralph_handlers
+
+    handler = RalphHandler(
+        evolve_handler=_ImmediateEvolveHandler(),  # type: ignore[arg-type]
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+    )
+
+    # Make the audit emitter a no-op (handler initializes its own EventStore).
+    async def _noop_emit(event_store, *, session_id, payload):  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr(
+        _ralph_handlers,
+        "emit_subagent_dispatched_event",
+        _noop_emit,
+    )
+
+    result = await handler.handle(
+        {
+            "lineage_id": "lin_plugin_timeout",
+            "seed_content": "goal: ship",
+            "max_generations": 3,
+            "per_iteration_timeout_seconds": 1234,
+        }
+    )
+
+    assert result.is_ok
+    tool_result = result.value
+    body = _json.loads(tool_result.content[0].text)
+    sub = body["_subagent"]
+    assert sub["tool_name"] == "ouroboros_ralph"
+    assert sub["context"]["per_iteration_timeout_seconds"] == 1234
+    assert "per_iteration_timeout_seconds: 1234" in sub["prompt"]
+    assert "stop_reason=iteration_timeout" in sub["prompt"]

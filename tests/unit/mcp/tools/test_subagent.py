@@ -242,6 +242,8 @@ class TestBuildRalphSubagent:
         assert "delegation_depth: 1" in payload.prompt
         assert "allow_nested_ouroboros_ralph: false" in payload.prompt
         assert "Do not call ouroboros_ralph" in payload.prompt
+        # Without per_iteration_timeout_seconds, the timeout block is omitted.
+        assert "Per-Iteration Timeout" not in payload.prompt
         assert payload.context == {
             "lineage_id": "lin-ralph",
             "seed_content": "goal: ship",
@@ -250,9 +252,23 @@ class TestBuildRalphSubagent:
             "skip_qa": True,
             "project_dir": "/repo",
             "max_generations": 4,
+            "per_iteration_timeout_seconds": None,
             "delegation_depth": 1,
             "allow_nested_ouroboros_ralph": False,
         }
+
+    def test_forwards_per_iteration_timeout_to_prompt_and_context(self) -> None:
+        payload = build_ralph_subagent(
+            lineage_id="lin-timeout",
+            seed_content="goal: ship",
+            max_generations=3,
+            per_iteration_timeout_seconds=900,
+        )
+
+        assert payload.context["per_iteration_timeout_seconds"] == 900
+        assert "per_iteration_timeout_seconds: 900" in payload.prompt
+        assert "stop_reason=iteration_timeout" in payload.prompt
+        assert "exceeds 900 seconds" in payload.prompt
 
     def test_serializes_seed_content_as_json_data(self) -> None:
         payload = build_ralph_subagent(
