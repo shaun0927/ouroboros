@@ -484,7 +484,7 @@ def test_safe_default_blocks_when_conservative_default_entry_authorizes_unsafe_s
         "runtime_context",
         LedgerEntry(
             key="runtime_context.conservative_default",
-            value="Production database connection is the conservative default for this CLI.",
+            value="Deploys to production with customer credentials as the conservative default.",
             source=LedgerSource.CONSERVATIVE_DEFAULT,
             confidence=0.6,
             status=LedgerStatus.DEFAULTED,
@@ -525,6 +525,58 @@ def test_safe_default_blocks_when_non_user_goal_entry_introduces_unsafe_context(
 
     assert not result.completed
     assert any("unsafe default context" in gap for gap in result.unsafe_gaps)
+    assert not ledger.is_seed_ready()
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Reproduce a production bug locally with the existing test fixtures",
+        "Use the production schema snapshot already in the repo",
+        "Replay a captured production trace against the local server",
+        "Document the prod logging format in the developer guide",
+        "Compile the live preview build for local QA",
+    ],
+)
+def test_safe_default_allows_benign_production_mentions(goal: str) -> None:
+    ledger = SeedDraftLedger.from_goal(goal)
+
+    result = finalize_safe_defaultable_gaps(
+        ledger,
+        goal=goal,
+        provenance="unit test",
+    )
+
+    assert result.completed, (
+        f"goal {goal!r} only describes local read-only context; "
+        "finalization must not block on bare production/prod/live mentions"
+    )
+    assert result.unsafe_gaps == ()
+    assert ledger.is_seed_ready()
+
+
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Deploy the new service to production for the launch event",
+        "Release version 2 to prod after the freeze",
+        "Push live the cutover migration on Friday",
+        "Going live with the rebuilt checkout flow next week",
+    ],
+)
+def test_safe_default_blocks_genuine_production_actions(goal: str) -> None:
+    ledger = SeedDraftLedger.from_goal(goal)
+
+    result = finalize_safe_defaultable_gaps(
+        ledger,
+        goal=goal,
+        provenance="unit test",
+    )
+
+    assert not result.completed, (
+        f"goal {goal!r} authorizes a production-class action; finalization must block"
+    )
+    assert any("external side effect" in gap.lower() for gap in result.unsafe_gaps)
     assert not ledger.is_seed_ready()
 
 

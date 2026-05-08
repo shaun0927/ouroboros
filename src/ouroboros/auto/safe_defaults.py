@@ -110,13 +110,21 @@ _UNSAFE_CONTEXT_PATTERNS: tuple[tuple[str, str], ...] = (
     (
         "ambiguous external side effect",
         # Concrete external side effects only: deploy/release/publish flows,
-        # production/prod/live targets, explicit messaging or account/branch
-        # mutations, and database migrations. Earlier revisions matched bare
-        # ``external``, which incorrectly flagged benign phrases such as
-        # "no external dependencies" or "use existing external API schema
-        # files only" — matched phrases must imply an actual side effect.
-        r"\b(deploy|release|publish|production|prod|live|send email|webhook|notify users|"
-        r"create account|delete branch|database migration)\b",
+        # explicit messaging or account/branch mutations, database
+        # migrations, and "go live"/"push live"/"going live" phrasings.
+        # Earlier revisions matched bare ``external``, which flagged benign
+        # phrases such as "no external dependencies"; this revision drops
+        # bare ``production``/``prod``/``live`` for the same reason —
+        # phrases like "reproduce a production bug locally" or "use the
+        # production schema snapshot already in the repo" describe
+        # read-only context, not a side effect. ``deploy``, ``release``,
+        # ``publish`` still catch the production-deploy class of phrasing
+        # ("deploy to production", "production deploy", "release to
+        # production"), and the explicit ``go live``/``push live`` phrases
+        # cover the few remaining production-cutover idioms.
+        r"\b(deploy|release|publish|send email|webhook|notify users|"
+        r"create account|delete branch|database migration|"
+        r"go live|going live|push live)\b",
     ),
 )
 
