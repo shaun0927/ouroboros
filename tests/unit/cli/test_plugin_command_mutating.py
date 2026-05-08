@@ -3659,3 +3659,59 @@ def test_trust_friendly_error_on_audit_log_write_failure(
     assert "audit-log write" in plain
     assert "failed" in plain
     assert "Traceback" not in result.output
+
+
+def test_catalog_register_does_not_lose_concurrent_updates(tmp_path: Path) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:654.
+
+    ``CatalogRegistry.register()`` is read-modify-write. Without an
+    inter-process lock, two concurrent ``ooo plugin add`` /
+    ``ooo plugin install <name> --from ...`` calls would each load the
+    same prior payload, merge in their own plugin, and the last
+    ``os.replace()`` would silently drop the other's entry after both
+    commands had already reported success. The fix wraps the read-
+    modify-write in the same POSIX flock pattern ``Lockfile`` /
+    ``TrustStore`` already use.
+
+    Use threads as a proxy for the cross-process race; fcntl flocks
+    serialize POSIX-locked critical sections regardless of whether the
+    callers are threads or processes, and the fix removes the lost-
+    update window in either case.
+    """
+    import threading
+
+    from ouroboros.cli.commands.plugin import CatalogRegistry
+
+    state_path = tmp_path / "plugin-catalogs.json"
+    registry = CatalogRegistry(state_path=state_path)
+    barrier = threading.Barrier(8)
+    errors: list[BaseException] = []
+
+    def _register(idx: int) -> None:
+        try:
+            barrier.wait()
+            registry.register(
+                source_type="local_path",
+                source_identity=f"/tmp/plugin-{idx}",
+                plugin_name=f"plugin-{idx}",
+            )
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_register, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == [], f"concurrent register raised: {errors}"
+
+    payload = json.loads(state_path.read_text())
+    plugins_recorded: set[str] = set()
+    for entry in payload["catalogs"]:
+        plugins_recorded.update(entry.get("plugins", []))
+    expected = {f"plugin-{i}" for i in range(8)}
+    assert plugins_recorded == expected, (
+        f"concurrent register lost updates: missing "
+        f"{expected - plugins_recorded}, got {plugins_recorded}"
+    )

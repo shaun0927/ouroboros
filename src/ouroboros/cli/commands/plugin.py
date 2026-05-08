@@ -662,6 +662,39 @@ class CatalogRegistry:
             os.fsync(handle.fileno())
         os.replace(tmp, self.state_path)
 
+    @contextmanager
+    def _file_lock(self):
+        """Acquire an exclusive flock for concurrent-write safety.
+
+        Mirrors the POSIX flock pattern used by ``Lockfile`` and
+        ``TrustStore`` so two concurrent ``ooo plugin add`` /
+        ``ooo plugin install <name> --from ...`` calls cannot
+        clobber each other's catalog entries via a lost-update
+        race. The default ``ooo plugin install <name>`` resolution
+        path now depends on ``plugin-catalogs.json``, so persisted
+        catalog state must offer the same durability guarantee as
+        the lockfile and trust store.
+
+        Falls through gracefully on platforms without ``fcntl``
+        (the file is still atomically replaced via ``os.replace``,
+        which gives last-writer-wins semantics — acceptable for
+        non-concurrent single-user setups, the only case where
+        ``fcntl`` is unavailable).
+        """
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            import fcntl
+        except ImportError:  # pragma: no cover — non-POSIX platforms
+            yield
+            return
+        lock_path = self.state_path.with_suffix(self.state_path.suffix + ".lock")
+        with lock_path.open("w") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
     def register(
         self,
         *,
@@ -669,27 +702,37 @@ class CatalogRegistry:
         source_identity: str,
         plugin_name: str,
     ) -> None:
-        """Idempotently record a (source, plugin) pair."""
-        data = self._load()
-        catalogs: list[dict] = data.setdefault("catalogs", [])
-        for entry in catalogs:
-            if (
-                entry.get("source_type") == source_type
-                and entry.get("source_identity") == source_identity
-            ):
-                names = set(entry.get("plugins", []))
-                names.add(plugin_name)
-                entry["plugins"] = sorted(names)
-                self._save(data)
-                return
-        catalogs.append(
-            {
-                "source_type": source_type,
-                "source_identity": source_identity,
-                "plugins": [plugin_name],
-            }
-        )
-        self._save(data)
+        """Idempotently record a (source, plugin) pair.
+
+        Read-modify-write is wrapped in an exclusive flock so two
+        concurrent ``ooo plugin add`` / ``ooo plugin install`` calls
+        cannot lose updates. Without the lock both processes would
+        ``_load()`` the same prior payload, each merge in their own
+        plugin, and the last ``os.replace()`` would win — silently
+        dropping the other's entry from the catalog after both
+        commands had already reported success.
+        """
+        with self._file_lock():
+            data = self._load()
+            catalogs: list[dict] = data.setdefault("catalogs", [])
+            for entry in catalogs:
+                if (
+                    entry.get("source_type") == source_type
+                    and entry.get("source_identity") == source_identity
+                ):
+                    names = set(entry.get("plugins", []))
+                    names.add(plugin_name)
+                    entry["plugins"] = sorted(names)
+                    self._save(data)
+                    return
+            catalogs.append(
+                {
+                    "source_type": source_type,
+                    "source_identity": source_identity,
+                    "plugins": [plugin_name],
+                }
+            )
+            self._save(data)
 
     def find_sources_for(self, plugin_name: str) -> list[dict]:
         """Return every catalog entry that exposes ``plugin_name``."""
