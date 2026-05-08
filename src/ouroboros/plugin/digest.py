@@ -44,6 +44,20 @@ class UnsupportedFileTypeError(ValueError):
     """
 
 
+class EscapingSymlinkError(ValueError):
+    """Raised when a subtree contains a symlink that resolves outside the root.
+
+    The canonical tree hash records only the symlink's target string —
+    not the bytes the link points to. That is intentional and correct
+    for symlinks that resolve INSIDE the plugin tree, because the
+    target file contributes its own digest record. For symlinks that
+    resolve OUTSIDE the tree, the bytes the firewall actually loads
+    can change without changing ``artifact_digest``, defeating the
+    trust-subject contract. Such links are rejected at digest time so
+    they cannot make it into the lockfile / trust store unnoticed.
+    """
+
+
 def _file_mode_octal(mode: int) -> str:
     """Return the canonical mode bits for a file or symlink.
 
@@ -92,6 +106,32 @@ def canonical_tree_hash(root: Path) -> str:
         raise NotADirectoryError(f"canonical_tree_hash root must be a directory: {root}")
 
     def _record_symlink(entry_path: Path, mode: int) -> bytes:
+        # Reject symlinks whose target resolves outside the plugin tree.
+        # The digest only hashes the link target STRING, not the bytes
+        # it points to. For in-tree targets that's fine because the
+        # target file contributes its own digest record. For out-of-
+        # tree targets the bytes the firewall actually loads can change
+        # without changing ``artifact_digest`` — exactly the
+        # code-substitution path the trust-subject model is supposed
+        # to close. Resolving against ``entry_path.parent`` lets us
+        # detect both absolute escapes (``/etc/passwd``) and relative
+        # ones (``../../host_secret``). We use ``normpath`` rather than
+        # ``resolve`` so a dangling link still fails closed instead
+        # of silently slipping through (resolve would raise on broken
+        # links).
+        target_str = os.readlink(entry_path)
+        target_path = Path(target_str)
+        if target_path.is_absolute():
+            candidate = Path(os.path.normpath(target_path))
+        else:
+            candidate = Path(os.path.normpath(entry_path.parent / target_path))
+        if not candidate.is_relative_to(root):
+            raise EscapingSymlinkError(
+                f"symlink {entry_path.relative_to(root).as_posix()!r} resolves "
+                f"outside the plugin tree (target={target_str!r}); refuse to "
+                f"compute artifact_digest because the target's bytes are not "
+                f"covered by the digest"
+            )
         content_hash = _hash_link_target(entry_path)
         relative = entry_path.relative_to(root).as_posix()
         mode_str = _file_mode_octal(mode)
@@ -238,6 +278,7 @@ def normalize_local_path(path: Path) -> str:
 
 
 __all__ = [
+    "EscapingSymlinkError",
     "UnsupportedFileTypeError",
     "canonical_tree_hash",
     "normalize_local_path",

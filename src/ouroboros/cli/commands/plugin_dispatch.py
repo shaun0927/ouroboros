@@ -77,12 +77,48 @@ def build_plugin_dispatch_command(cmd_name: str) -> click.Command | None:
 
     The Click command is built lazily so first-party command resolution
     keeps its fast path (no lockfile read, no manifest validation).
+
+    There are three terminal states for the resolution attempt:
+
+    - lockfile missing → genuinely "no plugins installed"; return
+      ``None`` so typer's "no such command" handler runs (the user
+      really did mistype something).
+    - lockfile present but unreadable/malformed → DO NOT pretend the
+      plugin is absent; that hides corruption behind "no such
+      command" and leaves the operator without a recovery hint.
+      Return a stub command that prints a friendly error and exits
+      non-zero, regardless of which plugin name was typed.
+    - lockfile readable but no entry matches ``cmd_name`` → return
+      ``None`` (real "unknown command").
     """
+    if not DEFAULT_LOCKFILE_PATH.exists():
+        # No plugins installed at all. Let typer surface the standard
+        # "unknown command" hint.
+        return None
     try:
         registry, entries = _build_registry_from_lockfile(DEFAULT_LOCKFILE_PATH)
-    except (OSError, ValueError):
-        # Lockfile missing or unreadable: nothing to dispatch.
-        return None
+    except (OSError, ValueError) as exc:
+        # Lockfile present but corrupt — surface the corruption
+        # directly. Hiding this as "no such command" makes a real
+        # installed plugin indistinguishable from a typo whenever the
+        # operator's plugins.lock breaks.
+        captured = str(exc)
+
+        @click.command(
+            name=cmd_name,
+            context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+        )
+        @click.argument("argv", nargs=-1, type=click.UNPROCESSED)
+        def _broken_lockfile(argv: tuple[str, ...]) -> None:  # noqa: ARG001 — argv ignored
+            print_error(
+                f"plugin lockfile is unreadable ({DEFAULT_LOCKFILE_PATH}): "
+                f"{captured}. "
+                f"Inspect or replace the file (`ooo plugin list --lockfile "
+                f"<path>` accepts an override), then retry."
+            )
+            raise click.exceptions.Exit(code=1)
+
+        return _broken_lockfile
 
     program = registry.get_by_namespace(cmd_name) or registry.get(cmd_name)
     if program is None:

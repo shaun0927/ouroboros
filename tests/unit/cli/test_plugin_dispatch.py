@@ -309,3 +309,31 @@ def test_dispatch_friendly_error_on_corrupt_trust_state(
     # Sanity: the plugin home is untouched (no install state was
     # mutated by the failed dispatch).
     assert plugin_home.exists()
+
+
+def test_dispatch_surfaces_corrupt_lockfile_instead_of_unknown_command(
+    stub_default_paths: dict[str, Path],
+) -> None:
+    """Regression for the bot's BLOCKING finding on plugin_dispatch.py:81.
+
+    When ``plugins.lock`` is present but unreadable / malformed, the
+    fallback MUST surface a friendly recovery hint instead of
+    returning ``None`` (which makes typer say "no such command" and
+    leaves an installed plugin indistinguishable from a typo). The
+    dispatcher returns a stub command that prints the lockfile error
+    and exits non-zero for any name the user typed.
+    """
+    # Write a corrupt lockfile in place of an installed-plugin lockfile.
+    stub_default_paths["lockfile"].write_text("{ truncated json")
+
+    cmd = build_plugin_dispatch_command("github-pr-ops")
+    assert cmd is not None, (
+        "build_plugin_dispatch_command must NOT return None when the "
+        "lockfile exists but is unreadable; that hides corruption as "
+        "'no such command'"
+    )
+    runner = CliRunner()
+    result = runner.invoke(cmd, ["review", "https://example.com/pr/1"])
+    assert result.exit_code != 0
+    assert "lockfile is unreadable" in result.output, result.output
+    assert "Traceback" not in result.output
