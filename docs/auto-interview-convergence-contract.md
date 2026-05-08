@@ -70,6 +70,11 @@ maximum round count was reached.
 
 `tests/unit/auto/test_interview_pipeline.py` includes contract tests for:
 
-- broad benign goals resolving via safe assumptions and bounded facts;
-- unsafe credential/production-authority questions blocking immediately;
-- stalled generic follow-ups producing actionable unresolved-gap blockers.
+- broad benign goals reaching `seed_ready` with required sections filled by
+  safe auto assumptions (with at least one ``DEFAULTED`` acceptance-criteria
+  entry) when no bounded repo facts are supplied;
+- unsafe credential/production-authority questions blocking immediately on the
+  first turn with a ``credential or secret value required`` reason;
+- stalled generic ``What else?`` follow-up loops producing a round-cap blocker
+  that names the unresolved required sections rather than just reporting that
+  ``max_rounds`` was reached.

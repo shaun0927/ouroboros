@@ -2852,19 +2852,26 @@ async def test_convergence_contract_unsafe_authority_question_blocks(tmp_path) -
 
 
 @pytest.mark.asyncio
-async def test_convergence_contract_stalled_unsafe_loop_reports_actionable_gaps(tmp_path) -> None:
-    """Unsafe round-cap blockers must name unresolved sections, not just max rounds."""
+async def test_convergence_contract_stalled_generic_followups_report_actionable_gaps(
+    tmp_path,
+) -> None:
+    """Generic ``What else?`` follow-up loops must blocker on unresolved sections.
+
+    This pins the documented stall pattern from
+    ``docs/auto-interview-convergence-contract.md``: when the backend keeps asking
+    ``What else?`` / ``Any additional context?``-style questions and required
+    sections never resolve, the round-cap blocker has to name the unresolved
+    gaps, not just say that ``max_rounds`` was reached.
+    """
 
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
-        return InterviewTurn(
-            "What production credentials should be configured?", "interview_contract"
-        )
+        return InterviewTurn("What else should we know?", "interview_contract")
 
     async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
-        return InterviewTurn("What production credentials should be configured?", session_id)
+        return InterviewTurn("What else should we know?", session_id)
 
     state = AutoPipelineState(
-        goal="Deploy the service to production and configure required credentials",
+        goal="Build a small note-taking CLI",
         cwd=str(tmp_path),
     )
     ledger = SeedDraftLedger.from_goal(state.goal)
@@ -2879,6 +2886,10 @@ async def test_convergence_contract_stalled_unsafe_loop_reports_actionable_gaps(
 
     blocker = result.blocker or ""
     assert result.status == "blocked"
+    assert state.phase == AutoPhase.BLOCKED
     assert "unresolved gaps" in blocker
-    assert "actors" in blocker
-    assert "runtime_context" in blocker
+    open_gaps = ledger.open_gaps()
+    assert open_gaps, "stalled generic loop must leave at least one open required gap"
+    # The blocker must name at least one specific unresolved section, not just
+    # report that max_rounds was reached.
+    assert any(section in blocker for section in open_gaps)
