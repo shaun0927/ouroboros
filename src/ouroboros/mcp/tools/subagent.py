@@ -1169,6 +1169,8 @@ def build_ralph_subagent(
     project_dir: str | None = None,
     max_generations: int = 10,
     per_iteration_timeout_seconds: float | None = None,
+    oscillation_window: int | None = None,
+    grade_regression_window: int | None = None,
     delegation_depth: int = 1,
     allow_nested_ouroboros_ralph: bool = False,
 ) -> SubagentPayload:
@@ -1194,6 +1196,14 @@ def build_ralph_subagent(
             (``RalphLoopRunner``). When ``None``, the field is omitted from
             both prompt and context (legacy shape preserved for callers that
             don't care about the bound).
+        oscillation_window: Number of trailing iterations whose ``findings_hash``
+            must be identical (and QA still failing) before the plugin child
+            session must stop with ``stop_reason=oscillation_detected``. When
+            ``None``, the block is omitted from the prompt and context.
+        grade_regression_window: Number of trailing iterations whose non-None
+            ``grade`` values must be strictly decreasing before the plugin
+            child session must stop with ``stop_reason=grade_regressing``. When
+            ``None``, the block is omitted from the prompt and context.
     """
     seed_note = ""
     if seed_content is not None:
@@ -1238,6 +1248,26 @@ def build_ralph_subagent(
             "that satisfies the public contract `stop_reason=iteration_timeout`.\n"
         )
 
+    progress_stop_lines: list[str] = []
+    if oscillation_window is not None:
+        progress_stop_lines.append(
+            f"- oscillation_window: {oscillation_window}. Stop with "
+            "`stop_reason=oscillation_detected` when the last "
+            f"{oscillation_window} iterations all carry an identical non-None "
+            "`findings_hash` and QA has not passed."
+        )
+    if grade_regression_window is not None:
+        progress_stop_lines.append(
+            f"- grade_regression_window: {grade_regression_window}. Stop with "
+            "`stop_reason=grade_regressing` when the last "
+            f"{grade_regression_window} iterations all have non-None grades and "
+            "the sequence is strictly decreasing; iterations with `grade=None` "
+            "reset the streak as a neutral observation."
+        )
+    progress_note = ""
+    if progress_stop_lines:
+        progress_note = "\n## Progress Stop Conditions\n" + "\n".join(progress_stop_lines) + "\n"
+
     prompt = f"""## Your Task
 
 Run a Ralph loop for the given lineage inside this OpenCode child session.
@@ -1249,6 +1279,10 @@ Repeat one evolutionary generation at a time until one stop condition is met:
 - max_generations is reached
 - a single `evolve_step` invocation exceeds per_iteration_timeout_seconds
   (when supplied) — return stop_reason=iteration_timeout
+- the last `oscillation_window` iterations share one `findings_hash` with QA
+  not yet passed (when supplied) — return stop_reason=oscillation_detected
+- the last `grade_regression_window` non-None grades are strictly decreasing
+  (when supplied) — return stop_reason=grade_regressing
 
 ## Lineage ID
 {lineage_id}
@@ -1261,7 +1295,7 @@ Repeat one evolutionary generation at a time until one stop condition is met:
 - allow_nested_ouroboros_ralph: {str(allow_nested_ouroboros_ralph).lower()}
 - Do not call ouroboros_ralph from this child session. Run the loop directly
   by executing/evaluating one generation at a time.
-{seed_note}{mode_note}{parallel_note}{project_dir_note}{qa_note}{timeout_note}
+{seed_note}{mode_note}{parallel_note}{project_dir_note}{qa_note}{timeout_note}{progress_note}
 For generation 1, use the seed content when present. For later generations,
 reconstruct state from the lineage and continue without resending seed_content.
 
@@ -1283,6 +1317,10 @@ do not enqueue another background Ralph job."""
     }
     if per_iteration_timeout_seconds is not None:
         context["per_iteration_timeout_seconds"] = per_iteration_timeout_seconds
+    if oscillation_window is not None:
+        context["oscillation_window"] = oscillation_window
+    if grade_regression_window is not None:
+        context["grade_regression_window"] = grade_regression_window
 
     return build_subagent_payload(
         tool_name="ouroboros_ralph",

@@ -300,3 +300,107 @@ async def test_letter_grade_b_maps_to_three_quarters() -> None:
 
     assert result.stop_reason == "grade_regressing"
     assert [item.grade for item in result.iterations] == [1.0, 0.75]
+
+
+@pytest.mark.asyncio
+async def test_plugin_dispatch_forwards_progress_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plugin-mode dispatch must forward both progress windows.
+
+    Wiring lock for #788 review-1: when ``should_dispatch_via_plugin`` returns
+    True, the produced ``_subagent`` payload context must include both
+    ``oscillation_window`` and ``grade_regression_window``. Otherwise the
+    public ``stop_reason=oscillation_detected`` and
+    ``stop_reason=grade_regressing`` contracts are silently dropped on the
+    plugin path while the in-process path still honors them.
+    """
+    import json as _json
+
+    from ouroboros.mcp.tools import ralph_handlers as _ralph_handlers
+
+    handler = RalphHandler(
+        evolve_handler=_ImmediateEvolveHandler(),  # type: ignore[arg-type]
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+    )
+
+    async def _noop_emit(event_store, *, session_id, payload):  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr(
+        _ralph_handlers,
+        "emit_subagent_dispatched_event",
+        _noop_emit,
+    )
+
+    result = await handler.handle(
+        {
+            "lineage_id": "lin_plugin_progress",
+            "seed_content": "goal: ship",
+            "max_generations": 5,
+            "oscillation_window": 4,
+            "grade_regression_window": 3,
+        }
+    )
+
+    assert result.is_ok
+    tool_result = result.value
+    body = _json.loads(tool_result.content[0].text)
+    sub = body["_subagent"]
+    assert sub["tool_name"] == "ouroboros_ralph"
+    assert sub["context"]["oscillation_window"] == 4
+    assert sub["context"]["grade_regression_window"] == 3
+    assert "oscillation_window: 4" in sub["prompt"]
+    assert "grade_regression_window: 3" in sub["prompt"]
+    assert "stop_reason=oscillation_detected" in sub["prompt"]
+    assert "stop_reason=grade_regressing" in sub["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_plugin_dispatch_uses_default_progress_windows_when_omitted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defaults must round-trip through the plugin payload unchanged.
+
+    A caller that does not pass ``oscillation_window`` or
+    ``grade_regression_window`` still picks up the documented defaults
+    (3 / 2). The plugin payload must reflect those, otherwise the in-process
+    and plugin paths diverge by silent omission.
+    """
+    import json as _json
+
+    from ouroboros.mcp.tools import ralph_handlers as _ralph_handlers
+    from ouroboros.ralph_loop import (
+        DEFAULT_GRADE_REGRESSION_WINDOW,
+        DEFAULT_OSCILLATION_WINDOW,
+    )
+
+    handler = RalphHandler(
+        evolve_handler=_ImmediateEvolveHandler(),  # type: ignore[arg-type]
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+    )
+
+    async def _noop_emit(event_store, *, session_id, payload):  # noqa: ANN001
+        return None
+
+    monkeypatch.setattr(
+        _ralph_handlers,
+        "emit_subagent_dispatched_event",
+        _noop_emit,
+    )
+
+    result = await handler.handle(
+        {
+            "lineage_id": "lin_plugin_defaults",
+            "seed_content": "goal: ship",
+            "max_generations": 5,
+        }
+    )
+
+    assert result.is_ok
+    body = _json.loads(result.value.content[0].text)
+    sub = body["_subagent"]
+    assert sub["context"]["oscillation_window"] == DEFAULT_OSCILLATION_WINDOW
+    assert sub["context"]["grade_regression_window"] == DEFAULT_GRADE_REGRESSION_WINDOW

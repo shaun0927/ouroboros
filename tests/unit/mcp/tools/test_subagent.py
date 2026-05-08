@@ -244,6 +244,8 @@ class TestBuildRalphSubagent:
         assert "Do not call ouroboros_ralph" in payload.prompt
         # Without per_iteration_timeout_seconds, the timeout block is omitted.
         assert "Per-Iteration Timeout" not in payload.prompt
+        # Likewise the progress-stop block is omitted when no windows supplied.
+        assert "Progress Stop Conditions" not in payload.prompt
         assert payload.context == {
             "lineage_id": "lin-ralph",
             "seed_content": "goal: ship",
@@ -269,6 +271,31 @@ class TestBuildRalphSubagent:
         assert "per_iteration_timeout_seconds: 900" in payload.prompt
         assert "stop_reason=iteration_timeout" in payload.prompt
         assert "exceeds 900 seconds" in payload.prompt
+
+    def test_forwards_progress_windows_to_prompt_and_context(self) -> None:
+        """oscillation_window and grade_regression_window must reach the child.
+
+        Wiring lock for #788 review-1: validating the windows in
+        ``RalphLoopConfig`` while dropping them from the plugin dispatch
+        payload silently breaks the public ``stop_reason=oscillation_detected``
+        and ``stop_reason=grade_regressing`` contracts on the OpenCode plugin
+        path.
+        """
+        payload = build_ralph_subagent(
+            lineage_id="lin-progress",
+            seed_content="goal: ship",
+            max_generations=5,
+            oscillation_window=4,
+            grade_regression_window=3,
+        )
+
+        assert payload.context["oscillation_window"] == 4
+        assert payload.context["grade_regression_window"] == 3
+        assert "Progress Stop Conditions" in payload.prompt
+        assert "oscillation_window: 4" in payload.prompt
+        assert "grade_regression_window: 3" in payload.prompt
+        assert "stop_reason=oscillation_detected" in payload.prompt
+        assert "stop_reason=grade_regressing" in payload.prompt
 
     def test_serializes_seed_content_as_json_data(self) -> None:
         payload = build_ralph_subagent(
