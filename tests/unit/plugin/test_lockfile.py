@@ -245,3 +245,58 @@ def test_transaction_serializes_with_external_flock(tmp_path: Path) -> None:
     # contained without relying on a real sleep window — the
     # contract is exclusivity, not timing).
     _ = time.monotonic()
+
+
+def _entry(**overrides):
+    """Build a default LockEntry that callers can selectively
+    override. Used by the ``subject_for_disable`` cases below."""
+    base = {
+        "name": "test-plugin",
+        "version": "0.1.0",
+        "source_kind": "local",
+        "repository": None,
+        "git_sha": None,
+        "manifest_checksum": "sha256:0",
+        "installed_at": "2026-05-08T00:00:00Z",
+        "plugin_home": "/tmp/installs/test-plugin",
+    }
+    base.update(overrides)
+    return LockEntry(**base)
+
+
+def test_subject_for_disable_uses_populated_columns_when_set() -> None:
+    """When the lockfile entry has the post-RFC subject columns
+    populated, ``subject_for_disable`` returns them verbatim — no
+    fallback inference is needed.
+    """
+    entry = _entry(
+        source_type="local_path",
+        source_identity="/tmp/installs/test-plugin",
+    )
+    assert entry.subject_for_disable() == ("local_path", "/tmp/installs/test-plugin")
+
+
+def test_subject_for_disable_falls_back_for_legacy_local_row() -> None:
+    """Pre-RFC rows lack ``source_type`` / ``source_identity``. The
+    fallback for a ``source_kind="local"`` row is
+    ``("local_path", entry.plugin_home)`` — the same string the
+    disable write path persists. Read paths must use the same
+    fallback or a ``disable`` write lands under one subject and the
+    dispatcher's check runs against another.
+    """
+    entry = _entry()  # source_type/source_identity left blank.
+    assert entry.subject_for_disable() == ("local_path", "/tmp/installs/test-plugin")
+
+
+def test_subject_for_disable_falls_back_for_legacy_git_row() -> None:
+    """Pre-RFC git rows fall back to ``("plugin_home", repository)``,
+    using the git URL as the install subject identifier.
+    """
+    entry = _entry(
+        source_kind="git",
+        repository="https://example.com/owner/repo.git",
+    )
+    assert entry.subject_for_disable() == (
+        "plugin_home",
+        "https://example.com/owner/repo.git",
+    )
