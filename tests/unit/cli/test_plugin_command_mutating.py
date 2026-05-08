@@ -1434,6 +1434,141 @@ def test_trust_rejects_undeclared_scope(runner: CliRunner, tmp_path: Path) -> No
     assert not paths["audit_log"].exists() or paths["audit_log"].read_text() == ""
 
 
+def test_trust_re_enables_zero_permission_plugin_with_no_scope_arg(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """RFC: trust is the re-enable path. A plugin whose manifest declares
+    NO permissions has nothing to grant, so `ooo plugin trust <name>`
+    must succeed without `--scope` and clear the disable record.
+
+    Regression catch for the bot's BLOCKING finding on plugin.py:1342.
+    """
+    paths = _common_paths(tmp_path)
+    zero_perm = {**REFERENCE_MANIFEST, "permissions": []}
+    plugin_dir = tmp_path / "src"
+    plugin_dir.mkdir()
+    (plugin_dir / "ouroboros.plugin.json").write_text(json.dumps(zero_perm))
+    runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(plugin_dir),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    runner.invoke(
+        plugin_app,
+        [
+            "disable",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    trust = TrustStore(root=paths["trust_root"])
+    assert trust.is_disabled("github-pr-ops")
+
+    # Re-enable WITHOUT --scope (manifest has no permissions to grant).
+    result = runner.invoke(
+        plugin_app,
+        [
+            "trust",
+            "github-pr-ops",
+            "--granted-by",
+            "user:test",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Re-enabled github-pr-ops" in result.output
+    assert not trust.is_disabled("github-pr-ops")
+
+
+def test_trust_without_scope_for_plugin_with_permissions_errors(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """For plugins WITH declared permissions, bare `trust <name>` must
+    still error so the user has to make an explicit grant decision —
+    silently re-enabling without trust would be a permission-boundary
+    surprise.
+    """
+    paths = _common_paths(tmp_path)
+    src = tmp_path / "src"
+    _install_reference_plugin(runner, plugin_dir=src, paths=paths)  # has github:read
+    result = runner.invoke(
+        plugin_app,
+        [
+            "trust",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    assert result.exit_code == 1
+    import re
+
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    plain = plain.replace("│", " ").replace("╭", " ").replace("╮", " ")
+    plain = plain.replace("╰", " ").replace("╯", " ").replace("─", " ")
+    flat = " ".join(plain.split())
+    assert "declares permissions" in flat
+    assert "--scope" in flat
+
+
+def test_remove_keeps_lockfile_consistent_when_rmtree_fails(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`remove` MUST stay atomic at the lockfile/trust layer even if the
+    on-disk `rmtree` fails. Previously bytes were deleted first and
+    then trust+lockfile were mutated, so a `wipe_subject`/`lock.remove`
+    failure could leave the plugin home gone but the lockfile still
+    saying "installed". With the new ordering, lockfile/trust are
+    cleared first, and an `rmtree` failure leaves a manually-removable
+    leftover directory but does NOT corrupt the bookkeeping state.
+
+    Regression catch for the bot's follow-up on plugin.py:1521.
+    """
+    paths = _common_paths(tmp_path)
+    src = tmp_path / "src"
+    _install_reference_plugin(runner, plugin_dir=src, paths=paths)
+    assert "github-pr-ops" in Lockfile(paths["lockfile"]).read()
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("simulated rmtree failure (e.g. permission denied)")
+
+    monkeypatch.setattr("ouroboros.cli.commands.plugin.shutil.rmtree", _boom)
+    result = runner.invoke(
+        plugin_app,
+        [
+            "remove",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+        ],
+    )
+    # Lockfile + trust state are consistent: plugin reported as removed.
+    assert "github-pr-ops" not in Lockfile(paths["lockfile"]).read()
+    assert TrustStore(root=paths["trust_root"]).read("github-pr-ops") is None
+    # The CLI explicitly tells the user the bytes were not removed.
+    assert "BYTES NOT REMOVED" in result.output
+
+
 def test_default_trust_root_is_outside_plugin_install_root() -> None:
     """The default trust root MUST live OUTSIDE the plugin install root.
 

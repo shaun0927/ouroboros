@@ -1305,12 +1305,16 @@ def _install_named_from_url(
 def trust_command(
     name: Annotated[str, typer.Argument(help="Installed plugin name.")],
     scopes: Annotated[
-        list[str],
+        list[str] | None,
         typer.Option(
             "--scope",
-            help="Permission scope to grant. Repeatable. Exact-string match.",
+            help=(
+                "Permission scope to grant. Repeatable. Exact-string match. "
+                "Optional: omit to re-enable a disabled zero-permission "
+                "plugin without granting any new scope."
+            ),
         ),
-    ],
+    ] = None,
     granted_by: Annotated[
         str,
         typer.Option(
@@ -1338,10 +1342,19 @@ def trust_command(
 
     Per Q00/ouroboros-plugins#9 Q3 lock: scopes are exact strings —
     `--scope github:pull_request` does NOT imply `github:pull_request:write`.
+
+    Per the locked RFC ("Disable records / Re-enabling"), `trust` is also
+    the re-enable path: it deletes any disable record bound to the
+    install subject. Plugins whose manifest declares no permissions
+    therefore accept an empty `--scope` set so they can be re-enabled
+    after `disable`. Plugins with declared permissions still require at
+    least one `--scope` argument so the user has to make an explicit
+    permission decision.
     """
-    if not scopes:
-        print_error("at least one --scope is required")
-        raise typer.Exit(code=1)
+    # Typer passes ``None`` when ``--scope`` is omitted entirely; coerce
+    # to an empty list so the rest of this function only has to handle
+    # one shape.
+    scopes = list(scopes) if scopes else []
 
     lock = Lockfile(lockfile_path or DEFAULT_LOCKFILE_PATH)
     trust = TrustStore(root=trust_root or DEFAULT_TRUST_ROOT)
@@ -1369,16 +1382,33 @@ def trust_command(
         )
         raise typer.Exit(code=1) from exc
     declared = {p.scope for p in manifest.permissions}
-    undeclared = sorted(s for s in scopes if s not in declared)
-    if undeclared:
-        print_error(
-            f"scope(s) {undeclared!r} are not declared by {name!r}'s manifest "
-            f"(declared: {sorted(declared) if declared else '(none)'}); "
-            "refusing to grant. Trust may only be granted for scopes the "
-            "plugin actually requests — typos must not silently persist as "
-            "phantom grants."
-        )
-        raise typer.Exit(code=1)
+    if not scopes:
+        # Bare `ooo plugin trust <name>` — no new grants, but we can
+        # still clear the disable record. This path exists so a
+        # disabled zero-permission plugin can actually be re-enabled
+        # (the firewall blocks disabled plugins before considering
+        # permissions, so without this branch a disabled plugin with
+        # `permissions: []` would be permanently un-runnable). For
+        # plugins with declared permissions, refuse so the user is
+        # forced to make an explicit grant rather than silently
+        # re-enabling without trust.
+        if declared:
+            print_error(
+                f"plugin {name!r} declares permissions {sorted(declared)!r}; "
+                "pass --scope to grant at least one before re-enabling."
+            )
+            raise typer.Exit(code=1)
+    else:
+        undeclared = sorted(s for s in scopes if s not in declared)
+        if undeclared:
+            print_error(
+                f"scope(s) {undeclared!r} are not declared by {name!r}'s manifest "
+                f"(declared: {sorted(declared) if declared else '(none)'}); "
+                "refusing to grant. Trust may only be granted for scopes the "
+                "plugin actually requests — typos must not silently persist as "
+                "phantom grants."
+            )
+            raise typer.Exit(code=1)
 
     # Audit events should record the install subject (source.type) the
     # firewall actually keys trust by. The pre-RFC implementation
@@ -1390,7 +1420,16 @@ def trust_command(
     # Trust is bound to the install subject recorded in the lockfile.
     # Re-trusting also clears the disable record (per the RFC: "Re-enabling
     # is performed by re-running ooo plugin trust …").
+    was_disabled = trust.is_disabled(name)
     trust.clear_disable(name)
+    if not scopes and was_disabled:
+        # Bare `ooo plugin trust <zero-perm-plugin>` against a disabled
+        # subject — the only state change is the cleared disable record.
+        # Surface that explicitly so the user sees something happened.
+        print_success(
+            f"Re-enabled {name} ({manifest.version}) "
+            "(no scopes to grant — manifest declares no permissions)"
+        )
 
     audit_handle = audit_log_path.open("a", encoding="utf-8") if audit_log_path else None
     try:
@@ -1518,17 +1557,40 @@ def remove_command(
         plugin_home = plugin_home_root.expanduser() / name
     else:
         plugin_home = Path(entry.plugin_home).expanduser()
-    if plugin_home.is_dir():
-        shutil.rmtree(plugin_home)
-
-    # Per the locked RFC ("disable records"), `remove` ALSO clears the
-    # disable record so a future fresh install starts un-trusted-but-
-    # enabled rather than silently disabled. `wipe_subject` removes both
-    # the trust file and the disable record atomically.
+    # Order matters: mutate the durable bookkeeping state (lockfile +
+    # trust + disable records) BEFORE touching the on-disk plugin
+    # bytes. The lockfile is the source of truth for "is this plugin
+    # installed?", so once `lock.remove()` succeeds the firewall
+    # treats the plugin as gone — which means leftover bytes (if the
+    # subsequent `rmtree` were to fail) cannot be invoked. The
+    # opposite order ran the bytes-removal first, leaving a window
+    # where a `wipe_subject` / `lock.remove` failure produced a
+    # split-brain: bytes gone but lockfile still claimed installed.
+    #
+    # `wipe_subject` removes both the trust file and the disable
+    # record (per the RFC: "remove ALSO deletes any disable record
+    # for the plugin's install subject").
     trust.wipe_subject(name)
     lock.remove(name)
 
-    print_success(f"Removed {name} (lockfile entry + trust file + disable record + plugin home)")
+    plugin_home_status = "plugin home"
+    if plugin_home.is_dir():
+        try:
+            shutil.rmtree(plugin_home)
+        except OSError as exc:
+            # Bookkeeping state is already consistent (lockfile +
+            # trust both say uninstalled), so the plugin cannot be
+            # invoked. Surface the cleanup failure so the user can
+            # remove the leftover directory manually, but don't fail
+            # the command.
+            plugin_home_status = (
+                f"plugin home (BYTES NOT REMOVED: {plugin_home} — "
+                f"{type(exc).__name__}: {exc}; remove manually)"
+            )
+
+    print_success(
+        f"Removed {name} (lockfile entry + trust file + disable record + {plugin_home_status})"
+    )
 
 
 __all__ = [
