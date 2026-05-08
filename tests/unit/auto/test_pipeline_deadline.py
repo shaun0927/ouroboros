@@ -173,6 +173,50 @@ def test_legacy_active_state_load_arms_missing_deadline(tmp_path, phase: AutoPha
 
 
 @pytest.mark.asyncio
+async def test_fresh_created_session_persists_deadline_before_interview(tmp_path) -> None:
+    """The CREATED → INTERVIEW deadline must be saved BEFORE the driver runs (#790 review-5).
+
+    If the process crashes during the first ``interview_driver.run()`` call
+    on a fresh session, the persisted state must already carry the armed
+    deadline. Otherwise ``from_dict()`` would arm a brand-new 2h deadline
+    on resume — silently extending the pipeline past the user-requested
+    timeout and breaking the "preserved across process restarts" contract.
+    """
+    captured: dict[str, AutoPipelineState] = {}
+
+    class _CrashingDriver:
+        """Driver that records the persisted state then raises mid-run."""
+
+        def __init__(self) -> None:
+            self.invocations = 0
+            self.progress_callback = None
+
+        async def run(self, state, ledger):  # noqa: ARG002
+            self.invocations += 1
+            store = AutoStore(tmp_path)
+            captured["loaded"] = store.load(state.auto_session_id)
+            raise RuntimeError("simulated crash during backend.start()")
+
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    store.save(state)
+    assert state.deadline_at is None
+    assert state.deadline_at_epoch is None
+
+    driver = _CrashingDriver()
+    pipeline = AutoPipeline(driver, _unused_seed_generator, store=store)
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        await pipeline.run(state)
+
+    assert driver.invocations == 1
+    persisted = captured["loaded"]
+    assert persisted.deadline_at is not None
+    assert persisted.deadline_at_epoch is not None
+    assert persisted.deadline_at_epoch > time.time()
+
+
+@pytest.mark.asyncio
 async def test_legacy_blocked_session_arms_deadline_on_recovery(tmp_path) -> None:
     """Resuming a legacy BLOCKED session must arm the missing deadline (#790 review-4).
 

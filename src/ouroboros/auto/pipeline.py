@@ -226,8 +226,15 @@ class AutoPipeline:
             # CREATED → INTERVIEW transition so every later phase entry can
             # compare ``time.monotonic()`` against a stable absolute target.
             # Idempotent for resumed sessions whose deadline already armed.
+            # Persist immediately so a crash during the first
+            # ``interview_driver.run()`` cannot leave the saved state
+            # without ``deadline_at_epoch`` — otherwise a resumed session
+            # would silently extend the pipeline by re-arming a fresh 2h
+            # window and break the "preserved across process restarts"
+            # contract (#790 review-5).
             if state.phase == AutoPhase.CREATED:
                 state.arm_deadline()
+                self._save(state)
             if state.phase == AutoPhase.INTERVIEW and state.interview_completed:
                 if not state.interview_session_id:
                     state.mark_blocked(
