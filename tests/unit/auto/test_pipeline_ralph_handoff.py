@@ -454,6 +454,48 @@ def test_persisted_ralph_handoff_has_resume_capability(tmp_path) -> None:
     assert state.resume_capability() is AutoResumeCapability.RESUME
 
 
+@pytest.mark.asyncio
+async def test_ralph_handoff_resume_reattaches_existing_job(tmp_path) -> None:
+    """Persisted Ralph job handles must be reattached, not dispatched again."""
+    state = _state_at_run_phase(tmp_path)
+    state.complete_product = True
+    state.ralph_lineage_id = "ralph-seed_test_001-deadbeef"
+    state.ralph_job_id = "job_ralph_existing"
+    state.ralph_dispatch_mode = "job"
+    state.transition(AutoPhase.RALPH_HANDOFF, "handoff saved before resume")
+    observed: dict[str, Any] = {}
+
+    async def ralph_starter(_seed: Seed, **kwargs: Any) -> dict[str, Any]:
+        observed["existing_job_id"] = kwargs.get("existing_job_id")
+        observed["lineage_id"] = kwargs.get("lineage_id")
+        return {
+            "job_id": kwargs["existing_job_id"],
+            "lineage_id": kwargs["lineage_id"],
+            "dispatch_mode": "job",
+            "terminal_status": "completed",
+            "stop_reason": "qa passed",
+        }
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert observed == {
+        "existing_job_id": "job_ralph_existing",
+        "lineage_id": "ralph-seed_test_001-deadbeef",
+    }
+    assert result.status == "complete"
+    assert state.phase is AutoPhase.COMPLETE
+    assert state.ralph_job_id == "job_ralph_existing"
+
+
 def test_complete_product_is_persisted_in_state_round_trip(tmp_path) -> None:
     """Entry points can recover complete-product mode from persisted state."""
     state = _state_at_run_phase(tmp_path)

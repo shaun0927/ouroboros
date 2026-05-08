@@ -274,6 +274,24 @@ def test_gap_window_reports_pending_starting_ralph(tmp_path) -> None:
     assert "Pending: starting ralph" in text
 
 
+def test_terminal_lineage_without_job_is_not_gap_window(tmp_path) -> None:
+    """Terminal sessions must not be rendered as pending Ralph handoff."""
+    state = _state_at_ralph_handoff(tmp_path, with_job_id=False)
+    state.mark_blocked("ralph handoff failed before job id", tool_name="ralph_starter")
+    AutoStore(tmp_path).save(state)
+
+    handler = SessionStatusHandler(auto_store=AutoStore(tmp_path))
+    result = asyncio.run(handler.handle({"session_id": state.auto_session_id}))
+
+    assert result.is_ok
+    meta = result.value.meta
+    assert meta["phase"] == "blocked"
+    assert meta["is_terminal"] is True
+    assert "pending" not in meta
+    assert "ralph" not in meta
+    assert "Pending: starting ralph" not in result.value.content[0].text
+
+
 @pytest.mark.asyncio
 async def test_mcp_status_replays_job_events_into_persisted_auto_state(tmp_path) -> None:
     """Production MCP status refreshes the auto mirror from persisted job events."""

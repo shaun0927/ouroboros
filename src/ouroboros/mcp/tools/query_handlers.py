@@ -154,17 +154,18 @@ class SessionStatusHandler:
         # transitioning to "started" and the RALPH_HANDOFF entry persisting a
         # job_id, the session phase is reported as ``ralph_handoff`` with a
         # ``pending`` marker so the operator never sees a missing-status hole.
-        is_gap_window = (
-            state.ralph_lineage_id is not None
-            and state.ralph_job_id is None
-            and state.ralph_dispatch_mode != "plugin"
-        )
-        phase_value = "ralph_handoff" if is_gap_window else state.phase.value
         is_terminal = state.phase in {
             AutoPhase.COMPLETE,
             AutoPhase.BLOCKED,
             AutoPhase.FAILED,
         }
+        is_gap_window = (
+            state.ralph_lineage_id is not None
+            and state.ralph_job_id is None
+            and state.ralph_dispatch_mode != "plugin"
+            and not is_terminal
+        )
+        phase_value = "ralph_handoff" if is_gap_window else state.phase.value
         ralph_block = self._build_ralph_block(state)
 
         # Render a short text block; the structured detail lives in ``meta``

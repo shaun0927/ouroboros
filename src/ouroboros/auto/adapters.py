@@ -186,8 +186,31 @@ class HandlerRalphStarter:
         lineage_id: str,
         max_total_seconds: float | None = None,
         per_iteration_timeout_seconds: float | None = None,
+        existing_job_id: str | None = None,
         on_started: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
+        if existing_job_id:
+            job_manager = self.handler._job_manager  # noqa: SLF001
+            if on_started is not None:
+                on_started(
+                    {
+                        "job_id": existing_job_id,
+                        "lineage_id": lineage_id,
+                        "dispatch_mode": "job",
+                        "status": "reattaching",
+                    }
+                )
+            terminal_meta = await _wait_for_job_terminal(job_manager, existing_job_id)
+            terminal_status = _optional_str(terminal_meta.get("status")) or "failed"
+            stop_reason = _optional_str(terminal_meta.get("stop_reason"))
+            return {
+                "job_id": existing_job_id,
+                "lineage_id": lineage_id,
+                "dispatch_mode": "job",
+                "terminal_status": terminal_status,
+                "stop_reason": stop_reason,
+            }
+
         seed_yaml = yaml.dump(
             seed.to_dict(), default_flow_style=False, allow_unicode=True, sort_keys=False
         )

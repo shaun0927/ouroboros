@@ -849,6 +849,7 @@ class AutoPipeline:
                 seed,
                 lineage_id=lineage_id,
                 max_total_seconds=max_total_seconds,
+                existing_job_id=state.ralph_job_id,
                 on_started=_persist_ralph_started,
             )
         except Exception as exc:
