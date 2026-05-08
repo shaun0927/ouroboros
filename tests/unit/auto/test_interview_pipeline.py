@@ -337,6 +337,28 @@ def test_safe_default_blocks_when_non_user_goal_entry_introduces_unsafe_context(
     assert not ledger.is_seed_ready()
 
 
+@pytest.mark.parametrize(
+    "goal",
+    [
+        "Build a CLI with no external dependencies",
+        "Use existing external API schema files only",
+        "Sync against external integration documentation already vendored in the repo",
+    ],
+)
+def test_safe_default_allows_benign_external_mentions(goal: str) -> None:
+    ledger = SeedDraftLedger.from_goal(goal)
+
+    result = finalize_safe_defaultable_gaps(
+        ledger,
+        goal=goal,
+        provenance="unit test",
+    )
+
+    assert result.completed
+    assert result.unsafe_gaps == ()
+    assert ledger.is_seed_ready()
+
+
 def test_safe_default_non_goals_do_not_make_later_finalization_unsafe() -> None:
     ledger = SeedDraftLedger.from_goal("Build a small local CLI")
     ledger.add_entry(

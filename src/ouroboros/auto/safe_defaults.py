@@ -109,7 +109,13 @@ _UNSAFE_CONTEXT_PATTERNS: tuple[tuple[str, str], ...] = (
     ),
     (
         "ambiguous external side effect",
-        r"\b(deploy|release|publish|production|prod|live|external|send email|webhook|notify users|"
+        # Concrete external side effects only: deploy/release/publish flows,
+        # production/prod/live targets, explicit messaging or account/branch
+        # mutations, and database migrations. Earlier revisions matched bare
+        # ``external``, which incorrectly flagged benign phrases such as
+        # "no external dependencies" or "use existing external API schema
+        # files only" — matched phrases must imply an actual side effect.
+        r"\b(deploy|release|publish|production|prod|live|send email|webhook|notify users|"
         r"create account|delete branch|database migration)\b",
     ),
 )
