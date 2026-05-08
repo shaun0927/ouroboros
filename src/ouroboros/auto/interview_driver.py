@@ -468,6 +468,9 @@ class AutoInterviewDriver:
             "Mark the interview complete and hand off for seed generation. "
             "No remaining ambiguity for safe-defaultable sections."
         )
+        # Capture the question that was pending before synthesis started so
+        # the ledger can record the correct Q/A pairing for round 1.
+        prior_pending_question = state.pending_question or "auto safe-default finalization"
         for attempt in range(self._SYNTHESIS_COMPLETION_MAX_ATTEMPTS):
             text = synthesis if attempt == 0 else follow_up
             try:
@@ -479,26 +482,36 @@ class AutoInterviewDriver:
                     )
                 )
             except TimeoutError as exc:
+                # The backend may or may not have processed the call —
+                # invalidate our cached pending_question so a later
+                # ``--resume`` queries live state via ``backend.resume`` and
+                # cannot replay an already-answered prompt.
+                state.pending_question = None
+                self._save(state)
                 return (
                     "safe-default synthesis could not be persisted to the "
                     f"interview transcript: {exc}"
                 )
-                # Caller is responsible for marking the state blocked so the
-                # final blocker message reflects the rolled-back ledger.
             except Exception as exc:
+                state.pending_question = None
+                self._save(state)
                 return f"safe-default synthesis answer failed: {exc}"
             state.interview_session_id = turn.session_id
+            # Sync pending_question with the backend's latest turn so that a
+            # later ``--resume`` after synthesis failure re-enters the
+            # interview at the correct prompt instead of replaying the
+            # pre-synthesis question (review of ``cc128420``).
+            state.pending_question = turn.question or None
             if attempt == 0:
-                ledger.record_qa(
-                    state.pending_question or "auto safe-default finalization",
-                    synthesis,
-                )
+                ledger.record_qa(prior_pending_question, synthesis)
                 state.ledger = ledger.to_dict()
+            self._save(state)
             if turn.seed_ready or turn.completed:
                 return None
         # The backend still has not honoured the completion signal. Caller
         # rolls back the safe-default entries and emits the canonical
-        # "unresolved gaps" blocker; we just signal the failure here.
+        # "unresolved gaps" blocker; we just signal the failure here. The
+        # final ``state.pending_question`` reflects the live backend prompt.
         return (
             "interview backend did not honour the safe-default completion "
             f"signal within {self._SYNTHESIS_COMPLETION_MAX_ATTEMPTS} attempts; "

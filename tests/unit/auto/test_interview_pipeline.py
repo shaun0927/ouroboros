@@ -304,6 +304,11 @@ async def test_interview_driver_blocks_when_safe_default_synthesis_rejected(tmp_
         for section in ledger.sections.values()
         for entry in section.entries
     ), "safe-default policy entries must be reverted on synthesis failure"
+    # Backend.answer raised after the first synthesis turn — the driver
+    # cannot trust the cached pending_question because the backend may have
+    # processed (or partially processed) the call. Force ``--resume`` to
+    # query live state via ``backend.resume()`` instead of replaying.
+    assert state.pending_question is None
 
 
 @pytest.mark.asyncio
@@ -389,6 +394,13 @@ async def test_interview_driver_blocks_when_backend_ignores_synthesis_completion
     assert "unresolved gaps" in (result.blocker or "")
     assert state.interview_completed is False
     assert ledger.open_gaps()
+    # After synthesis failure the driver must leave pending_question pointing
+    # at the backend's latest live prompt (or cleared) — never the stale
+    # pre-synthesis question. A later ``--resume`` would otherwise replay an
+    # already-answered prompt against an advanced session. The fake backend
+    # always returns "Anything else?" after the synthesis turns, so that's
+    # what the auto state should now hold.
+    assert state.pending_question == "Anything else?"
 
 
 def test_safe_default_blocks_when_interview_answer_introduces_unsafe_context() -> None:
