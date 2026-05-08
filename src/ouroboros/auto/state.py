@@ -215,12 +215,14 @@ _ALLOWED_TRANSITIONS: dict[AutoPhase, set[AutoPhase]] = {
         AutoPhase.SEED_GENERATION,
         AutoPhase.REVIEW,
         AutoPhase.RUN,
+        AutoPhase.RALPH_HANDOFF,
     },
     AutoPhase.FAILED: {
         AutoPhase.INTERVIEW,
         AutoPhase.SEED_GENERATION,
         AutoPhase.REVIEW,
         AutoPhase.RUN,
+        AutoPhase.RALPH_HANDOFF,
     },
 }
 
@@ -248,6 +250,7 @@ class AutoPipelineState:
     runtime_backend: str | None = None
     opencode_mode: str | None = None
     skip_run: bool = False
+    complete_product: bool = False
     max_interview_rounds: int = 12
     max_repair_rounds: int = 5
     interview_session_id: str | None = None
@@ -534,6 +537,15 @@ class AutoPipelineState:
                 return AutoResumeCapability.PARTIAL_RESUME
             return AutoResumeCapability.NONE
 
+        if recoverable == AutoPhase.RALPH_HANDOFF:
+            if self.ralph_lineage_id or self.ralph_job_id:
+                return AutoResumeCapability.RESUME
+            if self.seed_artifact:
+                return AutoResumeCapability.RESUME
+            if self.seed_path:
+                return AutoResumeCapability.PARTIAL_RESUME
+            return AutoResumeCapability.NONE
+
         return AutoResumeCapability.NONE  # defensive
 
     def to_dict(self) -> dict[str, Any]:
@@ -560,6 +572,7 @@ class AutoPipelineState:
         # persisting them with subsequent saves.
         payload.setdefault("max_interview_rounds", 12)
         payload.setdefault("max_repair_rounds", 5)
+        payload.setdefault("complete_product", False)
         payload.setdefault("run_handoff_status", None)
         payload.setdefault("run_handoff_guidance", None)
         payload.setdefault("attached_run_handle", None)
@@ -612,6 +625,13 @@ class AutoPipelineState:
             msg = f"seed_origin must be one of {[item.value for item in SeedOrigin]}"
             raise ValueError(msg) from exc
         state = cls(**payload)
+        if (
+            state.phase not in TERMINAL_PHASES
+            and state.phase is not AutoPhase.CREATED
+            and state.deadline_at is None
+            and state.deadline_at_epoch is None
+        ):
+            state.arm_deadline()
         state._validate_loaded()
         return state
 
@@ -780,7 +800,12 @@ class AutoPipelineState:
             if not value.strip():
                 msg = f"{field_name} must be a non-empty string or null"
                 raise ValueError(msg)
-        for field_name in ("interview_completed", "skip_run", "run_start_attempted"):
+        for field_name in (
+            "interview_completed",
+            "skip_run",
+            "complete_product",
+            "run_start_attempted",
+        ):
             if type(getattr(self, field_name)) is not bool:
                 msg = f"{field_name} must be a boolean"
                 raise ValueError(msg)

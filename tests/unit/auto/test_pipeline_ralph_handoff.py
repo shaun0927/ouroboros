@@ -28,6 +28,7 @@ from ouroboros.auto.state import (
     _ALLOWED_TRANSITIONS,
     AutoPhase,
     AutoPipelineState,
+    AutoResumeCapability,
     AutoStore,
 )
 from ouroboros.core.seed import (
@@ -437,9 +438,33 @@ async def test_complete_product_off_matches_legacy_shape(tmp_path) -> None:
     assert payload["ralph_dispatch_mode"] is None
 
 
-def test_ralph_starter_blocker_is_recoverable_to_run() -> None:
-    """Ralph budget blockers must not become resume dead-ends."""
-    assert _recoverable_phase_for_tool("ralph_starter") is AutoPhase.RUN
+def test_ralph_starter_blocker_is_recoverable_to_ralph_handoff() -> None:
+    """Ralph budget blockers resume at the persisted RALPH_HANDOFF phase."""
+    assert _recoverable_phase_for_tool("ralph_starter") is AutoPhase.RALPH_HANDOFF
+
+
+def test_persisted_ralph_handoff_has_resume_capability(tmp_path) -> None:
+    """Crash/restart after saving RALPH_HANDOFF must not become a resume dead-end."""
+    state = _state_at_run_phase(tmp_path)
+    state.complete_product = True
+    state.ralph_lineage_id = "ralph-seed_test_001-deadbeef"
+    state.transition(AutoPhase.RALPH_HANDOFF, "handoff saved before crash")
+    state.mark_blocked("ralph blocked by wall_clock_exhausted", tool_name="ralph_starter")
+
+    assert state.resume_capability() is AutoResumeCapability.RESUME
+
+
+def test_complete_product_is_persisted_in_state_round_trip(tmp_path) -> None:
+    """Entry points can recover complete-product mode from persisted state."""
+    state = _state_at_run_phase(tmp_path)
+    state.complete_product = True
+    store = AutoStore(tmp_path)
+    store.save(state)
+
+    loaded = store.load(state.auto_session_id)
+
+    assert loaded is not None
+    assert loaded.complete_product is True
 
 
 @pytest.mark.asyncio

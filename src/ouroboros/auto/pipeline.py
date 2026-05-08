@@ -171,6 +171,13 @@ class AutoPipeline:
         )
         if self.skip_run and not state.skip_run:
             state.skip_run = True
+        if self.complete_product and not state.complete_product:
+            state.complete_product = True
+        if state.phase is AutoPhase.RALPH_HANDOFF and not state.complete_product:
+            # A persisted RALPH_HANDOFF state can only be produced by the
+            # complete-product chain. Backfill legacy in-flight states so
+            # entrypoint defaults do not silently disable the required resume.
+            state.complete_product = True
         # Top-level deadline check on resume (#779). When ``deadline_at`` is
         # already set and has passed before this process even starts work,
         # immediately transition to BLOCKED so no phase work is invoked. The
@@ -241,6 +248,7 @@ class AutoPipeline:
                 resume_phase,
                 f"resuming {resume_phase.value} after {previous_phase.value}: {state.last_error or 'no error recorded'}",
             )
+            state.arm_deadline()
             self._save(state)
 
         review: SeedReview | None = None
@@ -253,6 +261,7 @@ class AutoPipeline:
             # Idempotent for resumed sessions whose deadline already armed.
             if state.phase == AutoPhase.CREATED:
                 state.arm_deadline()
+                self._save(state)
             if state.phase == AutoPhase.INTERVIEW and state.interview_completed:
                 if not state.interview_session_id:
                     state.mark_blocked(
@@ -274,7 +283,22 @@ class AutoPipeline:
                 )
                 self._save(state)
             else:
-                interview = await self.interview_driver.run(state, ledger)
+                interview_phase_timeout = state.phase_timeout_seconds(AutoPhase.INTERVIEW)
+                interview_timeout = self._deadline_capped_timeout(state, interview_phase_timeout)
+                try:
+                    interview = await asyncio.wait_for(
+                        self.interview_driver.run(state, ledger),
+                        timeout=interview_timeout,
+                    )
+                except TimeoutError:
+                    if self._enforce_deadline(state):
+                        return self._result(state, ledger, blocker=state.last_error)
+                    state.mark_blocked(
+                        f"interview phase exceeded {interview_phase_timeout:.0f}s",
+                        tool_name="interview_driver",
+                    )
+                    self._save(state)
+                    return self._result(state, ledger, blocker=state.last_error)
                 if interview.status == "blocked":
                     return self._result(state, ledger, blocker=interview.blocker)
                 state.interview_completed = True
@@ -283,7 +307,12 @@ class AutoPipeline:
         elif state.phase == AutoPhase.REPAIR:
             state.transition(AutoPhase.REVIEW, "resuming review after repair checkpoint")
             self._save(state)
-        elif state.phase not in {AutoPhase.SEED_GENERATION, AutoPhase.REVIEW, AutoPhase.RUN}:
+        elif state.phase not in {
+            AutoPhase.SEED_GENERATION,
+            AutoPhase.REVIEW,
+            AutoPhase.RUN,
+            AutoPhase.RALPH_HANDOFF,
+        }:
             state.mark_blocked(
                 f"Cannot resume auto pipeline from {state.phase.value} without persisted Seed artifact",
                 tool_name="auto_pipeline",
@@ -314,10 +343,11 @@ class AutoPipeline:
                     )
                     self._save(state)
                     return self._result(state, ledger, blocker=state.last_error)
+                seed_timeout = self._deadline_capped_timeout(state, self.seed_timeout_seconds)
                 try:
                     seed = await asyncio.wait_for(
                         self.seed_generator(state.interview_session_id),
-                        timeout=self.seed_timeout_seconds,
+                        timeout=seed_timeout,
                     )
                     if not isinstance(seed, Seed):
                         msg = f"seed generator returned {type(seed).__name__}, expected Seed"
@@ -326,6 +356,9 @@ class AutoPipeline:
                     state.seed_artifact = seed.to_dict()
                     state.seed_origin = SeedOrigin.AUTO_PIPELINE
                 except TimeoutError as exc:
+                    if self._enforce_deadline(state):
+                        record_authoring_backend(state)
+                        return self._result(state, ledger, blocker=state.last_error)
                     state.mark_blocked(
                         f"seed generation timed out after {self.seed_timeout_seconds:.0f}s",
                         tool_name="seed_generator",
@@ -398,13 +431,16 @@ class AutoPipeline:
             # ``SeedRepairer.converge`` does declare it.
             if _accepts_keyword(repairer.converge, "cancel_event"):
                 converge_kwargs["cancel_event"] = cancel_event
+            bounded_repair_timeout = self._deadline_capped_timeout(state, repair_timeout)
             try:
                 seed, review, repairs = await asyncio.wait_for(
                     asyncio.to_thread(repairer.converge, seed, **converge_kwargs),
-                    timeout=repair_timeout,
+                    timeout=bounded_repair_timeout,
                 )
             except TimeoutError:
                 cancel_event.set()
+                if self._enforce_deadline(state):
+                    return self._result(state, ledger, blocker=state.last_error)
                 state.mark_blocked(
                     f"repair phase exceeded {repair_timeout:.0f}s",
                     tool_name="seed_repairer",
@@ -465,6 +501,17 @@ class AutoPipeline:
             if any((state.job_id, state.execution_id, state.run_session_id)):
                 state.run_handoff_status = "started"
                 state.run_handoff_guidance = None
+                if state.complete_product:
+                    if self.ralph_starter is None:
+                        state.mark_blocked(
+                            "Cannot resume complete-product Ralph handoff without ralph starter configured",
+                            tool_name="ralph_starter",
+                        )
+                        self._save(state)
+                        return self._result(
+                            state, ledger, review=review, blocker=state.last_error
+                        )
+                    return await self._handoff_to_ralph(state, ledger, seed, review, None)
                 state.transition(
                     AutoPhase.COMPLETE, "execution already started; using persisted run handle"
                 )
@@ -479,7 +526,23 @@ class AutoPipeline:
                 return self._result(state, ledger, review=review, blocker=state.last_error)
             if review is None:
                 reviewer = self.reviewer or SeedReviewer(self.grade_gate)
-                review = reviewer.review(seed, ledger=ledger)
+                review_timeout = self._deadline_capped_timeout(
+                    state, state.phase_timeout_seconds(AutoPhase.REVIEW)
+                )
+                try:
+                    review = await asyncio.wait_for(
+                        asyncio.to_thread(reviewer.review, seed, ledger=ledger),
+                        timeout=review_timeout,
+                    )
+                except TimeoutError:
+                    if self._enforce_deadline(state):
+                        return self._result(state, ledger, blocker=state.last_error)
+                    state.mark_blocked(
+                        f"review phase exceeded {state.phase_timeout_seconds(AutoPhase.REVIEW):.0f}s",
+                        tool_name="grade_gate",
+                    )
+                    self._save(state)
+                    return self._result(state, ledger, blocker=state.last_error)
                 state.last_grade = review.grade_result.grade.value
                 state.findings = [asdict(finding) for finding in review.findings]
                 self._maybe_emit_grade(state)
@@ -491,6 +554,16 @@ class AutoPipeline:
                 )
                 self._save(state)
                 return self._result(state, ledger, review=review, blocker=state.last_error)
+
+        if state.phase == AutoPhase.RALPH_HANDOFF:
+            if self.ralph_starter is None:
+                state.mark_blocked(
+                    "Cannot resume complete-product Ralph handoff without ralph starter configured",
+                    tool_name="ralph_starter",
+                )
+                self._save(state)
+                return self._result(state, ledger, review=review, blocker=state.last_error)
+            return await self._handoff_to_ralph(state, ledger, seed, review, None)
 
         if self.run_starter is None:
             state.mark_blocked("No run starter configured", tool_name="run_starter")
@@ -560,18 +633,28 @@ class AutoPipeline:
             state.run_start_attempted = True
             self._save(state)
             run_meta: dict[str, Any] | None = None
+            run_start_timeout = self._deadline_capped_timeout(
+                state, self.run_start_timeout_seconds
+            )
             try:
                 run_kwargs: dict[str, Any] = {}
                 if _accepts_keyword(self.run_starter, "idempotency_key"):
                     run_kwargs["idempotency_key"] = idempotency_key
                 run_meta = await asyncio.wait_for(
                     self.run_starter(seed, **run_kwargs),
-                    timeout=self.run_start_timeout_seconds,
+                    timeout=run_start_timeout,
                 )
                 if not isinstance(run_meta, dict):
                     msg = f"run starter returned {type(run_meta).__name__}, expected dict"
                     raise TypeError(msg)
             except TimeoutError as exc:
+                if self._enforce_deadline(state):
+                    return self._result(
+                        state,
+                        ledger,
+                        review=review,
+                        blocker=state.last_error or str(exc),
+                    )
                 _mark_unknown_run_handoff(state, status="unknown_timeout")
                 if retried:
                     state.run_handoff_guidance = (
@@ -638,7 +721,16 @@ class AutoPipeline:
                 if any((state.job_id, state.execution_id, state.run_session_id)):
                     state.run_handoff_status = "started"
                     state.run_handoff_guidance = None
-                    if self.complete_product and self.ralph_starter is not None:
+                    if state.complete_product:
+                        if self.ralph_starter is None:
+                            state.mark_blocked(
+                                "Cannot continue complete-product run without ralph starter configured",
+                                tool_name="ralph_starter",
+                            )
+                            self._save(state)
+                            return self._result(
+                                state, ledger, review=review, blocker=state.last_error
+                            )
                         return await self._handoff_to_ralph(
                             state, ledger, seed, review, run_subagent
                         )
@@ -695,12 +787,15 @@ class AutoPipeline:
         widget guidance to the operator.
         """
         assert self.ralph_starter is not None  # noqa: S101 - guarded by caller
-        lineage_id = f"ralph-{seed.metadata.seed_id}-{state.auto_session_id[:8]}"
+        lineage_id = state.ralph_lineage_id or f"ralph-{seed.metadata.seed_id}-{state.auto_session_id[:8]}"
         state.ralph_lineage_id = lineage_id
-        state.transition(
-            AutoPhase.RALPH_HANDOFF,
-            f"handing off grade {state.last_grade or state.required_grade} Seed to Ralph loop",
-        )
+        if state.phase is not AutoPhase.RALPH_HANDOFF:
+            state.transition(
+                AutoPhase.RALPH_HANDOFF,
+                f"handing off grade {state.last_grade or state.required_grade} Seed to Ralph loop",
+            )
+        else:
+            state.mark_progress("resuming Ralph handoff", tool_name="ralph_starter")
         self._save(state)
         max_total_seconds: float | None = None
         if state.deadline_at is not None:
@@ -806,6 +901,18 @@ class AutoPipeline:
         return self._result(
             state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
         )
+
+    def _deadline_capped_timeout(self, state: AutoPipelineState, phase_timeout: float) -> float:
+        """Return ``phase_timeout`` capped by the remaining pipeline deadline."""
+        if state.deadline_at is None:
+            return phase_timeout
+        remaining = state.deadline_at - time.monotonic()
+        if remaining <= 0:
+            # A tiny positive timeout lets ``asyncio.wait_for`` drive the
+            # cancellation path, after which callers invoke ``_enforce_deadline``
+            # and surface the public pipeline_deadline blocker.
+            return 0.001
+        return max(0.001, min(phase_timeout, remaining))
 
     def _enforce_deadline(self, state: AutoPipelineState) -> bool:
         """Return True when the pipeline must abort because the deadline expired.
@@ -1167,7 +1274,7 @@ def _recoverable_phase_for_tool(tool_name: str | None) -> AutoPhase | None:
     if tool_name == "run_starter":
         return AutoPhase.RUN
     if tool_name == "ralph_starter":
-        return AutoPhase.RUN
+        return AutoPhase.RALPH_HANDOFF
     return None
 
 

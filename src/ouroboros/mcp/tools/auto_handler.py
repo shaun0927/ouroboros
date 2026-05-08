@@ -216,6 +216,7 @@ class AutoHandler:
             max_interview_rounds = state.max_interview_rounds
             max_repair_rounds = state.max_repair_rounds
             skip_run = requested_skip_run or state.skip_run
+            complete_product = complete_product or state.complete_product
         else:
             goal = arguments.get("goal")
             if not isinstance(goal, str) or not goal.strip():
@@ -227,6 +228,7 @@ class AutoHandler:
             max_repair_rounds = _positive_int_arg(arguments, "max_repair_rounds", 5)
             skip_run = requested_skip_run
             state = AutoPipelineState(goal=goal.strip(), cwd=cwd)
+            state.complete_product = complete_product
             state.max_interview_rounds = max_interview_rounds
             state.max_repair_rounds = max_repair_rounds
             if pipeline_timeout_seconds is not None:
@@ -234,6 +236,7 @@ class AutoHandler:
         state.runtime_backend = runtime_backend
         state.opencode_mode = opencode_mode
         state.skip_run = skip_run
+        state.complete_product = complete_product
 
         authoring_opencode_mode = "subprocess" if opencode_mode == "plugin" else opencode_mode
         interview_handler = _authoring_interview_handler(

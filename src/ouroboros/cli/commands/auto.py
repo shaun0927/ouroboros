@@ -318,6 +318,7 @@ async def _run_auto(
         else:
             state.max_repair_rounds = max_repair_rounds
         skip_run = skip_run or state.skip_run
+        complete_product = complete_product or state.complete_product
     else:
         if goal is None or not goal.strip():
             raise ValueError("goal is required when not resuming")
@@ -329,6 +330,7 @@ async def _run_auto(
         state = AutoPipelineState(goal=goal.strip(), cwd=str(_safe_default_cwd()))
         state.runtime_backend = runtime
         state.skip_run = skip_run
+        state.complete_product = complete_product
         state.max_interview_rounds = max_interview_rounds
         state.max_repair_rounds = max_repair_rounds
         if pipeline_timeout_seconds is not None:
@@ -343,6 +345,7 @@ async def _run_auto(
     state.runtime_backend = runtime
     state.opencode_mode = opencode_mode
     state.skip_run = skip_run
+    state.complete_product = complete_product
     if incoming_provenance is not None:
         if resume and state.provenance is None:
             msg = (
