@@ -1152,14 +1152,23 @@ _USER_VERIFY_VERB_RE = re.compile(
 # "How should WE validate admins can log in?") share the same actor-noun +
 # permission-modal + verify-verb tokens as user-facing feature questions but
 # the OUTER subject is engineering / first-person-plural ("we", "nous",
-# "wir", "我们", "우리", etc.).  When that meta-subject is present the
-# question is asking about QA, not a product feature, so we defer back to
-# VERIFICATION instead of demoting it.
+# "wir", "我们", etc.).  When that meta-subject is present the question is
+# asking about QA, not a product feature, so we defer back to VERIFICATION
+# instead of demoting it.
+#
+# Possessive determiners (``our``/``ours``/``notre``/``nos``/``unser*``/
+# ``nuestro*``) are intentionally excluded: they routinely modify the actor
+# noun in product-behavior questions (``Can our users verify their email?``)
+# and treating them as engineering meta-subjects silently misroutes
+# user-facing feature questions to the verification handler.  The CJK
+# pronoun forms (``우리``/``我们``) are similarly ambiguous between possessive
+# and subject usage in unanchored matching, so they are matched only with a
+# trailing topic/subject particle that disambiguates an outer 1pp subject.
 _FIRST_PERSON_META_RE = re.compile(
-    r"\b(we|us|our|ours|"
-    r"nous|notre|nos|"
-    r"wir|uns|unser|unsere|unseren|unserem|unserer|"
-    r"nosotros|nosotras|nuestro|nuestra|nuestros|nuestras|"
+    r"\b(we|us|"
+    r"nous|"
+    r"wir|uns|"
+    r"nosotros|nosotras|"
     # Spanish first-person plural verb forms.  ``-mos`` is unambiguously
     # 1pp in standard usage, so these are safe meta signals.  Listing the
     # specific common verbs keeps the matcher precise.
@@ -1172,7 +1181,13 @@ _FIRST_PERSON_META_RE = re.compile(
     r"pourrions|pouvons|pouvions|"
     r"v[ée]rifions|v[ée]rifierions|validons|confirmons|approuvons|"
     r"voulons|voudrions)\b"
-    r"|私たち|私達|我们|我們|우리|저희"
+    # Japanese 1pp pronouns are unambiguously subject (no possessive overlap
+    # without an explicit ``の`` particle).
+    r"|私たち|私達"
+    # Chinese / Korean 1pp pronouns require a topic/subject particle so a
+    # possessive use ("我们的产品", "우리 사용자") does not trip the meta path.
+    r"|我们(?:是|应|应当|是否|要|可|可以)|我們(?:是|應|應當|是否|要|可|可以)"
+    r"|우리(?:는|가|들이|들은)|저희(?:는|가|들이|들은)"
 )
 
 
@@ -1603,22 +1618,45 @@ _COMPLIANCE_POLICY_ACTIVE_VERBS_RE = re.compile(
 # to download …" are captured even when ``download`` is not in that helper's verb list.
 _PRODUCT_QUESTION_MODAL_RE = re.compile(r"\b(should|must|can|will|do|does|is|are)\b")
 # Reject "compliance-scope-as-feature-flag" phrasings: a wide-coverage
-# enablement verb (``support`` / ``enable`` / ``allow``) directly followed by a
-# bare regulated noun with no further qualifying noun. Such prompts
-# ("Should the platform support HIPAA?", "Should the app enable GDPR?",
-# "Should the system allow PII?") are treating the entire compliance regime as
-# a feature toggle, which is a regulated-policy decision rather than a bounded
-# product-behavior question. The trailing negative lookahead ``(?!\s+[a-z])``
-# fires when the regulated noun is the last lexical token of the clause; if any
-# qualifying noun follows ("HIPAA audit logs", "GDPR consent banners", "PII
-# redaction in exports", "GDPR data") the question describes a concrete
-# product feature and is not rejected here.
+# enablement verb (``support`` / ``enable`` / ``allow``) followed by a
+# regulated noun used as a policy scope rather than a concrete feature.
+# Two shapes are rejected:
+#
+#   1. Bare regulated noun with no further qualifying noun
+#      (``Should the platform support HIPAA?``, ``Should the app enable GDPR?``).
+#      The trailing negative lookahead ``(?!\s+[a-z])`` fires when the
+#      regulated noun is the last lexical token of the clause.
+#
+#   2. Regulated noun followed (optionally bridged by ``data``) by a
+#      compliance-policy noun that names the policy regime itself —
+#      ``retention``, ``storage``, ``encryption``, ``handling``, ``processing``,
+#      ``collection``, ``disclosure``, ``governance``, ``compliance``,
+#      ``transmission``, ``redaction``.  Phrasings such as
+#      ``support HIPAA data retention`` and ``enable GDPR data storage`` frame
+#      the entire compliance policy as a toggle and are still
+#      regulated-policy decisions, not bounded product behaviour, so they
+#      remain blocked.  A trailing word boundary keeps concrete-feature
+#      variants ("support HIPAA retention reports", "enable GDPR consent
+#      banners") off this path because the policy noun is then followed by a
+#      qualifying feature noun rather than ending the clause.
+#
+# Concrete-feature qualifiers that follow the regulated noun directly
+# ("HIPAA audit logs", "GDPR consent banners", "PII redaction in exports",
+# "GDPR data exports") still describe bounded product features and are not
+# rejected.
 _BARE_COMPLIANCE_SCOPE_RE = re.compile(
     r"\b(?:support|supports|supporting|supported|"
     r"enable|enables|enabling|enabled|"
     r"allow|allows|allowing|allowed)\s+"
     r"(?:pii|personally identifiable information|gdpr|hipaa|sox|pci[- ]?dss)\b"
+    r"(?:"
     r"(?!\s+[a-z])"
+    r"|"
+    r"(?:\s+data)?\s+"
+    r"(?:retention|storage|encryption|handling|processing|collection|"
+    r"disclosure|governance|compliance|transmission|redaction)"
+    r"(?!\s+[a-z])"
+    r")"
 )
 
 

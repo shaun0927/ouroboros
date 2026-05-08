@@ -2114,3 +2114,132 @@ def test_ledger_summary_treats_inference_only_sections_as_assumption_only() -> N
     assert "actors" in summary["provenance"].get("inference", [])
     assert "actors" not in summary["evidence_backed_sections"]
     assert "actors" in summary["assumption_only_sections"]
+
+
+def test_auto_answerer_possessive_actor_routes_to_product_behavior() -> None:
+    """Possessive determiners modifying the actor noun must NOT trip the
+    first-person-plural meta filter.
+
+    ``Can our users verify their email?`` is a user-facing feature question:
+    the actor is ``users`` and ``our`` is just a possessive modifier.  An
+    earlier revision treated any occurrence of ``our``/``ours`` (and the
+    French/German/Spanish possessive equivalents ``notre``/``nos``/
+    ``unser*``/``nuestro*``) as an engineering meta subject, which silently
+    demoted user-feature verification questions to
+    ``_verification_answer()`` and corrupted the ledger contract.
+
+    Ref: ouroboros-agent[bot] BLOCKING on commit a447fc1 — answerer.py:1094.
+    """
+    answerer = AutoAnswerer()
+    questions = (
+        "Can our users verify their email?",
+        "Can ours users verify their email?",
+        "Les utilisateurs de notre plateforme peuvent-ils vérifier leur e-mail ?",
+        "¿Pueden nuestros usuarios verificar su correo electrónico?",
+        "Können unsere Benutzer ihre E-Mail verifizieren?",
+    )
+    ledger = SeedDraftLedger.from_goal("Build an auth service")
+    for question in questions:
+        answer = answerer.answer(question, ledger)
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+        assert answer.blocker is None, question
+        assert {"constraints", "acceptance_criteria"} <= updated_sections, (
+            question,
+            updated_sections,
+        )
+        constraint_keys = [
+            entry.key
+            for section, entry in answer.ledger_updates
+            if section == "constraints" and entry.key.startswith("constraints.behavior.")
+        ]
+        assert constraint_keys, (
+            question,
+            [entry.key for _section, entry in answer.ledger_updates],
+        )
+
+
+def test_auto_answerer_meta_first_person_subject_still_routes_to_verification() -> None:
+    """Meta-QA questions whose OUTER subject is engineering ("we"/"nous"/
+    "wir"/"deberíamos"/"devrions"/"我们是否"…) must keep routing to the
+    verification handler so the meta path tightening from the previous
+    review remains intact.
+    """
+    answerer = AutoAnswerer()
+    questions = (
+        "Should we verify users can reset passwords?",
+        "Devrions-nous vérifier que les utilisateurs peuvent supprimer des branches?",
+        "¿Deberíamos verificar que los usuarios pueden eliminar ramas?",
+        "Sollten wir verifizieren, dass Benutzer Branches löschen können?",
+        "我们是否应该验证用户可以删除分支？",
+    )
+    ledger = SeedDraftLedger.from_goal("Build a CLI")
+    for question in questions:
+        answer = answerer.answer(question, ledger)
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+        assert answer.blocker is None, question
+        # Meta-QA questions must populate verification_plan / acceptance_criteria,
+        # NOT the product-behavior constraints path.
+        assert "verification_plan" in updated_sections, (question, updated_sections)
+        behavior_keys = [
+            entry.key
+            for section, entry in answer.ledger_updates
+            if section == "constraints" and entry.key.startswith("constraints.behavior.")
+        ]
+        assert not behavior_keys, (question, behavior_keys)
+
+
+def test_auto_answerer_blocks_compliance_policy_noun_questions() -> None:
+    """``support|enable|allow + regulated noun + (data) + policy noun`` must
+    remain blocked even when no active-form compliance verb is used.
+
+    Phrasings such as ``Should the app support HIPAA data retention?`` or
+    ``Should the platform enable GDPR data storage?`` skip the
+    ``_COMPLIANCE_POLICY_ACTIVE_VERBS_RE`` check (no active verb), and the
+    original ``_BARE_COMPLIANCE_SCOPE_RE`` only fired when the regulated
+    noun ended the clause.  That left the policy-as-toggle wording
+    incorrectly classified as safe product behaviour.
+
+    Ref: ouroboros-agent[bot] BLOCKING on commit a447fc1 — answerer.py:1561.
+    """
+    answerer = AutoAnswerer()
+    blocked_questions = (
+        ("Should the app support HIPAA data retention?", "regulated data handling"),
+        ("Should the platform enable GDPR data storage?", "regulated data handling"),
+        ("Should the system allow PII encryption?", "regulated personal data handling"),
+        ("Should the service support SOX data governance?", "regulated data handling"),
+        ("Should the platform support GDPR data processing?", "regulated data handling"),
+        ("Should the app enable HIPAA disclosure?", "regulated data handling"),
+        ("Should the system allow PII collection?", "regulated personal data handling"),
+    )
+
+    ledger = SeedDraftLedger.from_goal("Build a regulated data app")
+    for question, reason in blocked_questions:
+        answer = answerer.answer(question, ledger)
+        assert answer.source == AutoAnswerSource.BLOCKER, question
+        assert answer.blocker is not None, question
+        assert answer.blocker.reason == reason, question
+
+
+def test_auto_answerer_allows_qualified_compliance_policy_features() -> None:
+    """Concrete product features whose name happens to contain a compliance
+    policy noun must NOT be over-blocked by the new policy-noun rejector.
+
+    When the policy noun is followed by a qualifying feature noun
+    (``HIPAA retention reports``, ``GDPR storage dashboards``,
+    ``PII redaction in exports``) the question is asking about a bounded
+    product feature, not setting compliance policy.  These must continue to
+    pass through.
+    """
+    answerer = AutoAnswerer()
+    allowed_questions = (
+        "Should the platform support HIPAA retention reports?",
+        "Should the app enable GDPR storage dashboards?",
+        "Should the system allow PII redaction in exports?",
+        "Should the service support SOX compliance reporting?",
+    )
+
+    ledger = SeedDraftLedger.from_goal("Build a regulated data app")
+    for question in allowed_questions:
+        answer = answerer.answer(question, ledger)
+        assert answer.blocker is None, question
+        assert answer.source != AutoAnswerSource.BLOCKER, question
