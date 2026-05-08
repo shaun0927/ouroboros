@@ -570,6 +570,117 @@ def test_artifact_digest_match_proceeds(tmp_path: Path) -> None:
     assert types == ["plugin.invoked", "plugin.permission_used", "plugin.completed"]
 
 
+def test_digest_fails_closed_when_plugin_home_replaced_with_file(tmp_path: Path) -> None:
+    """Regression for the bot's BLOCKING finding on firewall.py:487 —
+    `canonical_tree_hash` raises `NotADirectoryError` when ``plugin_home``
+    has been replaced with a regular file. The firewall MUST refuse with
+    `result.status="trust_subject_changed"` rather than letting the
+    exception escape past the audit trail.
+    """
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    not_a_dir = tmp_path / "ph_file"
+    not_a_dir.write_text("not a plugin")
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-notadir",
+        plugin_home=not_a_dir,
+        expected_artifact_digest="sha256:" + "0" * 64,
+        subprocess_runner=_fake_runner(),
+    )
+    assert result.status == "blocked"
+    types = [e["event_type"] for e in events]
+    assert types == ["plugin.failed"]
+    assert events[0]["result"]["status"] == "trust_subject_changed"
+
+
+def test_digest_fails_closed_on_escaping_symlink(tmp_path: Path) -> None:
+    """Regression for the bot's BLOCKING finding on firewall.py:487 —
+    `canonical_tree_hash` raises `EscapingSymlinkError` for symlinks
+    that escape the plugin root (post-install tampering). The firewall
+    MUST fail closed with `trust_subject_changed`, not escape the
+    exception.
+    """
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    plugin_home = tmp_path / "ph_escaping"
+    plugin_home.mkdir()
+    (plugin_home / "ouroboros.plugin.json").write_text("{}")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("escaped")
+    # Symlink inside plugin_home pointing to a sibling outside the root.
+    (plugin_home / "leak").symlink_to(outside)
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-escaping",
+        plugin_home=plugin_home,
+        expected_artifact_digest="sha256:" + "0" * 64,
+        subprocess_runner=_fake_runner(),
+    )
+    assert result.status == "blocked"
+    types = [e["event_type"] for e in events]
+    assert types == ["plugin.failed"]
+    assert events[0]["result"]["status"] == "trust_subject_changed"
+    assert events[0]["provenance"]["exception_type"] == "EscapingSymlinkError"
+
+
+def test_malformed_entrypoint_command_emits_plugin_failed(tmp_path: Path) -> None:
+    """Regression for the bot's BLOCKING finding on firewall.py:640 —
+    a manifest with malformed quoting in `entrypoint.command` raises
+    `ValueError` from `shlex.split`. The firewall MUST emit a terminal
+    `plugin.failed` event and return a structured result rather than
+    letting the exception escape and crash the dispatcher.
+    """
+    bad_payload = json.loads(json.dumps(REFERENCE_MANIFEST))
+    # Unmatched single-quote: shlex raises ValueError("No closing quotation").
+    bad_payload["entrypoint"]["command"] = "python -m 'broken"
+    program = _make_program(tmp_path, payload=bad_payload)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-bad-shlex",
+        subprocess_runner=_fake_runner(),
+    )
+    assert result.status == "failed"
+    assert result.exit_code == 126
+    # The full event sequence is preserved up to the failure: invoked +
+    # permission_used (since trust passed) + the terminal failed event.
+    types = [e["event_type"] for e in events]
+    assert types[-1] == "plugin.failed"
+    assert events[-1]["result"]["status"] == "failed"
+    assert events[-1]["provenance"]["reason"] == "entrypoint_command_malformed"
+
+
 def test_disable_record_blocks_independently_of_trust(tmp_path: Path) -> None:
     """A disabled plugin must be refused by the firewall regardless of
     trust state. RFC: the firewall MUST consult the disable record before

@@ -2068,23 +2068,58 @@ def _install_named_from_local_path(
     """`install <name> --from <local-absolute-path>` register-on-first-use."""
     src = normalize_local_path(from_path)
     src_path = Path(src)
-    # Two layouts are accepted:
+    # Three layouts are accepted, in priority order:
     #  - a single-plugin directory (`<src>/ouroboros.plugin.json`)
-    #  - a catalog directory (`<src>/plugins/<name>/ouroboros.plugin.json`)
+    #  - a catalog directory whose subdir name matches `manifest.name`
+    #    (`<src>/plugins/<name>/ouroboros.plugin.json`)
+    #  - a catalog directory whose subdir name DIFFERS from
+    #    `manifest.name` (e.g. `<src>/plugins/foo-bar/...` declaring
+    #    `name: "foobar"`). `add` already supports this layout — by
+    #    walking every `<src>/plugins/*/ouroboros.plugin.json` and
+    #    binding to the actual directory of the matching manifest —
+    #    so the qualified-local-path install path must do the same to
+    #    avoid rejecting valid catalogs that exercise that freedom.
     direct = src_path / "ouroboros.plugin.json"
-    nested = src_path / "plugins" / name / "ouroboros.plugin.json"
+    nested_by_name = src_path / "plugins" / name / "ouroboros.plugin.json"
+    candidate_root: Path | None = None
+    manifest_path: Path | None = None
     if direct.is_file():
         candidate_root = src_path
         manifest_path = direct
-    elif nested.is_file():
+    elif nested_by_name.is_file():
         candidate_root = src_path / "plugins" / name
-        manifest_path = nested
+        manifest_path = nested_by_name
     else:
-        print_error(
-            f"no plugin {name!r} found at {src} (looked for "
-            f"`ouroboros.plugin.json` and `plugins/{name}/ouroboros.plugin.json`)"
-        )
-        raise typer.Exit(code=1)
+        # Fallback: scan `<src>/plugins/*/ouroboros.plugin.json` and
+        # bind to the (unique) directory whose manifest declares
+        # `name == <name>`. Mirrors `add`'s catalog-walking behavior.
+        plugins_dir = src_path / "plugins"
+        if plugins_dir.is_dir():
+            for entry in sorted(plugins_dir.iterdir()):
+                if not entry.is_dir():
+                    continue
+                candidate_manifest = entry / "ouroboros.plugin.json"
+                if not candidate_manifest.is_file():
+                    continue
+                try:
+                    scanned = load_manifest(candidate_manifest)
+                except PluginManifestError:
+                    # A sibling plugin's manifest being invalid must
+                    # not block installing a different, valid plugin
+                    # from the same catalog.
+                    continue
+                if scanned.name == name:
+                    candidate_root = entry
+                    manifest_path = candidate_manifest
+                    break
+        if candidate_root is None or manifest_path is None:
+            print_error(
+                f"no plugin {name!r} found at {src} (looked for "
+                f"`ouroboros.plugin.json`, `plugins/{name}/ouroboros.plugin.json`, "
+                f"and any `plugins/*/ouroboros.plugin.json` declaring "
+                f"`name: {name!r}`)"
+            )
+            raise typer.Exit(code=1)
 
     try:
         manifest = load_manifest(manifest_path)

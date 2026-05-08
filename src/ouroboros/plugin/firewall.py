@@ -40,7 +40,11 @@ import shlex
 import subprocess
 from typing import Literal
 
-from ouroboros.plugin.digest import canonical_tree_hash
+from ouroboros.plugin.digest import (
+    EscapingSymlinkError,
+    UnsupportedFileTypeError,
+    canonical_tree_hash,
+)
 from ouroboros.plugin.manifest import PluginManifest
 from ouroboros.plugin.trust_store import TrustRecord
 from ouroboros.plugin.userlevel_registry import RegisteredProgram
@@ -512,8 +516,12 @@ def invoke_plugin(
     if expected_artifact_digest is not None and plugin_home is not None:
         try:
             current_digest = canonical_tree_hash(plugin_home)
-        except FileNotFoundError as exc:
-            message = f"plugin home missing: {plugin_home} ({exc})"
+        except (FileNotFoundError, NotADirectoryError) as exc:
+            # Plugin home gone or replaced with a non-directory: the
+            # firewall MUST refuse rather than crash. Treat both as the
+            # subject having changed since install (the trusted bytes
+            # are no longer hashable at the recorded path).
+            message = f"plugin home unreadable: {plugin_home} ({type(exc).__name__}: {exc})"
             _emit(
                 _event_envelope(
                     event_type="plugin.failed",
@@ -526,6 +534,67 @@ def invoke_plugin(
                     provenance={
                         "correlation_id": correlation_id,
                         "reason": "plugin_home_missing",
+                    },
+                )
+            )
+            return InvocationResult(
+                status="blocked",
+                exit_code=None,
+                message=message,
+                events=tuple(emitted),
+            )
+        except (EscapingSymlinkError, UnsupportedFileTypeError) as exc:
+            # `canonical_tree_hash` rejects symlinks that escape the
+            # plugin root and unsupported file types (devices, FIFOs,
+            # sockets) — both indicate post-install tampering that the
+            # digest contract says we must refuse to invoke. Fail closed
+            # with `trust_subject_changed` so the audit trail records
+            # the exact reason, not a stack trace.
+            message = (
+                f"plugin home failed digest verification: {plugin_home} "
+                f"({type(exc).__name__}: {exc})"
+            )
+            _emit(
+                _event_envelope(
+                    event_type="plugin.failed",
+                    manifest=manifest,
+                    namespace=namespace,
+                    command_name=command_name,
+                    argv=argv,
+                    trust_state="installed",
+                    result={"status": "trust_subject_changed", "message": message},
+                    provenance={
+                        "correlation_id": correlation_id,
+                        "reason": "plugin_home_tampered",
+                        "exception_type": type(exc).__name__,
+                    },
+                )
+            )
+            return InvocationResult(
+                status="blocked",
+                exit_code=None,
+                message=message,
+                events=tuple(emitted),
+            )
+        except OSError as exc:
+            # Permission errors, broken symlink loops, generic I/O on
+            # plugin_home: same fail-closed contract as above. Without
+            # this branch the exception would escape the firewall and
+            # skip the required terminal `plugin.failed` event.
+            message = f"plugin home unreadable: {plugin_home} ({type(exc).__name__}: {exc})"
+            _emit(
+                _event_envelope(
+                    event_type="plugin.failed",
+                    manifest=manifest,
+                    namespace=namespace,
+                    command_name=command_name,
+                    argv=argv,
+                    trust_state="installed",
+                    result={"status": "trust_subject_changed", "message": message},
+                    provenance={
+                        "correlation_id": correlation_id,
+                        "reason": "plugin_home_unreadable",
+                        "exception_type": type(exc).__name__,
                     },
                 )
             )
@@ -663,7 +732,39 @@ def invoke_plugin(
     # programs that ship their own absolute entrypoint), we fall back to
     # the caller's cwd to preserve the previous test contract.
     cmd_template = manifest.entrypoint.command
-    cmd_argv = shlex.split(cmd_template) + [command_name] + list(argv)
+    try:
+        cmd_argv = shlex.split(cmd_template) + [command_name] + list(argv)
+    except ValueError as exc:
+        # Manifest passed schema validation (any non-empty string), but
+        # the entrypoint string has malformed quoting that `shlex` can't
+        # tokenize (e.g. an unmatched quote). The firewall MUST always
+        # emit a terminal `plugin.failed` event — without this branch
+        # the exception escapes `invoke_plugin` and skips the audit
+        # trail. Posix shell convention is exit code 126 ("command
+        # found but not executable"), which is the closest analogue to
+        # "argv could not be constructed".
+        message = f"manifest entrypoint.command is malformed: {cmd_template!r} ({exc})"
+        _emit(
+            _event_envelope(
+                event_type="plugin.failed",
+                manifest=manifest,
+                namespace=namespace,
+                command_name=command_name,
+                argv=argv,
+                trust_state=trust_state,
+                result={"status": "failed", "message": message},
+                provenance={
+                    "correlation_id": correlation_id,
+                    "reason": "entrypoint_command_malformed",
+                },
+            )
+        )
+        return InvocationResult(
+            status="failed",
+            exit_code=126,
+            message=message,
+            events=tuple(emitted),
+        )
     runner = subprocess_runner or subprocess.run
     # Capture stdout/stderr as **bytes** rather than asking subprocess
     # to decode them. The firewall only ever stores a sha256 hash of

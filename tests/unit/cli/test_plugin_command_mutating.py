@@ -1166,6 +1166,46 @@ def test_install_named_with_from_local_path(runner: CliRunner, tmp_path: Path) -
     )
 
 
+def test_install_named_from_local_catalog_dirname_differs_from_manifest_name(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Regression for the bot's follow-up finding on plugin.py:2014 —
+    `install <name> --from <local-path>` MUST also work when the
+    catalog's subdir name differs from `manifest.name`. `add` already
+    walks every `<src>/plugins/*/ouroboros.plugin.json` and binds to
+    the actual directory of the matching manifest; the qualified
+    install path must do the same to avoid rejecting valid catalogs.
+    """
+    paths = _common_paths(tmp_path)
+    repo = tmp_path / "repo"
+    plugins = repo / "plugins"
+    plugins.mkdir(parents=True)
+    # Subdir name `pr-ops` differs from manifest name `github-pr-ops`.
+    plugin_dir = plugins / "pr-ops"
+    plugin_dir.mkdir()
+    (plugin_dir / "ouroboros.plugin.json").write_text(json.dumps(REFERENCE_MANIFEST))
+    catalog_state = tmp_path / "catalog-state.json"
+    result = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            "github-pr-ops",
+            "--from",
+            str(repo.resolve()),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--catalog-state",
+            str(catalog_state),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "github-pr-ops" in Lockfile(paths["lockfile"]).read()
+
+
 def test_install_default_form_resolves_via_known_catalog(runner: CliRunner, tmp_path: Path) -> None:
     """After `ooo plugin add` registers a catalog, `install <name>` with no
     `--from` must resolve through the catalog and re-install — the
