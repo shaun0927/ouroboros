@@ -30,6 +30,7 @@ is unavailable. A manual fallback is not an `ooo auto` run.
 ooo auto "Build a local-first habit tracker CLI"
 ooo auto --resume auto_abc123
 ooo auto "Build a local-first habit tracker CLI" --skip-run
+ooo auto "Build a local-first habit tracker CLI" --complete-product
 /ouroboros:auto "Build a local-first habit tracker CLI"
 ```
 
@@ -40,5 +41,12 @@ ooo auto "Build a local-first habit tracker CLI" --skip-run
 3. Generates a Seed.
 4. Reviews and repairs until A-grade or blocked.
 5. Starts execution only after A-grade.
+6. *(opt-in via `--complete-product`)* Hands off to the Ralph loop and waits
+   for a terminal status: a QA-pass on the executed product completes the
+   auto session; recognized failure modes (`iteration_timeout`,
+   `wall_clock_exhausted`, `oscillation_detected`, `grade_regressing`,
+   `max_generations reached`) block the auto session with the matching
+   `stop_reason` in `last_error` so operators can resume after the cause is
+   addressed.
 
-The pipeline must not hang indefinitely: all loops are bounded and timeout failures return a resumable `auto_session_id`. Resume with `ooo auto --resume <auto_session_id>`. Use `--skip-run` to stop after the A-grade Seed. The CLI-only `--show-ledger` flag prints assumptions/non-goals; MCP skill responses already include the same ledger summary when available.
+The pipeline must not hang indefinitely: all loops are bounded and timeout failures return a resumable `auto_session_id`. Resume with `ooo auto --resume <auto_session_id>`. Use `--skip-run` to stop after the A-grade Seed. Use `--complete-product` to drive the full Interview → Seed → Run → Ralph → Product chain on a single `ooo auto` invocation; the chained Ralph loop honors the same wall-clock deadline as the parent auto session (`--timeout`). The CLI-only `--show-ledger` flag prints assumptions/non-goals; MCP skill responses already include the same ledger summary when available.
