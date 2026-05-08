@@ -367,8 +367,21 @@ class CatalogRegistry:
     def _load(self) -> dict:
         if not self.state_path.is_file():
             return {"schema_version": "0.1", "catalogs": []}
-        with self.state_path.open(encoding="utf-8") as handle:
-            return json.load(handle)
+        # Surface parse / IO failures as a typed ``ValueError`` that
+        # names the path. The CLI wrappers (``add``/``install``) catch
+        # this and translate to a friendly recovery hint instead of
+        # propagating a raw traceback for a state file the user is
+        # expected to be able to repair.
+        try:
+            with self.state_path.open(encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (json.JSONDecodeError, OSError) as exc:
+            raise ValueError(
+                f"plugin catalog state at {self.state_path} is unreadable: {exc}"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise ValueError(f"plugin catalog state at {self.state_path} is not a JSON object")
+        return payload
 
     def _save(self, payload: dict) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1053,7 +1066,6 @@ def add_command(
         repo_root = clone_dest
         source_kind = "git"
         repository = target
-        source_type = "plugin_home"
         source_identity = normalize_repo_url(target)
     else:
         # Local path source.
@@ -1064,7 +1076,6 @@ def add_command(
         git_sha = None
         source_kind = "local"
         repository = None
-        source_type = "local_path"
         # Each catalog plugin gets its own canonical source_identity
         # (its absolute path on disk), recorded per-plugin below.
         source_identity = ""  # set per-plugin below
@@ -1081,6 +1092,19 @@ def add_command(
             plugin_home_root.parent if catalog_state_path is None and plugin_home_root else None
         ),
     )
+    # Probe the catalog state once up-front so a corrupted
+    # ``plugin-catalogs.json`` produces a friendly recovery hint
+    # instead of crashing the install loop with a partial result.
+    try:
+        catalog_state._load()  # noqa: SLF001 — intentional pre-flight probe
+    except ValueError as exc:
+        print_error(
+            f"{exc} "
+            f"Inspect or delete the file (it will be regenerated on the "
+            f"next successful add/install), or pass --catalog-state to "
+            f"point at a known-good copy."
+        )
+        raise typer.Exit(code=1) from exc
 
     installed: list[str] = []
     for manifest in selected:
@@ -1090,6 +1114,13 @@ def add_command(
             plugin_source_identity = str((repo_root / "plugins" / manifest.name).resolve())
         else:
             plugin_source_identity = source_identity
+        # Per the RFC, the persisted ``source_type`` is the manifest's
+        # declared value, not an inference from the install transport.
+        # Same plugin can travel through different transports (URL
+        # clone vs. local checkout) but the trust subject is keyed by
+        # what the manifest says, so the firewall keeps a single
+        # consistent identity for it.
+        manifest_source_type = manifest.source.type
         # Atomic install: prior plugin home survives any copy failure.
         # We DO NOT invalidate trust before this step — if the copy
         # fails, the user should still own the unchanged install with
@@ -1107,7 +1138,7 @@ def add_command(
             source_kind=source_kind,
             repository=repository,
             git_sha=git_sha,
-            source_type=source_type,
+            source_type=manifest_source_type,
             source_identity=plugin_source_identity,
             artifact_digest=artifact_digest,
         )
@@ -1123,7 +1154,7 @@ def add_command(
         # paths we record the per-plugin path so the catalog and the
         # lockfile agree.
         catalog_state.register(
-            source_type=source_type,
+            source_type=manifest_source_type,
             source_identity=plugin_source_identity,
             plugin_name=manifest.name,
         )
@@ -1137,7 +1168,7 @@ def add_command(
         _maybe_invalidate_trust_for_subject_change(
             name=manifest.name,
             new_version=manifest.version,
-            new_source_type=source_type,
+            new_source_type=manifest_source_type,
             new_source_identity=plugin_source_identity,
             new_artifact_digest=artifact_digest,
             trust=trust,
@@ -1239,6 +1270,19 @@ def install_command(
         state_path=catalog_state_path,
         catalog_root=plugin_home_root.parent if catalog_state_path is None else None,
     )
+    # See ``add_command`` — same up-front probe so a corrupted
+    # catalog file produces a friendly recovery hint rather than a
+    # raw traceback the operator can't easily diagnose.
+    try:
+        catalog_state._load()  # noqa: SLF001 — intentional pre-flight probe
+    except ValueError as exc:
+        print_error(
+            f"{exc} "
+            f"Inspect or delete the file (it will be regenerated on the "
+            f"next successful add/install), or pass --catalog-state to "
+            f"point at a known-good copy."
+        )
+        raise typer.Exit(code=1) from exc
 
     candidate_path = Path(target).expanduser()
 
@@ -1358,6 +1402,14 @@ def _install_from_local_directory(
     _atomic_replace_dir(src, plugin_home)
     artifact_digest = canonical_tree_hash(plugin_home)
     source_identity = str(src)
+    # Per the RFC ("Trust identity"), the persisted ``source_type`` is
+    # the manifest's declared semantic source, not the install
+    # transport. The firewall keys subject-match on
+    # ``manifest.source.type``, so persisting `"local_path"` for a
+    # manifest that declared `plugin_home` would leave the freshly
+    # installed plugin permanently stuck in the `installed` state with
+    # invocation blocked.
+    manifest_source_type = manifest.source.type
 
     _install_one(
         manifest=manifest,
@@ -1366,19 +1418,19 @@ def _install_from_local_directory(
         source_kind="local",
         repository=None,
         git_sha=None,
-        source_type="local_path",
+        source_type=manifest_source_type,
         source_identity=source_identity,
         artifact_digest=artifact_digest,
     )
     catalog_state.register(
-        source_type="local_path",
+        source_type=manifest_source_type,
         source_identity=source_identity,
         plugin_name=manifest.name,
     )
     _maybe_invalidate_trust_for_subject_change(
         name=manifest.name,
         new_version=manifest.version,
-        new_source_type="local_path",
+        new_source_type=manifest_source_type,
         new_source_identity=source_identity,
         new_artifact_digest=artifact_digest,
         trust=trust,
@@ -1436,6 +1488,9 @@ def _install_named_from_local_path(
     _atomic_replace_dir(candidate_root, plugin_home)
     artifact_digest = canonical_tree_hash(plugin_home)
     source_identity = str(candidate_root.resolve())
+    # See `_install_from_local_directory` — persist manifest's source
+    # type, not transport.
+    manifest_source_type = manifest.source.type
     _install_one(
         manifest=manifest,
         plugin_home=plugin_home,
@@ -1443,19 +1498,19 @@ def _install_named_from_local_path(
         source_kind="local",
         repository=None,
         git_sha=None,
-        source_type="local_path",
+        source_type=manifest_source_type,
         source_identity=source_identity,
         artifact_digest=artifact_digest,
     )
     catalog_state.register(
-        source_type="local_path",
+        source_type=manifest_source_type,
         source_identity=source_identity,
         plugin_name=manifest.name,
     )
     _maybe_invalidate_trust_for_subject_change(
         name=manifest.name,
         new_version=manifest.version,
-        new_source_type="local_path",
+        new_source_type=manifest_source_type,
         new_source_identity=source_identity,
         new_artifact_digest=artifact_digest,
         trust=trust,
@@ -1504,6 +1559,11 @@ def _install_named_from_url(
     _atomic_replace_dir(clone_dest / "plugins" / manifest.name, plugin_home)
     artifact_digest = canonical_tree_hash(plugin_home)
     source_identity = normalize_repo_url(repo_url)
+    # See `_install_from_local_directory` — persist manifest's source
+    # type, not transport. Cloning from a URL does not by itself imply
+    # ``source.type == plugin_home``; the manifest's declared value is
+    # what the firewall keys against.
+    manifest_source_type = manifest.source.type
     _install_one(
         manifest=manifest,
         plugin_home=plugin_home,
@@ -1511,19 +1571,19 @@ def _install_named_from_url(
         source_kind="git",
         repository=repo_url,
         git_sha=git_sha,
-        source_type="plugin_home",
+        source_type=manifest_source_type,
         source_identity=source_identity,
         artifact_digest=artifact_digest,
     )
     catalog_state.register(
-        source_type="plugin_home",
+        source_type=manifest_source_type,
         source_identity=source_identity,
         plugin_name=manifest.name,
     )
     _maybe_invalidate_trust_for_subject_change(
         name=manifest.name,
         new_version=manifest.version,
-        new_source_type="plugin_home",
+        new_source_type=manifest_source_type,
         new_source_identity=source_identity,
         new_artifact_digest=artifact_digest,
         trust=trust,

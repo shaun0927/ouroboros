@@ -1954,3 +1954,91 @@ def test_list_friendly_error_on_corrupt_lockfile(runner: CliRunner, tmp_path: Pa
     assert result.exit_code == 1, result.output
     plain = " ".join(result.output.split())
     assert "lockfile is unreadable" in plain
+
+
+def test_add_persists_manifest_source_type_not_transport(runner: CliRunner, tmp_path: Path) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:1109.
+
+    The persisted ``source_type`` must come from
+    ``manifest.source.type``, not from the install transport. If a
+    manifest declares ``plugin_home`` but the install came from a
+    local catalog, the lockfile MUST record ``plugin_home`` so the
+    firewall's subject match (which keys on
+    ``manifest.source.type``) succeeds after the user runs
+    ``ooo plugin trust``. Recording the transport instead leaves the
+    plugin permanently stuck in the ``installed`` state.
+    """
+    paths = _common_paths(tmp_path)
+    repo = tmp_path / "catalog"
+    # Manifest declares source.type=plugin_home (carries a repository
+    # URL) but is installed via a local catalog directory — exactly
+    # the mismatch the bot flagged.
+    manifest = json.loads(json.dumps(REFERENCE_MANIFEST))
+    manifest["source"] = {
+        "type": "plugin_home",
+        "path": "plugins/github-pr-ops",
+        "repository": "https://github.com/Q00/ouroboros-plugins",
+    }
+    _make_repo_layout(repo, [manifest])
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "add",
+            str(repo),
+            "--plugin",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--catalog-state",
+            str(tmp_path / "plugin-catalogs.json"),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    entries = Lockfile(paths["lockfile"]).read()
+    entry = entries["github-pr-ops"]
+    assert entry.source_type == "plugin_home", (
+        f"persisted source_type must come from manifest.source.type "
+        f"(plugin_home), not the install transport; got {entry.source_type!r}"
+    )
+
+
+def test_add_friendly_error_on_corrupt_catalog_state(runner: CliRunner, tmp_path: Path) -> None:
+    """Regression for the bot's follow-up on plugin.py:367.
+
+    A truncated or malformed ``plugin-catalogs.json`` MUST produce a
+    friendly recovery hint, not a raw traceback from ``json.load()``.
+    """
+    paths = _common_paths(tmp_path)
+    repo = tmp_path / "catalog"
+    _make_repo_layout(repo, [REFERENCE_MANIFEST])
+
+    catalog_state = tmp_path / "plugin-catalogs.json"
+    catalog_state.write_text("{ truncated json")
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "add",
+            str(repo),
+            "--plugin",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--catalog-state",
+            str(catalog_state),
+        ],
+    )
+    assert result.exit_code == 1, result.output
+    plain = " ".join(result.output.split())
+    assert "plugin catalog state" in plain
+    assert "unreadable" in plain
+    assert "Traceback" not in result.output
