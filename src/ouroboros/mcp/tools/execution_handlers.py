@@ -925,6 +925,11 @@ class StartExecuteSeedHandler:
         # meta dict. Entries are added once on first call and reused on
         # subsequent calls with the same key.
         self._idempotency_meta: dict[str, dict[str, Any]] = {}
+        # Parallel cache for plugin-dispatch entries — stores the original
+        # SubagentPayload + response_shape so a retry re-emits an identical
+        # ``_subagent`` envelope without triggering a second
+        # subagent_dispatched event.  Keyed by idempotency_key.
+        self._idempotency_plugin_payload: dict[str, dict[str, Any]] = {}
 
     @property
     def definition(self) -> MCPToolDefinition:
@@ -965,6 +970,17 @@ class StartExecuteSeedHandler:
         # execution. The map is process-local; see class docstring.
         raw_key = arguments.get("idempotency_key")
         idempotency_key = raw_key.strip() if isinstance(raw_key, str) else ""
+        if idempotency_key and idempotency_key in self._idempotency_plugin_payload:
+            # Plugin-dispatch replay: re-emit an identical ``_subagent``
+            # envelope using the cached payload + response_shape, but do NOT
+            # emit another subagent_dispatched event (the original first call
+            # already recorded it).  This preserves the public response_shape
+            # contract on retries with the same idempotency_key.
+            cached = self._idempotency_plugin_payload[idempotency_key]
+            return build_subagent_result(
+                cached["payload"],
+                response_shape=dict(cached["response_shape"]),
+            )
         if idempotency_key and idempotency_key in self._idempotency_meta:
             cached_meta = dict(self._idempotency_meta[idempotency_key])
             text = (
@@ -1048,17 +1064,24 @@ class StartExecuteSeedHandler:
             # callers would see "completed" while the child is still running.
             # Instead we return job_id=None with an explicit status so no one
             # accidentally polls a non-existent job.
-            return build_subagent_result(
-                payload,
-                response_shape={
-                    "job_id": None,
-                    "session_id": plugin_session_id,
-                    "execution_id": None,
-                    "status": "delegated_to_plugin",
-                    "dispatch_mode": "plugin",
-                    "runtime_backend": self.agent_runtime_backend,
-                },
-            )
+            response_shape: dict[str, Any] = {
+                "job_id": None,
+                "session_id": plugin_session_id,
+                "execution_id": None,
+                "status": "delegated_to_plugin",
+                "dispatch_mode": "plugin",
+                "runtime_backend": self.agent_runtime_backend,
+            }
+            # Cache for idempotent replay: a second handle() with the same
+            # key must NOT re-dispatch (no second subagent_dispatched event)
+            # but MUST return an identical response_shape — same contract as
+            # the non-plugin path's ``_idempotency_meta`` short-circuit.
+            if idempotency_key:
+                self._idempotency_plugin_payload[idempotency_key] = {
+                    "payload": payload,
+                    "response_shape": dict(response_shape),
+                }
+            return build_subagent_result(payload, response_shape=response_shape)
 
         # Fall-through: real background job path — build payload here where
         # session_id may still be None (background path generates its own).

@@ -176,6 +176,58 @@ async def test_first_call_returns_no_handle_retry_returns_handle_completes(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_retry_raises_non_timeout_marks_exhausted_and_blocks_resume(tmp_path) -> None:
+    """Scenario 4: first call timeouts; retry raises RuntimeError -> BLOCKED with the
+    documented retry phrase, AND a follow-up pipeline.run() must NOT call
+    run_starter a third time (Q00/ouroboros#787 review-1 BLOCKING-2).
+    """
+
+    calls: list[str] = []
+
+    async def run_seed(seed: Seed, *, idempotency_key: str = "") -> dict[str, str | None]:  # noqa: ARG001
+        calls.append(idempotency_key)
+        if len(calls) == 1:
+            await asyncio.sleep(1.0)  # forces wait_for to TimeoutError
+            raise AssertionError("first call should have been cancelled by wait_for")
+        # Second (retry) call raises a non-timeout exception.
+        raise RuntimeError("retry-side dispatch failure")
+
+    state = _primed_run_state(tmp_path)
+    store = AutoStore(tmp_path)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(_unused_start, _unused_answer),
+        store=store,
+    )
+    pipeline = AutoPipeline(
+        driver,
+        _unused_seed_generator,
+        run_starter=run_seed,
+        store=store,
+        run_start_timeout_seconds=0.01,
+    )
+
+    result = await pipeline.run(state)
+
+    # Pipeline blocked with the documented retry phrase.
+    assert result.status == "blocked"
+    assert "retried once with idempotency key" in (state.last_error or "")
+    assert "retried once with idempotency key" in (result.blocker or "")
+    # Exactly two run_starter calls so far (initial + one retry).
+    assert calls == [state.auto_session_id, state.auto_session_id]
+    # State markers persist so the symmetric guard short-circuits next run().
+    assert state.run_start_attempted is True
+    assert state.run_handoff_status == "unknown_retry_failed"
+
+    # Resume: the next pipeline.run() must NOT call run_starter again.
+    result2 = await pipeline.run(state)
+    assert result2.status == "blocked"
+    assert calls == [state.auto_session_id, state.auto_session_id], (
+        f"run_starter called {len(calls)} times; symmetric guard failed to "
+        "short-circuit on resume after exhausted-retry"
+    )
+
+
+@pytest.mark.asyncio
 async def test_both_calls_fail_pipeline_blocks_with_documented_phrase(tmp_path) -> None:
     """Scenario 3: both attempts fail -> BLOCKED with the documented retry phrase."""
 

@@ -449,6 +449,13 @@ class AutoPipeline:
         prior_retry_exhausted = (
             state.run_handoff_guidance is not None
             and _RETRY_GUIDANCE_PHRASE in state.run_handoff_guidance
+        ) or (
+            # Symmetric guard for the non-timeout retry-exception path:
+            # ``unknown_retry_failed`` is set when the retry attempt raised a
+            # non-TimeoutError exception. ``run_start_attempted`` stays True
+            # so a follow-up pipeline.run() must short-circuit here instead
+            # of calling run_starter a third time.
+            bool(state.run_start_attempted) and state.run_handoff_status == "unknown_retry_failed"
         )
         if prior_retry_exhausted:
             blocker_text = state.last_error or state.run_handoff_guidance
@@ -498,12 +505,36 @@ class AutoPipeline:
                         blocker=state.last_error or str(exc),
                     )
             except Exception as exc:
-                # Non-timeout errors are not retried — the contract is to
-                # bound retries on *unknown* handoffs only. Reset the
-                # attempt flag so the caller can re-invoke after fixing
-                # the underlying error (preserves prior behavior).
-                if not retried:
-                    state.run_start_attempted = attempted_at_entry
+                if retried:
+                    # Retry attempt itself raised — bound is exhausted. The
+                    # initial attempt may have already enqueued execution on
+                    # the server, so we MUST NOT call run_starter a third
+                    # time on a later resume. Persist an exhausted-retry
+                    # marker so the symmetric guard above re-blocks instead
+                    # of re-entering the run-start branch. ``last_error``
+                    # carries the documented retry phrase so callers can
+                    # detect this specific terminal state.
+                    state.run_handoff_status = "unknown_retry_failed"
+                    state.run_handoff_guidance = (
+                        f"{state.run_handoff_guidance or 'Run starter retry raised an exception'} "
+                        f"{_RETRY_GUIDANCE_PHRASE} {idempotency_key}"
+                    ).strip()
+                    state.mark_blocked(
+                        f"run start failed on retry: {exc}; "
+                        f"{_RETRY_GUIDANCE_PHRASE} {idempotency_key}",
+                        tool_name="run_starter",
+                    )
+                    # Leave state.run_start_attempted=True so the caller's
+                    # next pipeline.run() short-circuits at the symmetric
+                    # guard rather than starting a third attempt.
+                    self._save(state)
+                    return self._result(state, ledger, review=review, blocker=state.last_error)
+                # Initial attempt: non-timeout errors are not retried —
+                # the contract is to bound retries on *unknown* handoffs
+                # only. Reset the attempt flag so the caller can re-invoke
+                # after fixing the underlying error (preserves prior
+                # behavior).
+                state.run_start_attempted = attempted_at_entry
                 state.mark_failed(f"run start failed: {exc}", tool_name="run_starter")
                 self._save(state)
                 return self._result(state, ledger, review=review, blocker=state.last_error)

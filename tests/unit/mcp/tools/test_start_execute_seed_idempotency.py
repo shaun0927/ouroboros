@@ -180,3 +180,51 @@ async def test_call_without_idempotency_key_always_enqueues(event_store, tmp_pat
     await handler.handle(arguments)
 
     assert len(start_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_plugin_dispatch_replays_response_shape_and_skips_dispatch(
+    event_store, tmp_path
+) -> None:
+    """Plugin-dispatch path: same idempotency_key returns identical response_shape
+    and emits no second subagent_dispatched event (Q00/ouroboros#787 review-1).
+    """
+    handler = StartExecuteSeedHandler(
+        execute_handler=MagicMock(),
+        event_store=event_store,
+        job_manager=_make_job_manager_stub([]),
+        agent_runtime_backend="opencode",
+        opencode_mode="plugin",
+    )
+
+    arguments = {
+        "seed_content": "goal: plugin-idempotent\n",
+        "cwd": str(tmp_path),
+        "idempotency_key": "auto_plugin_session",
+    }
+
+    first = await handler.handle(arguments)
+    second = await handler.handle(arguments)
+
+    assert first.is_ok
+    assert second.is_ok
+
+    first_meta = first.value.meta
+    second_meta = second.value.meta
+    # Identical response_shape — same session_id, status, dispatch_mode.
+    assert first_meta["session_id"] == second_meta["session_id"]
+    assert first_meta["status"] == "delegated_to_plugin"
+    assert second_meta["status"] == "delegated_to_plugin"
+    assert first_meta["dispatch_mode"] == second_meta["dispatch_mode"] == "plugin"
+    assert first_meta["runtime_backend"] == second_meta["runtime_backend"]
+    # Identical _subagent envelope (replay re-emits the cached payload).
+    assert first_meta["_subagent"] == second_meta["_subagent"]
+
+    # No second subagent.dispatched event was emitted on retry.
+    aggregate_id = first_meta["session_id"]
+    events, _ = await event_store.get_events_after("subagent", aggregate_id)
+    dispatched_events = [e for e in events if e.type == "subagent.dispatched"]
+    assert len(dispatched_events) == 1, (
+        f"expected exactly 1 subagent.dispatched event on the first call, "
+        f"got {len(dispatched_events)} (replay must not re-dispatch)"
+    )
