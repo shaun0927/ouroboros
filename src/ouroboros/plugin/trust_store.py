@@ -432,6 +432,13 @@ class TrustStore:
         (CLI dispatch, firewall) so a stale disable record from an old
         source does not block a fresh install from a different source.
         """
+        # Validate name before deriving any path: lockfile rows are
+        # operator-editable and `Lockfile.read()` does not enforce the
+        # name regex, so a malformed plugin name like ``../../x`` would
+        # otherwise escape ``DEFAULT_TRUST_ROOT`` and hit arbitrary
+        # ``disabled.json`` paths. The trust-file API has the same guard
+        # — keep the disable surface symmetric.
+        _validate_plugin_name(plugin)
         return self._disable_path(plugin).is_file()
 
     def is_disabled_for_subject(
@@ -458,6 +465,7 @@ class TrustStore:
         silently bypassed by a re-install whose source-identity field
         was not yet recorded.
         """
+        _validate_plugin_name(plugin)
         record = self.read_disable(plugin)
         if record is None:
             return False
@@ -480,6 +488,7 @@ class TrustStore:
         ``JSONDecodeError`` would escape as a traceback in the very
         commands operators use to repair plugin state.
         """
+        _validate_plugin_name(plugin)
         path = self._disable_path(plugin)
         if not path.is_file():
             return None
@@ -508,6 +517,7 @@ class TrustStore:
         ``remove + add`` cycle that lands the same source still inherits
         the disable signal — exactly what the RFC asks for.
         """
+        _validate_plugin_name(plugin)
         when = when or datetime.now(tz=UTC)
         payload = {
             "schema_version": TRUST_SCHEMA_VERSION,
@@ -535,6 +545,7 @@ class TrustStore:
 
     def clear_disable(self, plugin: str) -> bool:
         """Remove the disable record for `plugin`. Returns True if removed."""
+        _validate_plugin_name(plugin)
         path = self._disable_path(plugin)
         if not path.is_file():
             return False

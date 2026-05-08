@@ -308,9 +308,21 @@ def _record_matches_subject(
     """
     if trust_record is None or trust_record.version != manifest.version:
         return False
-    # source.type is always known from the manifest; require record's
-    # source_type (when set) to match. An empty record source_type is a
-    # legacy record — accept under the version-only contract.
+    # When the caller plumbs the lockfile-recorded ``expected_*``
+    # (production CLI dispatch path), we are operating under the new
+    # subject contract: a record that is silent on a subject column
+    # cannot prove it was granted for THIS install subject. Refuse such
+    # legacy/partial records so a same-version reinstall from a
+    # different repo / path / bytes does NOT silently inherit pre-RFC
+    # grants. Firewall unit tests that don't plumb ``expected_*`` keep
+    # the legacy version-only contract for backwards compatibility.
+    if expected_source_identity is not None or expected_artifact_digest is not None:
+        if (
+            not trust_record.source_type
+            or not trust_record.source_identity
+            or not trust_record.artifact_digest
+        ):
+            return False
     if trust_record.source_type and trust_record.source_type != manifest.source.type:
         return False
     if expected_source_identity is not None:

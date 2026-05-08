@@ -488,13 +488,20 @@ def _maybe_invalidate_trust_for_subject_change(
         return
     if record is None:
         return
+    # Pre-RFC trust records have at least one blank subject column and
+    # therefore cannot prove they were granted for THIS install subject
+    # under the new contract. Treat them as never matching: a same-
+    # version reinstall from a different source / different bytes MUST
+    # invalidate the legacy grant rather than silently inherit it.
+    record_is_legacy_unbound = (
+        not record.source_type or not record.source_identity or not record.artifact_digest
+    )
     if (
         record.version == new_version
-        # Treat empty record fields as "legacy / unbound" — match if the
-        # new value matches OR the record is silent on that field.
-        and (not record.source_type or record.source_type == new_source_type)
-        and (not record.source_identity or record.source_identity == new_source_identity)
-        and (not record.artifact_digest or record.artifact_digest == new_artifact_digest)
+        and not record_is_legacy_unbound
+        and record.source_type == new_source_type
+        and record.source_identity == new_source_identity
+        and record.artifact_digest == new_artifact_digest
     ):
         return
     try:

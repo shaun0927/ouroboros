@@ -1166,6 +1166,58 @@ def test_install_named_with_from_local_path(runner: CliRunner, tmp_path: Path) -
     )
 
 
+def test_install_invalidates_legacy_trust_record(runner: CliRunner, tmp_path: Path) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:493 +
+    firewall.py:313 — a pre-RFC trust grant has empty
+    ``source_type`` / ``source_identity`` / ``artifact_digest`` columns.
+    A same-version reinstall MUST reset such a record so the operator
+    re-grants under the new contract; otherwise the legacy grant
+    silently inherits across a reinstall from a different repo / path
+    or with different bytes, defeating the trust-subject binding the
+    new model is meant to enforce.
+    """
+    from ouroboros.plugin.trust_store import TrustStore
+
+    paths = _common_paths(tmp_path)
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "ouroboros.plugin.json").write_text(json.dumps(REFERENCE_MANIFEST))
+    # Pre-RFC grant: only `version` + `scope`, no subject columns.
+    TrustStore(root=paths["trust_root"]).grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+    )
+    catalog_state = tmp_path / "catalog-state.json"
+    result = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            "github-pr-ops",
+            "--from",
+            str(src.resolve()),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--catalog-state",
+            str(catalog_state),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    # The reinstall must have reset the legacy grant — re-reading the
+    # trust store should show no granted scopes against the new subject
+    # (the operator is expected to re-grant via `ooo plugin trust ...`).
+    record = TrustStore(root=paths["trust_root"]).read("github-pr-ops")
+    assert record is not None
+    assert [g.scope for g in record.granted_scopes] == [], (
+        f"legacy grant should have been invalidated on reinstall; got {record.granted_scopes}"
+    )
+
+
 def test_install_named_from_local_catalog_dirname_differs_from_manifest_name(
     runner: CliRunner, tmp_path: Path
 ) -> None:
