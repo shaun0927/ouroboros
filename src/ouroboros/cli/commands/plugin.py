@@ -1353,7 +1353,14 @@ def install_command(
         )
         raise typer.Exit(code=1)
     only = sources[0]
-    if only["source_type"] == "plugin_home":
+    # Route by transport (URL vs local path), NOT by manifest source.type.
+    # The persisted ``source_type`` field is the manifest's declared
+    # value (per RFC), so a `source.type="plugin_home"` manifest can
+    # legitimately be registered with a filesystem ``source_identity``
+    # when the user added it via a local checkout. Picking the URL
+    # path on `source_type=="plugin_home"` would shell out to
+    # ``git clone`` against an absolute filesystem path.
+    if _looks_like_url(only["source_identity"]):
         _install_named_from_url(
             name=target,
             repo_url=only["source_identity"],
@@ -1672,19 +1679,22 @@ def trust_command(
         )
         raise typer.Exit(code=1) from exc
     declared = {p.scope for p in manifest.permissions}
+    required = {p.scope for p in manifest.permissions if p.required}
     if not scopes:
         # Bare `ooo plugin trust <name>` — no new grants, but we can
         # still clear the disable record. This path exists so a
-        # disabled zero-permission plugin can actually be re-enabled
-        # (the firewall blocks disabled plugins before considering
-        # permissions, so without this branch a disabled plugin with
-        # `permissions: []` would be permanently un-runnable). For
-        # plugins with declared permissions, refuse so the user is
-        # forced to make an explicit grant rather than silently
-        # re-enabling without trust.
-        if declared:
+        # disabled plugin whose firewall block has nothing to do with
+        # missing scopes (zero-permission OR all-optional permissions)
+        # can actually be re-enabled. The firewall only refuses
+        # invocation on missing *required* scopes, so a plugin with
+        # only ``required: false`` permissions is firewall-equivalent
+        # to a zero-permission plugin: re-enabling it with no grant
+        # is correct. For plugins that DO declare required scopes,
+        # refuse so the user is forced to make an explicit grant
+        # rather than silently re-enabling without trust.
+        if required:
             print_error(
-                f"plugin {name!r} declares permissions {sorted(declared)!r}; "
+                f"plugin {name!r} declares required permissions {sorted(required)!r}; "
                 "pass --scope to grant at least one before re-enabling."
             )
             raise typer.Exit(code=1)

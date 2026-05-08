@@ -1602,17 +1602,23 @@ def test_trust_re_enables_zero_permission_plugin_with_no_scope_arg(
     assert not trust.is_disabled("github-pr-ops")
 
 
-def test_trust_without_scope_for_plugin_with_permissions_errors(
+def test_trust_without_scope_for_plugin_with_required_permissions_errors(
     runner: CliRunner, tmp_path: Path
 ) -> None:
-    """For plugins WITH declared permissions, bare `trust <name>` must
-    still error so the user has to make an explicit grant decision —
-    silently re-enabling without trust would be a permission-boundary
-    surprise.
+    """For plugins with declared *required* permissions, bare
+    `trust <name>` must still error so the user has to make an
+    explicit grant decision — silently re-enabling without trust
+    would be a permission-boundary surprise.
+
+    The check is keyed on REQUIRED permissions only: optional
+    permissions don't gate invocation, so refusing to re-enable a
+    plugin whose only declared permissions are ``required: false``
+    would leave that class of plugin permanently stuck after a
+    disable.
     """
     paths = _common_paths(tmp_path)
     src = tmp_path / "src"
-    _install_reference_plugin(runner, plugin_dir=src, paths=paths)  # has github:read
+    _install_reference_plugin(runner, plugin_dir=src, paths=paths)  # has required github:read
     result = runner.invoke(
         plugin_app,
         [
@@ -1631,7 +1637,7 @@ def test_trust_without_scope_for_plugin_with_permissions_errors(
     plain = plain.replace("│", " ").replace("╭", " ").replace("╮", " ")
     plain = plain.replace("╰", " ").replace("╯", " ").replace("─", " ")
     flat = " ".join(plain.split())
-    assert "declares permissions" in flat
+    assert "declares required permissions" in flat
     assert "--scope" in flat
 
 
@@ -2042,3 +2048,145 @@ def test_add_friendly_error_on_corrupt_catalog_state(runner: CliRunner, tmp_path
     assert "plugin catalog state" in plain
     assert "unreadable" in plain
     assert "Traceback" not in result.output
+
+
+def test_install_by_name_routes_local_path_for_plugin_home_manifest(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:1356.
+
+    When ``add`` registers a plugin from a local catalog whose manifest
+    declares ``source.type=plugin_home``, the catalog entry contains
+    ``(source_type="plugin_home", source_identity="/abs/path/...")``.
+    A subsequent bare ``ooo plugin install <name>`` must not route
+    that to ``_install_named_from_url`` — there is no remote to clone,
+    only a local directory. Routing must follow the *transport*
+    (URL vs path), not the manifest's declared ``source_type``.
+    """
+    paths = _common_paths(tmp_path)
+    repo = tmp_path / "catalog"
+    manifest = json.loads(json.dumps(REFERENCE_MANIFEST))
+    manifest["source"] = {
+        "type": "plugin_home",
+        "path": "plugins/github-pr-ops",
+        "repository": "https://github.com/Q00/ouroboros-plugins",
+    }
+    _make_repo_layout(repo, [manifest])
+    catalog_state = tmp_path / "plugin-catalogs.json"
+
+    # Add via the local catalog — registers ``(plugin_home, /abs/...)``.
+    add_result = runner.invoke(
+        plugin_app,
+        [
+            "add",
+            str(repo),
+            "--plugin",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--catalog-state",
+            str(catalog_state),
+        ],
+    )
+    assert add_result.exit_code == 0, add_result.output
+
+    # Wipe the install so `install <name>` actually has work to do —
+    # this exercises the catalog-resolution path, not the no-op path.
+    Lockfile(paths["lockfile"]).remove("github-pr-ops")
+    plugin_home = paths["plugin_home_root"] / "github-pr-ops"
+    if plugin_home.exists():
+        import shutil as _sh
+
+        _sh.rmtree(plugin_home)
+
+    install_result = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--catalog-state",
+            str(catalog_state),
+        ],
+    )
+    # The previous routing logic would have shelled out to
+    # `git clone <abs-path>` here and either failed or attempted a
+    # nonsensical clone. With the fix it goes through the local-path
+    # installer and succeeds.
+    assert install_result.exit_code == 0, install_result.output
+    assert "git clone failed" not in install_result.output
+
+
+def test_trust_reenables_disabled_plugin_with_only_optional_permissions(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:1675.
+
+    The firewall only blocks invocation on missing *required* scopes.
+    A plugin whose entire ``permissions`` list is ``required: false``
+    is firewall-equivalent to a zero-permission plugin: bare
+    ``ooo plugin trust <name>`` should clear the disable record and
+    re-enable it without forcing the user to grant an unnecessary
+    optional scope.
+    """
+    paths = _common_paths(tmp_path)
+    src = tmp_path / "src"
+    src.mkdir()
+    manifest = json.loads(json.dumps(REFERENCE_MANIFEST))
+    manifest["permissions"] = [
+        {"scope": "github:read", "risk": "read_only", "required": False},
+    ]
+    (src / "ouroboros.plugin.json").write_text(json.dumps(manifest))
+
+    install_result = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(src),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    assert install_result.exit_code == 0, install_result.output
+
+    # Disable, then re-enable with bare `trust <name>` (no --scope).
+    disable_result = runner.invoke(
+        plugin_app,
+        [
+            "disable",
+            "github-pr-ops",
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--lockfile",
+            str(paths["lockfile"]),
+        ],
+    )
+    assert disable_result.exit_code == 0, disable_result.output
+
+    reenable_result = runner.invoke(
+        plugin_app,
+        [
+            "trust",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    assert reenable_result.exit_code == 0, reenable_result.output
+    trust = TrustStore(root=paths["trust_root"])
+    assert not trust.is_disabled("github-pr-ops")
