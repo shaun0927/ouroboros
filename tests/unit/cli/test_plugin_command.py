@@ -480,6 +480,68 @@ def test_list_json_legacy_unbound_record_reports_installed(
     assert row["missing_required_scopes"] == ["github:read"]
 
 
+def test_inspect_disabled_first_party_reports_disabled_not_first_party(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:201 —
+    ``_describe_trust_state`` previously returned ``"first_party"``
+    before consulting the disable record, so a built-in plugin that
+    had been disabled via ``ooo plugin disable`` still surfaced as
+    ``first_party`` in ``inspect`` / ``list`` even though the firewall
+    refuses invocation. The CLI views must agree with the runtime
+    gate, otherwise a disabled built-in plugin looks inexplicably
+    broken to the operator.
+    """
+    plugin_home = tmp_path / "plugin_home"
+    fp_manifest = {
+        **REFERENCE_MANIFEST,
+        "name": "ooo-builtin",
+        "source": {"type": "first_party"},
+        "permissions": [],
+    }
+    _write_manifest(plugin_home, fp_manifest)
+    lock_path = tmp_path / "plugins.lock"
+    trust_root = tmp_path / "trust"
+    Lockfile(lock_path).add(
+        LockEntry(
+            name="ooo-builtin",
+            version="0.1.0",
+            source_kind="local",
+            repository=None,
+            git_sha=None,
+            manifest_checksum="sha256:0",
+            installed_at="2026-05-08T00:00:00Z",
+            plugin_home=str(plugin_home),
+            source_type="first_party",
+            source_identity=str(plugin_home),
+        )
+    )
+    # Operator ran `ooo plugin disable ooo-builtin`.
+    TrustStore(root=trust_root).write_disable(
+        "ooo-builtin",
+        source_type="first_party",
+        source_identity=str(plugin_home),
+        disabled_by="user:test",
+    )
+    result = runner.invoke(
+        plugin_app,
+        [
+            "inspect",
+            "ooo-builtin",
+            "--lockfile",
+            str(lock_path),
+            "--trust-root",
+            str(trust_root),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "trust_state:    disabled" in result.output
+    # trust_state must NOT echo "first_party" when the plugin is
+    # disabled — the runtime gate refuses invocation, so the
+    # diagnostic surface needs to agree.
+    assert "trust_state:    first_party" not in result.output
+
+
 def test_inspect_corrupt_disable_file_reports_friendly_error(
     runner: CliRunner, tmp_path: Path
 ) -> None:

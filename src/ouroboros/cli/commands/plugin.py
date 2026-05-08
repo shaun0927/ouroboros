@@ -198,14 +198,22 @@ def _describe_trust_state(
     bound to a stale digest reads as ``"installed"`` here just as the
     firewall would refuse it. A disabled subject reads as ``"disabled"``.
     """
-    if manifest.source.type == "first_party":
-        return "first_party"
     # Disable records are keyed by (name, source.type, source_identity)
     # per the RFC: a stale disable from a previous install at source A
     # MUST NOT carry over to a fresh install from source B. When the
     # caller plumbs the lockfile-recorded identity, use the
     # subject-scoped predicate; otherwise fall back to the name-only
     # check (defensive default for legacy callers).
+    #
+    # Disable is checked BEFORE the first-party short-circuit because
+    # the firewall's ``is_disabled`` gate refuses invocation for ANY
+    # plugin including first-party (``firewall.invoke_plugin`` consults
+    # the disable record before any source-type branching). If we
+    # returned ``"first_party"`` without consulting the disable record,
+    # ``ooo plugin inspect`` / ``ooo plugin list`` would show a
+    # built-in plugin as active even after ``ooo plugin disable <name>``
+    # succeeded — the diagnostic surface would silently disagree with
+    # the runtime gate.
     if expected_source_identity is not None:
         if trust_store.is_disabled_for_subject(
             manifest.name,
@@ -215,6 +223,8 @@ def _describe_trust_state(
             return "disabled"
     elif trust_store.is_disabled(manifest.name):
         return "disabled"
+    if manifest.source.type == "first_party":
+        return "first_party"
     record = trust_store.read(manifest.name)
     if record is None or record.version != manifest.version:
         return "installed"
