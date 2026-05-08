@@ -680,6 +680,58 @@ def test_auto_answerer_multilingual_permission_questions_route_to_product_behavi
         assert "outputs" not in updated_sections, question
 
 
+def test_auto_answerer_cjk_property_lookup_does_not_misroute_to_runtime() -> None:
+    """CJK runtime cues paired with bare noun-style "selection shape" tokens
+    (``설정`` / ``設定`` / ``配置``) used to misroute property/status lookups
+    like ``런타임 설정은 어디에 표시되나요?`` into ``_runtime_answer()``.
+    Flagged by ouroboros-agent on commit 4c1ee42.  Selection shape now
+    requires a verb-distinctive cue (``사용``/``선택``/``채택``/``도입`` etc.).
+    """
+    answerer = AutoAnswerer()
+    questions = (
+        "런타임 설정은 어디에 표시되나요?",
+        "ランタイム設定はどこに表示されますか?",
+        "运行时配置显示在哪里？",
+    )
+    for question in questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a CLI"))
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+        assert answer.blocker is None, question
+        assert "runtime_context" not in updated_sections, (question, updated_sections)
+
+
+def test_auto_answerer_user_verify_feature_routes_to_product_behavior() -> None:
+    """User-verify feature questions like ``Can users verify their email?``
+    must route to PRODUCT_BEHAVIOR instead of being collapsed into a generic
+    verification-plan template.  Flagged by ouroboros-agent on commit
+    4c1ee42 in English / French / Chinese / Korean variants.  Routing
+    precedence now prefers PRODUCT_BEHAVIOR over VERIFICATION when both are
+    inferred, and verify-style verbs are recognised as product actions.
+    """
+    answerer = AutoAnswerer()
+    questions = (
+        "Can users verify their email?",
+        "Les utilisateurs peuvent-ils vérifier leur e-mail ?",
+        "用户可以验证他们的电子邮件吗？",
+        "사용자가 이메일을 확인할 수 있나요?",
+    )
+    for question in questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build an auth service"))
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+        assert answer.blocker is None, question
+        assert {"constraints", "acceptance_criteria"} <= updated_sections, (
+            question,
+            updated_sections,
+        )
+        # The product behavior subject must be surfaced in the constraint key.
+        constraint_keys = [
+            entry.key
+            for section, entry in answer.ledger_updates
+            if section == "constraints" and entry.key.startswith("constraints.behavior.")
+        ]
+        assert constraint_keys, (question, [k for _s, e in answer.ledger_updates for k in [e.key]])
+
+
 def test_auto_answerer_broad_design_cues_do_not_misroute_to_runtime() -> None:
     """Broad design nouns (``architecture``, ``estructura``, ``cadre``) plus a
     generic selection verb must NOT be classified as runtime intent.  The

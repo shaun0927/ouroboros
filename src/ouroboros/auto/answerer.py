@@ -128,9 +128,17 @@ class AutoAnswerer:
 
         if QuestionIntent.NON_GOALS in intents:
             return self._non_goal_answer(question, ledger)
-        if QuestionIntent.VERIFICATION in intents:
+        # When PRODUCT_BEHAVIOR is also inferred, prefer it over VERIFICATION
+        # and ACCEPTANCE_CRITERIA so feature questions like
+        # ``"Can users verify their email?"`` (and the multilingual siblings
+        # ``"Les utilisateurs peuvent-ils vérifier leur e-mail ?"``,
+        # ``"用户可以验证他们的电子邮件吗？"``, ``"사용자가 이메일을
+        # 확인할 수 있나요?"``) preserve the product feature contract instead
+        # of being collapsed into a generic verification-plan template.
+        product_present = QuestionIntent.PRODUCT_BEHAVIOR in intents
+        if QuestionIntent.VERIFICATION in intents and not product_present:
             return self._verification_answer(question)
-        if QuestionIntent.ACCEPTANCE_CRITERIA in intents:
+        if QuestionIntent.ACCEPTANCE_CRITERIA in intents and not product_present:
             return self._feature_acceptance_answer(question)
         if QuestionIntent.RUNTIME_CONTEXT in intents and _should_preserve_runtime_route(lowered):
             answer = self._runtime_answer(question, context)
@@ -905,12 +913,19 @@ _RUNTIME_SELECTION_SHAPE_PATTERNS: tuple[str, ...] = (
     # German
     r"\b(verwenden|verwendet|nutzen|nutzt|w[äa]hlen|ausw[äa]hlen|"
     r"konfigurieren|konfiguriert|adoptieren|migrieren|einrichten)\b",
-    # Korean: 사용/선택/구성/설정/채택/도입
-    r"사용|선택|구성|설정|채택|도입",
-    # Japanese: 使う/使い/使用/選ぶ/選択/構成/設定/採用/導入
-    r"使う|使い|使用|選ぶ|選択|構成|設定|採用|導入",
-    # Chinese (simplified + traditional): 使用/选择/选用/配置/采用/設定/設置
-    r"使用|选择|選擇|选用|選用|采用|採用|配置|設定|设定|設置|设置|採納|采纳",
+    # Korean: only verb-distinctive selection cues.  ``구성`` (composition)
+    # and ``설정`` (settings) are dropped because they also appear in
+    # ordinary status / display questions like ``런타임 설정은 어디에
+    # 표시되나요?`` and would silently misroute property lookups into
+    # ``_runtime_answer()``.
+    r"사용|선택|채택|도입",
+    # Japanese: same rule — drop ``構成`` and ``設定`` (which surface in
+    # ``ランタイム設定はどこに表示されますか?``-style status questions).
+    r"使う|使い|使用|選ぶ|選択|採用|導入",
+    # Chinese (simplified + traditional): drop ``配置`` / ``設定`` /
+    # ``设定`` / ``設置`` / ``设置`` for the same reason — those surface
+    # in display/status questions like ``运行时配置显示在哪里？``.
+    r"使用|选择|選擇|选用|選用|采用|採用|採納|采纳",
 )
 
 
@@ -1014,6 +1029,62 @@ _MULTILINGUAL_PRODUCT_BEHAVIOR_PATTERNS: tuple[str, ...] = (
 )
 
 
+# Cross-lingual "user-verifies-X" feature shape.  The bare verbs
+# ``verify`` / ``vérifier`` / ``verificar`` / ``验证`` / ``확인`` / ``検証``
+# are also classified as VERIFICATION cues; the routing layer prefers
+# PRODUCT_BEHAVIOR when both are inferred so feature questions like
+# ``"Can users verify their email?"`` (and the multilingual siblings) are
+# not collapsed into a generic verification-plan template.
+#
+# We require an explicit actor noun (users / usuarios / utilisateurs /
+# 사용자 / 用户 / ユーザー / etc.) PLUS a permission modal PLUS a verify-style
+# verb.  Without the actor requirement, engineering-side questions like
+# ``"How should we verify the HIPAA worker tests pass?"`` would also match
+# and get demoted from VERIFICATION (which is wrong — those are not product
+# feature questions).
+_USER_VERIFY_ACTOR_RE = re.compile(
+    r"\b(users?|usuarios?|utilisateurs?|benutzer|"
+    r"clients?|kunden?|persons?|accounts?|admins?|owners?|members?|recipients?)\b"
+    r"|사용자|유저|用户|使用者|ユーザー|ユーザ|利用者"
+)
+_USER_VERIFY_MODAL_RE = re.compile(
+    r"\b(can|should|must|will|do|does|may|might|able to|allowed to|"
+    r"pueden|puede|podr[áa]n?|deben|debe|"
+    r"peuvent|peut|peut[- ]on|doivent|doit|pourra|pourront|"
+    r"k(?:[öo]|oe)nnen|kann|d(?:[üu]|ue)rfen|sollen|soll)\b"
+    r"|수\s*있|수\s*없|해야|가능|허용|허락"
+    r"|できる|できます|してもよい|可能|していい|してください"
+    r"|可以|应该|應該|必须|必須|能否|是否"
+)
+_USER_VERIFY_VERB_RE = re.compile(
+    r"\b(verify|verifies|validate|validates|confirm|confirms|approve|approves|"
+    r"verificar|validar|confirmar|aprobar|"
+    r"v[ée]rifier|valider|confirmer|approuver|"
+    r"verifizieren|validieren|best[äa]tigen|bestaetigen|genehmigen)\b"
+    r"|확인|검증|승인"
+    r"|確認|検証|承認"
+    r"|验证|驗證|确认|確認|核实|核實|审核|審核|批准"
+)
+
+
+def _has_user_verify_feature_shape(lowered: str) -> bool:
+    """Detect ``ACTOR + permission-modal + verify-verb`` feature questions.
+
+    Required for routing precedence: when this pattern matches the question
+    is asking about a user-facing verification feature (e.g. ``"Can users
+    verify their email?"``) and PRODUCT_BEHAVIOR should win over the
+    VERIFICATION cue path.  An actor noun is mandatory so engineering-side
+    QA questions like ``"How should we verify the HIPAA worker tests
+    pass?"`` continue to route to ``_verification_answer()`` and through
+    the existing regulated-data blocker.
+    """
+    return bool(
+        _USER_VERIFY_ACTOR_RE.search(lowered)
+        and _USER_VERIFY_MODAL_RE.search(lowered)
+        and _USER_VERIFY_VERB_RE.search(lowered)
+    )
+
+
 def _has_product_behavior_intent(lowered: str) -> bool:
     """Classify product-behavior intent across English and other languages.
 
@@ -1025,6 +1096,8 @@ def _has_product_behavior_intent(lowered: str) -> bool:
     authorization behavior).  This helper restores symmetry.
     """
     if _is_product_behavior_question(lowered):
+        return True
+    if _has_user_verify_feature_shape(lowered):
         return True
     return any(re.search(pattern, lowered) for pattern in _MULTILINGUAL_PRODUCT_BEHAVIOR_PATTERNS)
 
