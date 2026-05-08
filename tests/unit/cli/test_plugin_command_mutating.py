@@ -1125,6 +1125,115 @@ def test_trust_clears_disable_record(runner: CliRunner, tmp_path: Path) -> None:
     assert rec is not None and rec.has_scope("github:read")
 
 
+def test_list_reflects_disabled_state(runner: CliRunner, tmp_path: Path) -> None:
+    """`ooo plugin list --json` must surface `trust_state="disabled"` for a
+    plugin with a disable record, regardless of whether it has a trust
+    file. Aligns the CLI view with the firewall's pre-trust check.
+    """
+    paths = _common_paths(tmp_path)
+    src = tmp_path / "src"
+    _install_reference_plugin(runner, plugin_dir=src, paths=paths)
+    runner.invoke(
+        plugin_app,
+        [
+            "trust",
+            "github-pr-ops",
+            "--scope",
+            "github:read",
+            "--granted-by",
+            "user:test",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    runner.invoke(
+        plugin_app,
+        [
+            "disable",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    listed = runner.invoke(
+        plugin_app,
+        [
+            "list",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--json",
+        ],
+    )
+    assert listed.exit_code == 0, listed.output
+    rows = json.loads(listed.stdout)
+    assert rows[0]["trust_state"] == "disabled"
+
+
+def test_list_reflects_subject_drift_as_installed(runner: CliRunner, tmp_path: Path) -> None:
+    """If the lockfile-recorded artifact_digest no longer matches the
+    trust record's digest (e.g. an in-place edit happened after grant
+    but before re-install), `list` must show `installed`, not `trusted`.
+    """
+    from ouroboros.plugin.lockfile import LockEntry, Lockfile
+
+    paths = _common_paths(tmp_path)
+    src = tmp_path / "src"
+    _install_reference_plugin(runner, plugin_dir=src, paths=paths)
+    runner.invoke(
+        plugin_app,
+        [
+            "trust",
+            "github-pr-ops",
+            "--scope",
+            "github:read",
+            "--granted-by",
+            "user:test",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    # Manually rewrite the lockfile entry to record a different digest —
+    # simulating bytes drift between the trust grant and the next inspect.
+    lock = Lockfile(paths["lockfile"])
+    entry = lock.read()["github-pr-ops"]
+    drifted = LockEntry(
+        name=entry.name,
+        version=entry.version,
+        source_kind=entry.source_kind,
+        repository=entry.repository,
+        git_sha=entry.git_sha,
+        manifest_checksum=entry.manifest_checksum,
+        installed_at=entry.installed_at,
+        plugin_home=entry.plugin_home,
+        source_type=entry.source_type,
+        source_identity=entry.source_identity,
+        artifact_digest=("sha256:0000000000000000000000000000000000000000000000000000000000000000"),
+    )
+    lock.add(drifted)
+    listed = runner.invoke(
+        plugin_app,
+        [
+            "list",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--json",
+        ],
+    )
+    assert listed.exit_code == 0, listed.output
+    rows = json.loads(listed.stdout)
+    assert rows[0]["trust_state"] == "installed"
+
+
 def test_remove_clears_disable_record(runner: CliRunner, tmp_path: Path) -> None:
     """RFC: `remove` ALSO deletes the disable record so a fresh future
     install starts un-trusted-but-enabled (not silently disabled).
