@@ -3302,6 +3302,137 @@ def test_trust_friendly_error_on_unwritable_audit_log(runner: CliRunner, tmp_pat
     assert "Traceback" not in result.output
 
 
+def test_add_registers_catalog_when_interactive_selection_empty(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:1431.
+
+    ``_select_plugins`` exits with code 0 when the user picks nothing
+    in the interactive multi-select. The locked RFC ("How sources
+    enter the known catalog") still requires ``ooo plugin add <repo>``
+    to publish the repo as a known catalog in that case — otherwise a
+    later ``ooo plugin install <name>`` cannot resolve the repo by
+    name. The fix moves catalog registration BEFORE the selection
+    gate so an empty/cancelled selection still records the repo.
+    """
+    paths = _common_paths(tmp_path)
+    repo = tmp_path / "repo-skipped-selection"
+    sibling = json.loads(json.dumps(REFERENCE_MANIFEST))
+    sibling["name"] = "github-issue-ops"
+    sibling["source"] = {
+        "type": "local_path",
+        "path": "plugins/github-issue-ops",
+    }
+    _make_repo_layout(repo, [REFERENCE_MANIFEST, sibling])
+
+    catalog_state = tmp_path / "plugin-catalogs.json"
+
+    # Force the interactive path: do NOT pass --plugin. Stub questionary
+    # so ``_select_plugins`` returns an empty selection, which calls
+    # ``typer.Exit(code=0)``. Without the fix, the catalog file is
+    # never written; with the fix, every discovered manifest is
+    # already registered before the selection gate.
+    import sys
+    import types
+
+    fake_q = types.SimpleNamespace()
+
+    class _FakeChoice:
+        def __init__(self, *args, **kwargs) -> None:  # noqa: ANN001
+            self.args = args
+            self.kwargs = kwargs
+
+    class _FakeAsker:
+        def ask(self) -> list[str]:
+            return []
+
+    fake_q.Choice = _FakeChoice
+    fake_q.checkbox = lambda *a, **kw: _FakeAsker()  # noqa: ARG005
+    monkeypatch.setitem(sys.modules, "questionary", fake_q)
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "add",
+            str(repo),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--catalog-state",
+            str(catalog_state),
+        ],
+    )
+    # Empty selection is a clean abort, exit 0.
+    assert result.exit_code == 0, result.output
+    # And the catalog file MUST list every discovered plugin so a later
+    # `install <name>` can resolve them.
+    assert catalog_state.exists(), (
+        "catalog state must be written even when the selection prompt "
+        "is empty/cancelled — RFC: `add` makes the repo a known catalog "
+        "regardless of selection"
+    )
+    payload = json.loads(catalog_state.read_text())
+    plugins_recorded: set[str] = set()
+    for entry in payload["catalogs"]:
+        plugins_recorded.update(entry.get("plugins", []))
+    assert plugins_recorded == {"github-pr-ops", "github-issue-ops"}, plugins_recorded
+
+
+def test_atomic_install_rollback_preserves_backup_on_restore_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:327.
+
+    The previous rollback path called ``shutil.rmtree(backup)``
+    unconditionally in ``finally``. If ``os.rename(backup, dest)``
+    failed (EXDEV across filesystems, ``dest`` re-appearance, etc.)
+    AFTER ``dest`` had already been removed, both the new tree and
+    the saved backup were destroyed — the exact data-loss path the
+    rollback was supposed to prevent.
+
+    The fix removes the unconditional cleanup: a successful
+    ``os.rename`` consumes the source naturally, and a failed
+    rename leaves the backup on disk for manual recovery.
+    """
+    import ouroboros.cli.commands.plugin as plugin_module
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "plugin.py").write_text("new bytes")
+
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    (dest / "plugin.py").write_text("PRIOR INSTALL")
+
+    real_rename = plugin_module.os.rename
+
+    def _selective_rename(a, b):  # noqa: ANN001
+        # The restore rename is the one that targets ``dest`` from a
+        # ``backup`` source path containing ``.bak-``. Reject only that
+        # one so we exercise the data-loss-prevention case.
+        if ".bak-" in str(a) and str(b) == str(dest):
+            raise OSError("synthetic: restore rename failed (EXDEV)")
+        return real_rename(a, b)
+
+    monkeypatch.setattr(plugin_module.os, "rename", _selective_rename)
+
+    with pytest.raises(RuntimeError, match="caller follow-up failed"):
+        with plugin_module._atomic_install_with_rollback(src, dest):
+            raise RuntimeError("caller follow-up failed (lockfile write)")
+
+    # After the rollback's restore failure, the backup MUST still
+    # exist on disk so the operator can recover the prior install.
+    backup_dirs = list(dest.parent.glob(f"{dest.name}.bak-*"))
+    assert len(backup_dirs) == 1, (
+        f"backup must be preserved on restore failure; found {backup_dirs}"
+    )
+    # And the backup must contain the prior install bytes.
+    assert (backup_dirs[0] / "plugin.py").read_text() == "PRIOR INSTALL"
+
+
 def test_inspect_friendly_error_on_corrupt_disabled_json(runner: CliRunner, tmp_path: Path) -> None:
     """Regression for the bot's BLOCKING finding on trust_store.py:461.
 

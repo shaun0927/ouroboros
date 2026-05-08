@@ -329,14 +329,28 @@ def _atomic_install_with_rollback(src: Path, dest: Path):
         # Roll back to the prior install: drop the new bytes, restore
         # the backup. The original exception propagates so the caller
         # surfaces the friendly recovery hint.
-        try:
-            if dest.exists():
-                shutil.rmtree(dest, ignore_errors=True)
-            if backup_used and backup.exists():
+        #
+        # Ordering matters: if ``os.rename(backup, dest)`` itself
+        # raises (EXDEV across filesystems, an unexpected ``dest``
+        # re-appearance, etc.), ``backup`` becomes the *only*
+        # remaining copy of the user's prior install. The previous
+        # implementation deleted ``backup`` unconditionally in a
+        # ``finally`` clause — meaning a failed restore destroyed
+        # both the new tree and the backup, the exact data-loss path
+        # the rollback is here to prevent. Now ``backup`` is only
+        # cleaned up implicitly via the successful ``os.rename`` (a
+        # rename consumes the source); a failed rename leaves the
+        # backup on disk at its full path so the operator can
+        # recover from ``<dest>.bak-<suffix>``.
+        if dest.exists():
+            shutil.rmtree(dest, ignore_errors=True)
+        if backup_used and backup.exists():
+            try:
                 os.rename(backup, dest)
-        finally:
-            if backup.exists():
-                shutil.rmtree(backup, ignore_errors=True)
+            except OSError:
+                # Restore failed; backup preserved for manual recovery.
+                # The original exception still propagates below.
+                pass
         raise
 
     # Caller's follow-up succeeded — drop the backup.
@@ -1428,7 +1442,6 @@ def add_command(
         source_identity = ""  # set per-plugin below
 
     catalog = _enumerate_catalog(repo_root)
-    selected = _select_plugins(catalog, plugin_names)
 
     # Per the RFC, `add` registers each catalog source as a known catalog
     # so future `ooo plugin install <name>` invocations can resolve it
@@ -1453,21 +1466,17 @@ def add_command(
         )
         raise typer.Exit(code=1) from exc
 
-    # Pre-flight lockfile health check. ``_install_one`` will write
-    # to the lockfile after the bytes are swapped into ``plugin_home``;
-    # surfacing a corrupt-or-unwritable lockfile here means we abort
-    # BEFORE mutating any plugin home, not after. The transactional
-    # ``_atomic_install_with_rollback`` below additionally restores
-    # the prior install if the post-swap write still fails.
-    _read_lock_or_exit(lock)
-
     # Per the locked RFC ("How sources enter the known catalog"): `add
     # <repo>` makes the repo a known catalog at that moment, regardless
     # of which plugins the user picks (or skips) at the selection
-    # prompt. Registering every discovered manifest here — before the
-    # install loop — preserves three properties:
-    #   - empty / cancelled selections still publish the repo, so a
-    #     later `ooo plugin install <name>` resolves without re-fetching
+    # prompt. The selection step (``_select_plugins``) can exit with
+    # code 0 when the interactive prompt comes back empty/cancelled —
+    # so registering AFTER selection would silently fail to publish
+    # the repo for that path, breaking later `ooo plugin install <name>`
+    # for sibling plugins. Registering here, BEFORE the selection
+    # gate, preserves three properties:
+    #   - empty / cancelled interactive selections still publish the
+    #     repo so a later `install <name>` resolves without re-fetching
     #   - sibling plugins not chosen on this `add` call are addressable
     #     by name on the next `install`
     #   - per-plugin install failures inside the loop don't strand the
@@ -1489,6 +1498,16 @@ def add_command(
             source_identity=catalog_plugin_source_identity,
             plugin_name=catalog_entry.manifest.name,
         )
+
+    selected = _select_plugins(catalog, plugin_names)
+
+    # Pre-flight lockfile health check. ``_install_one`` will write
+    # to the lockfile after the bytes are swapped into ``plugin_home``;
+    # surfacing a corrupt-or-unwritable lockfile here means we abort
+    # BEFORE mutating any plugin home, not after. The transactional
+    # ``_atomic_install_with_rollback`` below additionally restores
+    # the prior install if the post-swap write still fails.
+    _read_lock_or_exit(lock)
 
     installed: list[str] = []
     for entry in selected:
