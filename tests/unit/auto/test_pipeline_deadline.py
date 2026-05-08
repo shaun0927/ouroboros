@@ -172,6 +172,56 @@ def test_legacy_active_state_load_arms_missing_deadline(tmp_path, phase: AutoPha
     assert loaded.deadline_at_epoch > time.time()
 
 
+class _ForeverInterviewDriver:
+    """Driver whose ``run`` blocks until cancelled, simulating a hung backend."""
+
+    def __init__(self) -> None:
+        self.invocations = 0
+        self.entered = asyncio.Event()
+        self.progress_callback = None
+
+    async def run(self, _state, _ledger):  # noqa: ARG002
+        self.invocations += 1
+        self.entered.set()
+        await asyncio.sleep(3600)
+        raise AssertionError("interview driver should have been cancelled by deadline")
+
+
+@pytest.mark.asyncio
+async def test_in_flight_interview_is_cancelled_by_pipeline_deadline(tmp_path) -> None:
+    """An expired deadline must cancel an in-flight interview within tens of ms (#790 review-6).
+
+    The bot's blocker called out that ``_enforce_deadline`` only fired at
+    phase boundaries, so a hung interview backend could outlive the
+    top-level timeout by the full per-phase budget. With the
+    deadline-capped ``asyncio.wait_for`` cap, the in-flight call must be
+    cut off as soon as the deadline passes and surface the public
+    ``pipeline_deadline`` blocker — NOT the per-phase
+    ``interview_driver`` timeout.
+    """
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.transition(AutoPhase.INTERVIEW, "starting interview")
+    # Deadline expires 50ms in the future. Phase timeout (default 600s)
+    # is far larger; without the cap, the interview would block until
+    # min(phase_timeout, infinity) instead of stopping at the deadline.
+    state.deadline_at = time.monotonic() + 0.05
+    state.deadline_at_epoch = time.time() + 0.05
+
+    driver = _ForeverInterviewDriver()
+    pipeline = AutoPipeline(driver, _unused_seed_generator)
+
+    started = time.monotonic()
+    result = await pipeline.run(state)
+    elapsed = time.monotonic() - started
+
+    assert driver.invocations == 1
+    # Cap fires at the deadline, not at the 600s phase timeout.
+    assert elapsed < 5.0, f"pipeline outlived deadline by {elapsed:.2f}s"
+    assert result.status == "blocked"
+    assert state.last_tool_name == PIPELINE_DEADLINE_TOOL_NAME
+    assert "pipeline_timeout" in (state.last_error or "")
+
+
 @pytest.mark.asyncio
 async def test_fresh_created_session_persists_deadline_before_interview(tmp_path) -> None:
     """The CREATED → INTERVIEW deadline must be saved BEFORE the driver runs (#790 review-5).
