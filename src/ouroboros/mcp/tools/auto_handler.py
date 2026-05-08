@@ -10,6 +10,7 @@ from typing import Any
 
 from ouroboros.auto.adapters import (
     HandlerInterviewBackend,
+    HandlerRalphPoller,
     HandlerRalphStarter,
     HandlerRunStarter,
     HandlerSeedGenerator,
@@ -308,16 +309,23 @@ class AutoHandler:
             timeout_seconds=state.phase_timeout_seconds(AutoPhase.INTERVIEW),
             context_provider=context_provider,
         )
-        ralph_starter = (
-            HandlerRalphStarter(
-                RalphHandler(
-                    agent_runtime_backend=runtime_backend,
-                    opencode_mode=opencode_mode,
-                )
+        ralph_handler = (
+            RalphHandler(
+                agent_runtime_backend=runtime_backend,
+                opencode_mode=opencode_mode,
             )
             if complete_product
             else None
         )
+        ralph_starter = HandlerRalphStarter(ralph_handler) if ralph_handler is not None else None
+        # Q00/ouroboros#773 (review-5 finding 1): wire a poller backed by the
+        # same ``RalphHandler`` so MCP-side resumes of an interrupted
+        # ``RALPH_HANDOFF`` checkpoint actually reconcile the persisted job
+        # to a terminal auto phase. The same handler is reused so both the
+        # starter and the poller share a ``JobManager`` (and underlying
+        # ``EventStore``) — without that share the poller would query a
+        # fresh, empty job table.
+        ralph_resumer = HandlerRalphPoller(ralph_handler) if ralph_handler is not None else None
         pipeline = AutoPipeline(
             driver,
             HandlerSeedGenerator(generate_seed_handler),
@@ -334,6 +342,7 @@ class AutoHandler:
             reconcile_run=reconcile_run,
             reconcile_source=reconcile_source,
             ralph_starter=ralph_starter,
+            ralph_resumer=ralph_resumer,
             complete_product=complete_product,
         )
         return await pipeline.run(state)

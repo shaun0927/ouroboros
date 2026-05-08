@@ -162,6 +162,15 @@ class AutoPipeline:
     # defaults to False (opt-in safety) so existing callers see no behavior
     # change.
     ralph_starter: RalphStarter | None = None
+    # Q00/ouroboros#773 (review-5): poller invoked by ``_resume_ralph_handoff``
+    # to translate a persisted ``ralph_job_id`` back into a terminal status
+    # dict so a session interrupted in ``RALPH_HANDOFF`` (e.g. MCP client
+    # disconnects while the background Ralph job keeps running) actually
+    # reconciles to ``COMPLETE`` / ``BLOCKED`` / ``FAILED`` on resume instead
+    # of staying stranded in the non-terminal handoff state. Defaults to
+    # None for backward compatibility — when unset, resume falls back to
+    # the legacy guidance-only behavior.
+    ralph_resumer: RalphStarter | None = None
     complete_product: bool = False
     _last_emitted_phase: str | None = field(default=None, init=False, repr=False)
     _last_emitted_grade: str | None = field(default=None, init=False, repr=False)
@@ -455,7 +464,7 @@ class AutoPipeline:
             return self._result(state, ledger, blocker=state.last_error)
 
         if state.phase == AutoPhase.RALPH_HANDOFF:
-            return self._resume_ralph_handoff(state, ledger, review=review)
+            return await self._resume_ralph_handoff(state, ledger, review=review)
 
         if self._enforce_deadline(state):
             return self._result(state, ledger, blocker=state.last_error)
@@ -547,6 +556,17 @@ class AutoPipeline:
             if any((state.job_id, state.execution_id, state.run_session_id)):
                 state.run_handoff_status = "started"
                 state.run_handoff_guidance = None
+                # Q00/ouroboros#773 (review-5 finding 2): honor the durable
+                # ``complete_product`` intent on RUN resume. Without this
+                # branch, a crash between run handoff and ``_handoff_to_ralph``
+                # would silently bypass Ralph on resume even though the
+                # operator explicitly opted into RUN → RALPH_HANDOFF — a
+                # regression of the persisted-session contract added in
+                # this PR.
+                if self.complete_product and self.ralph_starter is not None:
+                    return await self._handoff_to_ralph(
+                        state, ledger, seed, review, run_subagent=None
+                    )
                 state.transition(
                     AutoPhase.COMPLETE, "execution already started; using persisted run handle"
                 )
@@ -928,14 +948,27 @@ class AutoPipeline:
             state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
         )
 
-    def _resume_ralph_handoff(
+    async def _resume_ralph_handoff(
         self,
         state: AutoPipelineState,
         ledger: SeedDraftLedger,
         *,
         review: SeedReview | None,
     ) -> AutoPipelineResult:
-        """Resume a persisted Ralph handoff checkpoint without duplicate dispatch."""
+        """Resume a persisted Ralph handoff checkpoint.
+
+        Plugin-mode dispatches transition straight to COMPLETE (the plugin
+        child session is fire-and-forget — there is no in-process job to
+        await). Job-mode dispatches with a configured ``ralph_resumer``
+        poll the persisted ``ralph_job_id`` and map the terminal status
+        back onto the same auto phase as :meth:`_handoff_to_ralph`, so a
+        session interrupted between dispatch and terminal status (review-5
+        finding 1) is actually reconciled instead of stranded in
+        ``RALPH_HANDOFF`` forever. When no ``ralph_resumer`` is wired (or
+        no ``ralph_job_id`` was persisted) the method falls back to
+        guidance-only behavior so callers without a job-manager handle
+        still get a coherent message instead of a polling failure.
+        """
         if state.ralph_dispatch_mode == "plugin":
             state.run_handoff_guidance = (
                 state.run_handoff_guidance
@@ -949,6 +982,9 @@ class AutoPipeline:
             )
             self._save(state)
             return self._result(state, ledger, review=review)
+
+        if self.ralph_resumer is not None and state.ralph_job_id:
+            return await self._poll_ralph_job(state, ledger, review=review)
 
         handle = state.ralph_job_id or state.ralph_lineage_id
         if handle:
@@ -966,6 +1002,72 @@ class AutoPipeline:
         state.mark_progress(state.run_handoff_guidance, tool_name="ralph_starter")
         self._save(state)
         return self._result(state, ledger, review=review)
+
+    async def _poll_ralph_job(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+        *,
+        review: SeedReview | None,
+    ) -> AutoPipelineResult:
+        """Poll a persisted Ralph job and map its terminal status onto an auto phase.
+
+        Used only by :meth:`_resume_ralph_handoff` when ``ralph_resumer`` is
+        wired and ``state.ralph_job_id`` is present. The polling shape mirrors
+        :meth:`_handoff_to_ralph` so the COMPLETE / BLOCKED / FAILED contract
+        pinned by :data:`_RALPH_BLOCKED_STOP_REASONS` stays single-sourced.
+        """
+        assert self.ralph_resumer is not None  # noqa: S101 - guarded by caller
+        assert state.ralph_job_id is not None  # noqa: S101 - guarded by caller
+        try:
+            poll_call = self.ralph_resumer(job_id=state.ralph_job_id)
+            if state.deadline_at is None:
+                ralph_meta = await poll_call
+            else:
+                poll_timeout = max(0.0, state.deadline_at - time.monotonic())
+                ralph_meta = await asyncio.wait_for(poll_call, timeout=poll_timeout)
+        except TimeoutError:
+            if self._enforce_deadline(state):
+                return self._result(state, ledger, review=review, blocker=state.last_error)
+            state.mark_blocked(
+                "ralph resume poll timed out before terminal status",
+                tool_name="ralph_starter",
+            )
+            self._save(state)
+            return self._result(state, ledger, review=review, blocker=state.last_error)
+        except Exception as exc:
+            state.mark_failed(f"ralph resume poll failed: {exc}", tool_name="ralph_starter")
+            self._save(state)
+            return self._result(state, ledger, review=review, blocker=state.last_error)
+        if not isinstance(ralph_meta, dict):
+            state.mark_failed(
+                f"ralph resumer returned {type(ralph_meta).__name__}, expected dict",
+                tool_name="ralph_starter",
+            )
+            self._save(state)
+            return self._result(state, ledger, review=review, blocker=state.last_error)
+        terminal_status = _optional_str(ralph_meta.get("terminal_status"))
+        stop_reason = _optional_str(ralph_meta.get("stop_reason"))
+        if terminal_status == "completed":
+            state.transition(
+                AutoPhase.COMPLETE,
+                f"resumed ralph loop completed ({stop_reason or 'qa passed'})",
+            )
+            self._save(state)
+            return self._result(state, ledger, review=review)
+        if terminal_status == "failed" and stop_reason in _RALPH_BLOCKED_STOP_REASONS:
+            state.mark_blocked(stop_reason, tool_name="ralph_starter")
+            self._save(state)
+            return self._result(state, ledger, review=review, blocker=state.last_error)
+        # Any other failure is a hard FAILED, mirroring _handoff_to_ralph.
+        message = (
+            f"ralph loop failed: {stop_reason}"
+            if stop_reason
+            else f"ralph loop failed: terminal_status={terminal_status or 'unknown'}"
+        )
+        state.mark_failed(message, tool_name="ralph_starter")
+        self._save(state)
+        return self._result(state, ledger, review=review, blocker=state.last_error)
 
     def _enforce_deadline(self, state: AutoPipelineState) -> bool:
         """Return True when the pipeline must abort because the deadline expired.

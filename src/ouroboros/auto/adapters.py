@@ -234,6 +234,38 @@ class HandlerRalphStarter:
         }
 
 
+class HandlerRalphPoller:
+    """Callable Ralph job poller backed by the same ``RalphHandler`` ``JobManager``.
+
+    Used by :class:`AutoPipeline` on resume from a persisted ``RALPH_HANDOFF``
+    checkpoint (Q00/ouroboros#773 review-5 finding 1). Without this hook a
+    long-lived runtime such as MCP — where the Ralph background job keeps
+    running after the client disconnects — would leave any interrupted
+    ``--complete-product`` session stranded in the non-terminal handoff
+    state forever, since the legacy resume path only emitted guidance text.
+    The poller waits for the persisted ``ralph_job_id`` to reach a terminal
+    snapshot and returns the same ``terminal_status`` / ``stop_reason`` /
+    ``dispatch_mode`` shape as :class:`HandlerRalphStarter` so the pipeline
+    can re-use a single COMPLETE / BLOCKED / FAILED mapping.
+    """
+
+    def __init__(self, handler: RalphHandler) -> None:
+        self.handler = handler
+
+    async def __call__(self, *, job_id: str) -> dict[str, Any]:
+        job_manager = self.handler._job_manager  # noqa: SLF001
+        terminal_meta = await _wait_for_job_terminal(job_manager, job_id)
+        terminal_status = _optional_str(terminal_meta.get("status")) or "failed"
+        stop_reason = _optional_str(terminal_meta.get("stop_reason"))
+        return {
+            "job_id": job_id,
+            "lineage_id": _optional_str(terminal_meta.get("lineage_id")),
+            "dispatch_mode": "job",
+            "terminal_status": terminal_status,
+            "stop_reason": stop_reason,
+        }
+
+
 async def _wait_for_job_terminal(
     job_manager: JobManager, job_id: str, *, poll_interval: float = 0.05
 ) -> dict[str, Any]:

@@ -13,6 +13,7 @@ import typer
 
 from ouroboros.auto.adapters import (
     HandlerInterviewBackend,
+    HandlerRalphPoller,
     HandlerRalphStarter,
     HandlerRunStarter,
     HandlerSeedGenerator,
@@ -387,13 +388,20 @@ async def _run_auto(
         max_rounds=max_interview_rounds,
         timeout_seconds=state.phase_timeout_seconds(AutoPhase.INTERVIEW),
     )
-    ralph_starter = (
-        HandlerRalphStarter(
-            RalphHandler(agent_runtime_backend=runtime, opencode_mode=opencode_mode)
-        )
+    ralph_handler = (
+        RalphHandler(agent_runtime_backend=runtime, opencode_mode=opencode_mode)
         if complete_product
         else None
     )
+    ralph_starter = HandlerRalphStarter(ralph_handler) if ralph_handler is not None else None
+    # Q00/ouroboros#773 (review-5 finding 1): wire a poller backed by the same
+    # ``RalphHandler`` so a session interrupted in ``RALPH_HANDOFF`` (e.g.
+    # client disconnects while the background Ralph job keeps running) can
+    # actually be reconciled to ``COMPLETE`` / ``BLOCKED`` / ``FAILED`` on
+    # ``--resume`` instead of being stranded in the non-terminal handoff
+    # state forever. Sharing the handler reuses the same ``JobManager``
+    # (and underlying ``EventStore``) so the poller sees the persisted job.
+    ralph_resumer = HandlerRalphPoller(ralph_handler) if ralph_handler is not None else None
     pipeline = AutoPipeline(
         driver,
         HandlerSeedGenerator(generate_seed),
@@ -410,6 +418,7 @@ async def _run_auto(
         reconcile_run=reconcile_run,
         reconcile_source=reconcile_source,
         ralph_starter=ralph_starter,
+        ralph_resumer=ralph_resumer,
         complete_product=complete_product,
         progress_callback=progress_callback,
     )
