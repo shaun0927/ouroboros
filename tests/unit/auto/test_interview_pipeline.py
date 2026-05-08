@@ -312,6 +312,62 @@ def test_safe_default_blocks_when_interview_answer_introduces_unsafe_context() -
     assert not ledger.is_seed_ready()
 
 
+def test_safe_default_ignores_from_auto_answers_in_question_history() -> None:
+    # AutoAnswerer prefixes every policy-emitted answer with "[from-auto]".
+    # Those answers routinely mention auth/credentials/production as
+    # exclusions; the unsafe gate must skip them so its own outputs do not
+    # block subsequent finalization passes.
+    goal = "Build a small local CLI"
+    ledger = SeedDraftLedger.from_goal(goal)
+    ledger.record_qa(
+        "What boundary should we keep?",
+        "[from-auto][conservative_default] Avoid authentication, credentials, "
+        "and production deployment per the conservative default.",
+    )
+
+    result = finalize_safe_defaultable_gaps(
+        ledger,
+        goal=goal,
+        provenance="unit test",
+    )
+
+    assert result.completed
+    assert result.unsafe_gaps == ()
+    assert ledger.is_seed_ready()
+
+
+def test_safe_default_finalization_is_idempotent_against_its_own_synthesis() -> None:
+    # Pushing the safe-default synthesis back through the interview transcript
+    # records it as an answer in question_history. A second finalize call on
+    # the same ledger must still succeed — the gate must recognize its own
+    # synthesis (tagged with the [from-auto] prefix) as policy output, not
+    # as new user-asserted unsafe context.
+    goal = "Build a small local CLI"
+    ledger = SeedDraftLedger.from_goal(goal)
+
+    first = finalize_safe_defaultable_gaps(
+        ledger, goal=goal, provenance="unit test pass 1"
+    )
+    assert first.completed
+    assert ledger.is_seed_ready()
+
+    # Simulate the interview driver appending the synthesis back into
+    # question_history (what _record_safe_default_synthesis does).
+    from ouroboros.auto.safe_defaults import build_safe_default_synthesis
+
+    synthesis = build_safe_default_synthesis(first)
+    assert synthesis  # sanity
+    ledger.record_qa("auto safe-default finalization", synthesis)
+
+    second = finalize_safe_defaultable_gaps(
+        ledger, goal=goal, provenance="unit test pass 2"
+    )
+    # Nothing left to default on pass 2, and the synthesis must not have
+    # poisoned the gate.
+    assert second.unsafe_gaps == ()
+    assert ledger.is_seed_ready()
+
+
 def test_safe_default_blocks_when_conservative_default_entry_authorizes_unsafe_scope() -> None:
     # CONSERVATIVE_DEFAULT entries land with status DEFAULTED but still carry
     # user-derived scope — the unsafe gate must not silently treat them as

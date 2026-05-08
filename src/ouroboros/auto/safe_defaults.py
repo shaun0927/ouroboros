@@ -121,21 +121,32 @@ _UNSAFE_CONTEXT_PATTERNS: tuple[tuple[str, str], ...] = (
 )
 
 
+# Prefix matching :pyattr:`AutoAnswer.prefixed_text` and tagging this module's
+# safe-default synthesis. ``_interview_answers`` filters on this prefix so the
+# unsafe-context gate never re-feeds policy-emitted answers (auto answers or
+# our own synthesis) back into itself — keeping safe-default finalization
+# idempotent across resume/re-finalize calls.
+_AUTO_ANSWER_PREFIX = "[from-auto]"
+_SAFE_DEFAULT_SYNTHESIS_TAG = "[safe-default-synthesis]"
+
+
 def build_safe_default_synthesis(finalization: SafeDefaultFinalization) -> str:
     """Build a synthesis answer text describing every defaulted section.
 
-    The synthesis is intended to be pushed back into the interview transcript
-    (via ``backend.answer``) so the downstream seed generator — which reads the
+    The synthesis is pushed back into the interview transcript (via
+    ``backend.answer``) so the downstream seed generator — which reads the
     persisted interview rounds, not the in-memory ledger — sees the same
-    assumptions the ledger now records.
+    assumptions the ledger now records. The text is tagged with the same
+    ``[from-auto]`` prefix that :class:`AutoAnswerer` uses so the
+    unsafe-context gate skips it on a later pass.
     """
     if not finalization.defaulted_sections:
         return ""
     lines = [
-        "Auto safe-default synthesis (max interview rounds reached). "
-        "The following conservative assumptions close the remaining required "
-        "Seed sections; treat them as auditable defaults that may be revised "
-        "if a stricter answer is required.",
+        f"{_AUTO_ANSWER_PREFIX}{_SAFE_DEFAULT_SYNTHESIS_TAG} Auto safe-default "
+        "synthesis (max interview rounds reached). The following conservative "
+        "assumptions close the remaining required Seed sections; treat them as "
+        "auditable defaults that may be revised if a stricter answer is required.",
     ]
     for section in finalization.defaulted_sections:
         spec = _SAFE_DEFAULTS.get(section)
@@ -324,11 +335,21 @@ def _interview_answers(ledger: SeedDraftLedger) -> tuple[str, ...]:
 
     Backend-authored questions are deliberately excluded because a clarifying
     question (for example "Does this deploy to production?") does not assert
-    that the deploy will happen — only the answer can.
+    that the deploy will happen — only an answer can.
+
+    Policy-authored answers are also excluded. :class:`AutoAnswerer` records
+    its own answers with a ``[from-auto]`` prefix, and this module's safe-
+    default synthesis is tagged the same way. Re-feeding either of those
+    into the unsafe-context gate would let the gate flag its own boundary
+    text on a subsequent pass and break finalization idempotence (a problem
+    visible on resume/re-finalize flows).
     """
     values: list[str] = []
     for item in ledger.question_history:
         answer = item.get("answer", "")
-        if answer:
-            values.append(answer)
+        if not answer:
+            continue
+        if answer.lstrip().startswith(_AUTO_ANSWER_PREFIX):
+            continue
+        values.append(answer)
     return tuple(values)
