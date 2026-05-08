@@ -24,7 +24,11 @@ from ouroboros.auto.gap_detector import GapDetector
 from ouroboros.auto.ledger import LedgerStatus, SeedDraftLedger
 from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
 from ouroboros.auto.repo_context import repo_auto_answer_context
-from ouroboros.auto.safe_defaults import finalize_safe_defaultable_gaps
+from ouroboros.auto.safe_defaults import (
+    SafeDefaultFinalization,
+    build_safe_default_synthesis,
+    finalize_safe_defaultable_gaps,
+)
 from ouroboros.auto.state import AutoPhase, AutoPipelineState, AutoStore
 
 log = structlog.get_logger(__name__)
@@ -263,6 +267,17 @@ class AutoInterviewDriver:
             )
             state.ledger = ledger.to_dict()
             if finalization.completed and ledger.is_seed_ready():
+                synthesis_blocker = await self._record_safe_default_synthesis(
+                    state, ledger, finalization
+                )
+                if synthesis_blocker is not None:
+                    return AutoInterviewResult(
+                        "blocked",
+                        state.interview_session_id,
+                        ledger,
+                        self.max_rounds,
+                        synthesis_blocker,
+                    )
                 state.pending_question = None
                 state.interview_completed = True
                 state.mark_progress(
@@ -407,6 +422,57 @@ class AutoInterviewDriver:
         record_authoring_backend(state)
         self._save(state)
         return AutoInterviewResult("blocked", state.interview_session_id, ledger, rounds, blocker)
+
+    async def _record_safe_default_synthesis(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+        finalization: SafeDefaultFinalization,
+    ) -> str | None:
+        """Persist the safe-default synthesis through the interview backend.
+
+        The downstream seed generator reads from the interview transcript on
+        disk, not from the auto ledger, so a ledger that becomes Seed-ready
+        only via :func:`finalize_safe_defaultable_gaps` would otherwise leave
+        the transcript missing those assumptions (Q00/ouroboros#763 review on
+        ``c072ed94``). Push a one-shot synthesis answer through
+        ``backend.answer`` so the transcript and ledger stay in sync. Returns
+        a blocker string if the synthesis cannot be persisted; ``None`` on
+        success or when there is nothing to synthesize.
+        """
+        synthesis = build_safe_default_synthesis(finalization)
+        if not synthesis or not state.interview_session_id:
+            return None
+        try:
+            synthesis_turn = _validate_turn(
+                await self._with_timeout(
+                    self.backend.answer(state.interview_session_id, synthesis),
+                    state,
+                    tool_name="interview.answer",
+                )
+            )
+        except TimeoutError as exc:
+            blocker = (
+                "safe-default synthesis could not be persisted to the interview "
+                f"transcript: {exc}"
+            )
+            state.mark_blocked(blocker, tool_name="interview.answer")
+            record_authoring_backend(state)
+            self._save(state)
+            return blocker
+        except Exception as exc:
+            blocker = f"safe-default synthesis answer failed: {exc}"
+            state.mark_blocked(blocker, tool_name="interview.answer")
+            record_authoring_backend(state)
+            self._save(state)
+            return blocker
+        state.interview_session_id = synthesis_turn.session_id
+        ledger.record_qa(
+            state.pending_question or "auto safe-default finalization",
+            synthesis,
+        )
+        state.ledger = ledger.to_dict()
+        return None
 
     async def _with_timeout(
         self, awaitable: Awaitable[InterviewTurn], state: AutoPipelineState, *, tool_name: str

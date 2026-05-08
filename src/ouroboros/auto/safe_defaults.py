@@ -115,6 +115,30 @@ _UNSAFE_CONTEXT_PATTERNS: tuple[tuple[str, str], ...] = (
 )
 
 
+def build_safe_default_synthesis(finalization: SafeDefaultFinalization) -> str:
+    """Build a synthesis answer text describing every defaulted section.
+
+    The synthesis is intended to be pushed back into the interview transcript
+    (via ``backend.answer``) so the downstream seed generator — which reads the
+    persisted interview rounds, not the in-memory ledger — sees the same
+    assumptions the ledger now records.
+    """
+    if not finalization.defaulted_sections:
+        return ""
+    lines = [
+        "Auto safe-default synthesis (max interview rounds reached). "
+        "The following conservative assumptions close the remaining required "
+        "Seed sections; treat them as auditable defaults that may be revised "
+        "if a stricter answer is required.",
+    ]
+    for section in finalization.defaulted_sections:
+        spec = _SAFE_DEFAULTS.get(section)
+        if spec is None:
+            continue
+        lines.append(f"- {section}: {spec.value} ({spec.rationale})")
+    return "\n".join(lines)
+
+
 def finalize_safe_defaultable_gaps(
     ledger: SeedDraftLedger,
     *,

@@ -217,10 +217,13 @@ def test_seed_draft_ledger_uses_later_repeated_non_goal_as_correction() -> None:
 
 @pytest.mark.asyncio
 async def test_interview_driver_finalizes_safe_defaults_after_max_rounds(tmp_path) -> None:
+    answer_calls: list[tuple[str, str]] = []
+
     async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
         return InterviewTurn("What should we verify?", "interview_1")
 
-    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+    async def answer(session_id: str, text: str) -> InterviewTurn:
+        answer_calls.append((session_id, text))
         return InterviewTurn("What else?", session_id, seed_ready=False)
 
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
@@ -243,6 +246,51 @@ async def test_interview_driver_finalizes_safe_defaults_after_max_rounds(tmp_pat
     assert final_actor.status == LedgerStatus.DEFAULTED
     assert final_actor.source == LedgerSource.ASSUMPTION
     assert any("safe-default policy" in item for item in final_actor.evidence)
+    # Synthesis must be persisted to the interview transcript so the seed
+    # generator (which reads the transcript) sees the same assumptions the
+    # ledger now records — guards against the ledger/transcript split-brain.
+    assert any(
+        "safe-default synthesis" in text.lower() for _sid, text in answer_calls
+    ), "expected safe-default synthesis to be pushed through backend.answer"
+    synthesis_text = next(
+        text for _sid, text in answer_calls if "safe-default synthesis" in text.lower()
+    )
+    assert "actors" in synthesis_text
+    assert any(
+        "safe-default" in item.get("answer", "").lower() for item in ledger.question_history
+    )
+
+
+@pytest.mark.asyncio
+async def test_interview_driver_blocks_when_safe_default_synthesis_rejected(tmp_path) -> None:
+    call_count = 0
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What should we verify?", "interview_1")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return InterviewTurn("What else?", session_id, seed_ready=False)
+        msg = "interview backend refuses post-bound synthesis"
+        raise RuntimeError(msg)
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+        timeout_seconds=1,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "blocked"
+    assert state.phase == AutoPhase.BLOCKED
+    assert "safe-default synthesis" in (result.blocker or "").lower()
+    assert state.interview_completed is False
 
 
 def test_safe_default_blocks_when_interview_answer_introduces_unsafe_context() -> None:
