@@ -272,25 +272,27 @@ class AutoInterviewDriver:
                 synthesis_blocker = await self._record_safe_default_synthesis(
                     state, ledger, finalization
                 )
-                if synthesis_blocker is not None:
-                    return AutoInterviewResult(
-                        "blocked",
-                        state.interview_session_id,
-                        ledger,
-                        self.max_rounds,
-                        synthesis_blocker,
+                if synthesis_blocker is None:
+                    state.pending_question = None
+                    state.interview_completed = True
+                    state.mark_progress(
+                        "auto interview finalized safe-defaultable gaps at max rounds",
+                        tool_name="interview_driver",
                     )
-                state.pending_question = None
-                state.interview_completed = True
-                state.mark_progress(
-                    "auto interview finalized safe-defaultable gaps at max rounds",
-                    tool_name="interview_driver",
-                )
-                self._save(state)
-                return AutoInterviewResult(
-                    "seed_ready", state.interview_session_id, ledger, self.max_rounds
-                )
-            gaps = ", ".join(finalization.unsafe_gaps or ledger.open_gaps())
+                    self._save(state)
+                    return AutoInterviewResult(
+                        "seed_ready", state.interview_session_id, ledger, self.max_rounds
+                    )
+                # Synthesis could not be persisted to the interview transcript —
+                # roll back the safe-default entries so ledger.open_gaps() and
+                # the blocker message reflect the genuinely unresolved state.
+                # Without this, downstream consumers of the convergence
+                # contract (interview stalled → name the unresolved sections)
+                # would see an apparently complete ledger paired with a block.
+                _revert_safe_default_entries(ledger, finalization.defaulted_sections)
+                state.ledger = ledger.to_dict()
+            gaps_list = finalization.unsafe_gaps or tuple(ledger.open_gaps())
+            gaps = ", ".join(gaps_list)
             blocker = f"auto interview reached max rounds with unresolved gaps: {gaps}"
             state.mark_blocked(blocker, tool_name="interview_driver")
             record_authoring_backend(state)
@@ -477,20 +479,14 @@ class AutoInterviewDriver:
                     )
                 )
             except TimeoutError as exc:
-                blocker = (
+                return (
                     "safe-default synthesis could not be persisted to the "
                     f"interview transcript: {exc}"
                 )
-                state.mark_blocked(blocker, tool_name="interview.answer")
-                record_authoring_backend(state)
-                self._save(state)
-                return blocker
+                # Caller is responsible for marking the state blocked so the
+                # final blocker message reflects the rolled-back ledger.
             except Exception as exc:
-                blocker = f"safe-default synthesis answer failed: {exc}"
-                state.mark_blocked(blocker, tool_name="interview.answer")
-                record_authoring_backend(state)
-                self._save(state)
-                return blocker
+                return f"safe-default synthesis answer failed: {exc}"
             state.interview_session_id = turn.session_id
             if attempt == 0:
                 ledger.record_qa(
@@ -500,18 +496,14 @@ class AutoInterviewDriver:
                 state.ledger = ledger.to_dict()
             if turn.seed_ready or turn.completed:
                 return None
-        # The backend still has not honoured the completion signal. Block
-        # rather than declare seed_ready against a transcript that still
-        # contains unanswered turns.
-        blocker = (
+        # The backend still has not honoured the completion signal. Caller
+        # rolls back the safe-default entries and emits the canonical
+        # "unresolved gaps" blocker; we just signal the failure here.
+        return (
             "interview backend did not honour the safe-default completion "
             f"signal within {self._SYNTHESIS_COMPLETION_MAX_ATTEMPTS} attempts; "
             "transcript would still contain an unanswered question."
         )
-        state.mark_blocked(blocker, tool_name="interview.answer")
-        record_authoring_backend(state)
-        self._save(state)
-        return blocker
 
     async def _with_timeout(
         self, awaitable: Awaitable[InterviewTurn], state: AutoPipelineState, *, tool_name: str
@@ -624,6 +616,28 @@ class FunctionInterviewBackend:
         if self._is_session_persisted is None:
             return False
         return bool(self._is_session_persisted(session_id))
+
+
+def _revert_safe_default_entries(
+    ledger: SeedDraftLedger, defaulted_sections: tuple[str, ...]
+) -> None:
+    """Remove the safe-default policy's entries from the named sections.
+
+    Used when the safe-default synthesis cannot be persisted to the interview
+    transcript: rolling back the policy's own DEFAULTED entries restores the
+    ledger to its pre-finalization state so ``open_gaps()`` and the block
+    message report the genuinely unresolved sections to downstream consumers
+    of the convergence contract.
+    """
+    for section_name in defaulted_sections:
+        section = ledger.sections.get(section_name)
+        if section is None:
+            continue
+        section.entries = [
+            entry
+            for entry in section.entries
+            if not entry.key.endswith(".safe_default_finalization")
+        ]
 
 
 def _generate_interview_id() -> str:

@@ -290,8 +290,20 @@ async def test_interview_driver_blocks_when_safe_default_synthesis_rejected(tmp_
 
     assert result.status == "blocked"
     assert state.phase == AutoPhase.BLOCKED
-    assert "safe-default synthesis" in (result.blocker or "").lower()
+    # Synthesis failure rolls back the safe-default entries so the canonical
+    # "unresolved gaps" blocker is reported and the ledger reflects the
+    # genuinely unresolved sections — preserving the convergence contract.
+    assert "unresolved gaps" in (result.blocker or "")
     assert state.interview_completed is False
+    assert ledger.open_gaps(), (
+        "rolled-back ledger must expose at least one unresolved gap so the "
+        "convergence contract still names actionable sections"
+    )
+    assert not any(
+        entry.key.endswith(".safe_default_finalization")
+        for section in ledger.sections.values()
+        for entry in section.entries
+    ), "safe-default policy entries must be reverted on synthesis failure"
 
 
 @pytest.mark.asyncio
@@ -372,8 +384,11 @@ async def test_interview_driver_blocks_when_backend_ignores_synthesis_completion
 
     assert result.status == "blocked"
     assert state.phase == AutoPhase.BLOCKED
-    assert "completion signal" in (result.blocker or "").lower()
+    # Backend ignored the completion signal → synthesis failed → ledger is
+    # rolled back and the canonical "unresolved gaps" blocker is emitted.
+    assert "unresolved gaps" in (result.blocker or "")
     assert state.interview_completed is False
+    assert ledger.open_gaps()
 
 
 def test_safe_default_blocks_when_interview_answer_introduces_unsafe_context() -> None:
