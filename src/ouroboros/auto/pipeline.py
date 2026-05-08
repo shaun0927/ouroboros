@@ -66,6 +66,10 @@ _RALPH_BLOCKED_STOP_REASONS: frozenset[str] = frozenset(
 # per-tool blockers without scanning the error message.
 PIPELINE_DEADLINE_TOOL_NAME = "pipeline_deadline"
 _RESUME_EXPIRED_MESSAGE = "pipeline_timeout (deadline expired before resume)"
+# Mirrors RalphHandler.MIN_MAX_TOTAL_SECONDS. The auto layer checks this before
+# dispatch so an insufficient top-level pipeline budget remains a pipeline
+# timeout, not a Ralph argument-validation failure.
+_MIN_RALPH_MAX_TOTAL_SECONDS = 1.0
 
 
 _RETRY_GUIDANCE_PHRASE = "retried once with idempotency key"
@@ -304,7 +308,12 @@ class AutoPipeline:
         elif state.phase == AutoPhase.REPAIR:
             state.transition(AutoPhase.REVIEW, "resuming review after repair checkpoint")
             self._save(state)
-        elif state.phase not in {AutoPhase.SEED_GENERATION, AutoPhase.REVIEW, AutoPhase.RUN}:
+        elif state.phase not in {
+            AutoPhase.SEED_GENERATION,
+            AutoPhase.REVIEW,
+            AutoPhase.RUN,
+            AutoPhase.RALPH_HANDOFF,
+        }:
             state.mark_blocked(
                 f"Cannot resume auto pipeline from {state.phase.value} without persisted Seed artifact",
                 tool_name="auto_pipeline",
@@ -415,6 +424,9 @@ class AutoPipeline:
             )
             self._save(state)
             return self._result(state, ledger, blocker=state.last_error)
+
+        if state.phase == AutoPhase.RALPH_HANDOFF:
+            return self._resume_ralph_handoff(state, ledger, review=review)
 
         if self._enforce_deadline(state):
             return self._result(state, ledger, blocker=state.last_error)
@@ -784,7 +796,23 @@ class AutoPipeline:
         self._save(state)
         max_total_seconds: float | None = None
         if state.deadline_at is not None:
-            max_total_seconds = max(0.0, state.deadline_at - time.monotonic())
+            remaining = state.deadline_at - time.monotonic()
+            if remaining < _MIN_RALPH_MAX_TOTAL_SECONDS:
+                message = (
+                    "pipeline_timeout: remaining deadline budget "
+                    f"{max(0.0, remaining):.1f}s is below Ralph minimum "
+                    f"{_MIN_RALPH_MAX_TOTAL_SECONDS:.0f}s during {state.phase.value}"
+                )
+                state.mark_blocked(message, tool_name=PIPELINE_DEADLINE_TOOL_NAME)
+                self._save(state)
+                return self._result(
+                    state,
+                    ledger,
+                    review=review,
+                    blocker=state.last_error,
+                    run_subagent=run_subagent,
+                )
+            max_total_seconds = remaining
         try:
             ralph_meta = await self.ralph_starter(
                 seed,
@@ -849,6 +877,45 @@ class AutoPipeline:
         return self._result(
             state, ledger, review=review, blocker=state.last_error, run_subagent=run_subagent
         )
+
+    def _resume_ralph_handoff(
+        self,
+        state: AutoPipelineState,
+        ledger: SeedDraftLedger,
+        *,
+        review: SeedReview | None,
+    ) -> AutoPipelineResult:
+        """Resume a persisted Ralph handoff checkpoint without duplicate dispatch."""
+        if state.ralph_dispatch_mode == "plugin":
+            state.run_handoff_guidance = (
+                state.run_handoff_guidance
+                or "Ralph loop delegated to the OpenCode plugin child session. "
+                "Track progress through the OpenCode Task widget; this auto "
+                "session will not block on the loop's completion."
+            )
+            state.transition(
+                AutoPhase.COMPLETE,
+                "resumed OpenCode plugin Ralph delegation checkpoint",
+            )
+            self._save(state)
+            return self._result(state, ledger, review=review)
+
+        handle = state.ralph_job_id or state.ralph_lineage_id
+        if handle:
+            state.run_handoff_guidance = (
+                "Ralph handoff already has a persisted tracking handle; resume did "
+                "not start duplicate run or Ralph work. Track the existing Ralph "
+                f"lineage/job: {handle}."
+            )
+        else:
+            state.run_handoff_guidance = (
+                "Ralph handoff checkpoint has no persisted Ralph job handle; resume "
+                "did not start duplicate run or Ralph work. Inspect the Ralph runtime "
+                "before dispatching manually."
+            )
+        state.mark_progress(state.run_handoff_guidance, tool_name="ralph_starter")
+        self._save(state)
+        return self._result(state, ledger, review=review)
 
     def _enforce_deadline(self, state: AutoPipelineState) -> bool:
         """Return True when the pipeline must abort because the deadline expired.

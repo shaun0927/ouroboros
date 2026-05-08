@@ -9,6 +9,7 @@ pre-#773 result shape.
 from __future__ import annotations
 
 from dataclasses import asdict
+import time
 from typing import Any
 
 import pytest
@@ -17,6 +18,7 @@ from ouroboros.auto.grading import GradeResult, SeedGrade
 from ouroboros.auto.interview_driver import AutoInterviewResult
 from ouroboros.auto.pipeline import (
     _RALPH_BLOCKED_STOP_REASONS,
+    PIPELINE_DEADLINE_TOOL_NAME,
     AutoPipeline,
     AutoPipelineResult,
 )
@@ -343,6 +345,87 @@ async def test_ralph_plugin_delegation_completes_auto(tmp_path) -> None:
     # Plugin guidance must surface for the operator.
     assert state.run_handoff_guidance is not None
     assert "OpenCode" in state.run_handoff_guidance
+
+
+# ---------------------------------------------------------------------------
+# Resume safety — persisted RALPH_HANDOFF must not duplicate run/Ralph work.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ralph_handoff_resume_does_not_dispatch_duplicate_work(tmp_path) -> None:
+    state = _state_at_run_phase(tmp_path)
+    state.run_start_attempted = True
+    state.run_handoff_status = "started"
+    state.job_id = "job_run_existing"
+    state.execution_id = "execution_existing"
+    state.run_session_id = "session_existing"
+    state.ralph_lineage_id = "ralph-seed_test_001-auto_abc"
+    state.ralph_job_id = "job_ralph_existing"
+    state.ralph_dispatch_mode = "job"
+    state.transition(AutoPhase.RALPH_HANDOFF, "persisted ralph checkpoint")
+
+    async def run_starter(_seed: Seed) -> dict[str, Any]:  # pragma: no cover
+        raise AssertionError("resume must not start a duplicate run")
+
+    async def ralph_starter(_seed: Seed, **_kwargs: Any) -> dict[str, Any]:  # pragma: no cover
+        raise AssertionError("resume must not start a duplicate Ralph handoff")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=run_starter,
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "ralph_handoff"
+    assert result.resume_capability.value == "resume"
+    assert state.phase is AutoPhase.RALPH_HANDOFF
+    assert state.job_id == "job_run_existing"
+    assert state.ralph_job_id == "job_ralph_existing"
+    assert state.last_tool_name == "ralph_starter"
+    assert state.last_error is None
+    assert state.run_handoff_guidance is not None
+    assert "did not start duplicate run or Ralph work" in state.run_handoff_guidance
+
+
+# ---------------------------------------------------------------------------
+# Pipeline deadline budget — insufficient Ralph budget is pipeline_timeout.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_insufficient_ralph_deadline_budget_blocks_as_pipeline_timeout(tmp_path) -> None:
+    state = _state_at_run_phase(tmp_path)
+    state.deadline_at = time.monotonic() + 0.25
+    state.deadline_at_epoch = time.time() + 0.25
+
+    async def ralph_starter(_seed: Seed, **_kwargs: Any) -> dict[str, Any]:  # pragma: no cover
+        raise AssertionError("insufficient pipeline budget must not call ralph_starter")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.phase is AutoPhase.BLOCKED
+    assert state.last_tool_name == PIPELINE_DEADLINE_TOOL_NAME
+    assert state.last_error is not None
+    assert "pipeline_timeout" in state.last_error
+    assert "below Ralph minimum" in state.last_error
+    assert state.ralph_job_id is None
+    assert state.ralph_dispatch_mode is None
 
 
 # ---------------------------------------------------------------------------
