@@ -1,0 +1,274 @@
+"""Tests for the implicit `ooo <plugin> <command>` dispatch fallback.
+
+Covers the three behavior requirements the bot's review locked in:
+
+  1. Successful plugin invocations surface the plugin's actual
+     stdout/stderr to the user's terminal — `result.message` alone is
+     not enough because successful runs typically have an empty
+     message.
+  2. Blocked invocations (trust failure, disabled plugin, digest
+     drift) MUST exit with a non-zero status so shells/CI treat them
+     as failures. The firewall returns `exit_code=None` for those, so
+     the dispatcher has to map status → click exit code itself.
+  3. Commands flagged `requires_confirmation: true` MUST receive a
+     real interactive prompt; the firewall's default
+     `lambda _msg: True` (auto-confirm) bypasses the only
+     destructive-action gate the contract has.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import subprocess
+
+from click.testing import CliRunner
+import pytest
+
+from ouroboros.cli.commands.plugin_dispatch import build_plugin_dispatch_command
+from ouroboros.plugin.lockfile import LockEntry, Lockfile
+from ouroboros.plugin.trust_store import TrustStore
+
+REFERENCE_MANIFEST: dict = {
+    "schema_version": "0.1",
+    "name": "github-pr-ops",
+    "version": "0.1.0",
+    "description": "Reference plugin used by the dispatcher tests.",
+    "source": {"type": "local_path", "path": "plugins/github-pr-ops"},
+    "commands": [
+        {
+            "namespace": "github-pr",
+            "name": "review",
+            "summary": "Review a pull request and summarize readiness.",
+            "usage": "ooo github-pr review <pull-request-url>",
+            "risk": "read_only",
+            "requires_confirmation": False,
+        },
+        {
+            "namespace": "github-pr",
+            "name": "merge",
+            "summary": "Merge a PR.",
+            "usage": "ooo github-pr merge <url>",
+            "risk": "destructive",
+            "requires_confirmation": True,
+        },
+    ],
+    "capabilities": [{"name": "ledger", "access": "write"}],
+    "permissions": [
+        {"scope": "github:read", "risk": "read_only", "required": True},
+    ],
+    "entrypoint": {"type": "command", "command": "python -m fake_plugin"},
+}
+
+
+def _stage_installed_plugin(
+    *,
+    home_root: Path,
+    lockfile_path: Path,
+    trust_root: Path,
+    digest: str = "sha256:" + "a" * 64,
+) -> Path:
+    """Build an on-disk install of the reference plugin, write a
+    lockfile entry pointing at it, and return the plugin home path."""
+    plugin_home = home_root / REFERENCE_MANIFEST["name"]
+    plugin_home.mkdir(parents=True, exist_ok=True)
+    (plugin_home / "ouroboros.plugin.json").write_text(json.dumps(REFERENCE_MANIFEST))
+    Lockfile(lockfile_path).add(
+        LockEntry(
+            name=REFERENCE_MANIFEST["name"],
+            version=REFERENCE_MANIFEST["version"],
+            source_kind="local",
+            repository=None,
+            git_sha=None,
+            manifest_checksum="sha256:0" * 8,
+            installed_at="2026-05-08T00:00:00Z",
+            plugin_home=str(plugin_home),
+            source_type="local_path",
+            source_identity=str(plugin_home),
+            artifact_digest=digest,
+        )
+    )
+    TrustStore(root=trust_root).grant(
+        plugin=REFERENCE_MANIFEST["name"],
+        version=REFERENCE_MANIFEST["version"],
+        scope="github:read",
+        granted_by="user:test",
+        source_type="local_path",
+        source_identity=str(plugin_home),
+        artifact_digest=digest,
+    )
+    return plugin_home
+
+
+@pytest.fixture
+def stub_default_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
+    """Point the dispatcher's DEFAULT_LOCKFILE_PATH / DEFAULT_TRUST_ROOT
+    at tmp paths so the test never touches the real ~/.ouroboros."""
+    fake_lockfile = tmp_path / "plugins.lock"
+    fake_trust = tmp_path / "trust"
+    fake_homes = tmp_path / "homes"
+    fake_homes.mkdir()
+    monkeypatch.setattr(
+        "ouroboros.cli.commands.plugin_dispatch.DEFAULT_LOCKFILE_PATH", fake_lockfile
+    )
+    monkeypatch.setattr("ouroboros.cli.commands.plugin_dispatch.DEFAULT_TRUST_ROOT", fake_trust)
+    return {"lockfile": fake_lockfile, "trust": fake_trust, "homes": fake_homes}
+
+
+def test_dispatch_returns_none_for_unknown_plugin_name(
+    stub_default_paths: dict[str, Path],
+) -> None:
+    """When no installed plugin claims the name, the dispatcher MUST
+    return None so typer's normal "no such command" error fires."""
+    cmd = build_plugin_dispatch_command("does-not-exist")
+    assert cmd is None
+
+
+def test_dispatch_runs_subprocess_with_artifact_digest_recomputed(
+    stub_default_paths: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: the dispatcher resolves the plugin, computes the
+    digest match, and surfaces the captured subprocess stdout to the
+    user's terminal — solving the bot's BLOCKING #3 (success cases
+    appearing to do nothing).
+    """
+    from ouroboros.plugin.digest import canonical_tree_hash
+
+    plugin_home = _stage_installed_plugin(
+        home_root=stub_default_paths["homes"],
+        lockfile_path=stub_default_paths["lockfile"],
+        trust_root=stub_default_paths["trust"],
+    )
+    # Re-stamp the lockfile + trust with the actual digest of the
+    # staged plugin home (since the helper used a placeholder).
+    real_digest = canonical_tree_hash(plugin_home)
+    Lockfile(stub_default_paths["lockfile"]).add(
+        LockEntry(
+            name="github-pr-ops",
+            version="0.1.0",
+            source_kind="local",
+            repository=None,
+            git_sha=None,
+            manifest_checksum="sha256:0" * 8,
+            installed_at="2026-05-08T00:00:00Z",
+            plugin_home=str(plugin_home),
+            source_type="local_path",
+            source_identity=str(plugin_home),
+            artifact_digest=real_digest,
+        )
+    )
+    TrustStore(root=stub_default_paths["trust"]).grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+        source_type="local_path",
+        source_identity=str(plugin_home),
+        artifact_digest=real_digest,
+    )
+
+    captured_stdout = b"PR #1 looks good to merge\n"
+
+    def _spy_runner(argv, **kwargs):
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout=captured_stdout, stderr=b""
+        )
+
+    monkeypatch.setattr("ouroboros.plugin.firewall.subprocess.run", _spy_runner)
+
+    cmd = build_plugin_dispatch_command("github-pr-ops")
+    assert cmd is not None
+    runner = CliRunner()
+    result = runner.invoke(cmd, ["review", "https://example.com/pr/1"])
+    assert result.exit_code == 0
+    # The plugin's stdout reaches the user's terminal — this is the
+    # core regression catch.
+    assert "PR #1 looks good to merge" in result.stdout
+
+
+def test_dispatch_blocked_invocation_exits_nonzero(
+    stub_default_paths: dict[str, Path],
+) -> None:
+    """When the firewall blocks (here: digest drift), the dispatcher
+    must exit non-zero. ``InvocationResult.exit_code`` is None on the
+    blocked path; mapping it to 0 would let shells/CI treat refused
+    invocations as success.
+
+    Regression catch for the bot's BLOCKING #2.
+    """
+    _stage_installed_plugin(
+        home_root=stub_default_paths["homes"],
+        lockfile_path=stub_default_paths["lockfile"],
+        trust_root=stub_default_paths["trust"],
+        # Lockfile records a digest that doesn't match the on-disk
+        # bytes, so the firewall returns blocked / trust_subject_changed.
+        digest="sha256:" + "f" * 64,
+    )
+    cmd = build_plugin_dispatch_command("github-pr-ops")
+    assert cmd is not None
+    runner = CliRunner()
+    result = runner.invoke(cmd, ["review", "https://example.com/pr/1"])
+    assert result.exit_code != 0, (
+        f"blocked invocation must exit non-zero; got {result.exit_code}; output={result.output!r}"
+    )
+
+
+def test_dispatch_requires_confirmation_command_prompts_user(
+    stub_default_paths: dict[str, Path],
+) -> None:
+    """A command marked `requires_confirmation: true` must produce a
+    real prompt. The firewall's default `confirm` callback
+    auto-approves — the dispatcher MUST override that with a Click
+    interactive prompt that defaults to no. Declining the prompt
+    blocks the invocation without launching the subprocess.
+
+    Regression catch for the bot's BLOCKING #1.
+    """
+    from ouroboros.plugin.digest import canonical_tree_hash
+
+    plugin_home = _stage_installed_plugin(
+        home_root=stub_default_paths["homes"],
+        lockfile_path=stub_default_paths["lockfile"],
+        trust_root=stub_default_paths["trust"],
+    )
+    real_digest = canonical_tree_hash(plugin_home)
+    Lockfile(stub_default_paths["lockfile"]).add(
+        LockEntry(
+            name="github-pr-ops",
+            version="0.1.0",
+            source_kind="local",
+            repository=None,
+            git_sha=None,
+            manifest_checksum="sha256:0" * 8,
+            installed_at="2026-05-08T00:00:00Z",
+            plugin_home=str(plugin_home),
+            source_type="local_path",
+            source_identity=str(plugin_home),
+            artifact_digest=real_digest,
+        )
+    )
+    TrustStore(root=stub_default_paths["trust"]).grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+        source_type="local_path",
+        source_identity=str(plugin_home),
+        artifact_digest=real_digest,
+    )
+
+    cmd = build_plugin_dispatch_command("github-pr-ops")
+    assert cmd is not None
+    runner = CliRunner()
+    # Feed "n\n" to the prompt → declined → blocked, exit non-zero,
+    # subprocess never launched.
+    result = runner.invoke(
+        cmd,
+        ["merge", "https://example.com/pr/1"],
+        input="n\n",
+    )
+    assert result.exit_code != 0, (
+        f"declined confirmation must produce a non-zero exit; "
+        f"got {result.exit_code}; stdout={result.stdout!r}"
+    )

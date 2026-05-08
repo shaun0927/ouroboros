@@ -117,6 +117,14 @@ def build_plugin_dispatch_command(cmd_name: str) -> click.Command | None:
         )
         plugin_home = Path(entry.plugin_home).expanduser()
 
+        # Per the locked RFC ("Invocation Contract / Confirmation gate"),
+        # commands marked `requires_confirmation: true` MUST receive a
+        # real prompt — not the firewall's auto-confirm default. Wire a
+        # Click confirmation that defaults to "no" so a bare Enter
+        # rejects the destructive action.
+        def _interactive_confirm(prompt: str) -> bool:
+            return click.confirm(prompt, default=False)
+
         # Discard events here — this dispatcher is the user-facing
         # surface; the audit trail is owned by the ledger writer the
         # firewall is wired to in production. We collect events into a
@@ -134,22 +142,43 @@ def build_plugin_dispatch_command(cmd_name: str) -> click.Command | None:
             expected_source_identity=entry.source_identity or None,
             expected_artifact_digest=entry.artifact_digest or None,
             is_disabled=is_disabled,
+            confirm=_interactive_confirm,
         )
 
-        # The firewall captured stdout/stderr to compute the bounded-
-        # payload hash on the audit event. We have only the hashes
-        # here; the raw bytes are not exposed by `InvocationResult` by
-        # design (audit-side bounded-payload contract). For terminal
-        # UX we print the structured `result.message` when present,
-        # plus the standard exit code, which gives the user the
-        # outcome without re-deriving it from the hash. The full
-        # stdout/stderr passthrough is wired in #733's E2E proof,
-        # which extends `InvocationResult` to carry raw streams when
-        # the dispatcher (not the audit log) is the consumer.
-        if result.message:
-            target = sys.stdout if result.status == "success" else sys.stderr
-            print(result.message, file=target)
-        raise click.exceptions.Exit(code=result.exit_code or 0)
+        # Surface the plugin's actual stdout/stderr to the user's
+        # terminal. The firewall captured them as bytes for the audit
+        # hash; the dispatcher writes them back through to the user
+        # without re-decoding so binary output (color codes, mixed
+        # encodings) round-trips faithfully. The audit ledger never
+        # sees these raw bytes — only the sha256 hash — so the
+        # bounded-payload contract is preserved.
+        if result.stdout_bytes:
+            sys.stdout.buffer.write(result.stdout_bytes)
+            sys.stdout.flush()
+        if result.stderr_bytes:
+            sys.stderr.buffer.write(result.stderr_bytes)
+            sys.stderr.flush()
+        # Print the structured failure/blocked message after the raw
+        # streams so it's the last thing the user sees and is clearly
+        # attributable to the firewall, not the plugin itself.
+        if result.status != "success" and result.message:
+            print(result.message, file=sys.stderr)
+
+        # Exit code mapping. The firewall returns ``exit_code=None``
+        # for the blocked path (trust failure, disabled plugin, digest
+        # drift, declined confirmation): those are NOT user successes
+        # and shells/CI must see a non-zero status. Map blocked/failed
+        # without a captured exit code to 1; preserve real subprocess
+        # exit codes when present.
+        if result.exit_code is not None:
+            click_exit_code = result.exit_code
+        elif result.status == "success":
+            click_exit_code = 0
+        else:
+            # Blocked or failed without a launched subprocess — use 1
+            # so shells / CI treat the refused invocation as failure.
+            click_exit_code = 1
+        raise click.exceptions.Exit(code=click_exit_code)
 
     _dispatch.help = (
         f"Dispatch a command to the installed plugin {program.name!r} "

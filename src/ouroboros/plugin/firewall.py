@@ -53,11 +53,26 @@ ConfirmFn = Callable[[str], bool]
 
 @dataclass(frozen=True)
 class InvocationResult:
+    """Outcome of a plugin invocation through the firewall.
+
+    `stdout_sha256` / `stderr_sha256` are the hashes that land on the
+    audit ledger (the RFC's bounded-payload contract). The raw
+    `stdout_bytes` / `stderr_bytes` fields are the captured streams
+    themselves — kept in memory for in-process consumers (e.g., the
+    `ooo <plugin>` dispatcher needs to re-emit plugin output to the
+    user's terminal). Audit-event emission never reads those bytes
+    directly; only the hashes go on the wire. They default to `None`
+    for blocked/failed paths where the entrypoint never produced
+    output.
+    """
+
     status: Literal["success", "blocked", "failed"]
     exit_code: int | None = None
     message: str = ""
     stdout_sha256: str | None = None
     stderr_sha256: str | None = None
+    stdout_bytes: bytes | None = None
+    stderr_bytes: bytes | None = None
     events: tuple[dict, ...] = field(default_factory=tuple)
 
 
@@ -737,6 +752,8 @@ def invoke_plugin(
             exit_code=0,
             stdout_sha256=stdout_hash,
             stderr_sha256=stderr_hash,
+            stdout_bytes=stdout_bytes,
+            stderr_bytes=stderr_bytes,
             events=tuple(emitted),
         )
     else:
@@ -763,6 +780,8 @@ def invoke_plugin(
             message=message,
             stdout_sha256=stdout_hash,
             stderr_sha256=stderr_hash,
+            stdout_bytes=stdout_bytes,
+            stderr_bytes=stderr_bytes,
             events=tuple(emitted),
         )
 
