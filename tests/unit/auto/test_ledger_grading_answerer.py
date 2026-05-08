@@ -797,14 +797,24 @@ def test_auto_answerer_meta_verify_questions_stay_on_verification_route() -> Non
     the same actor-noun + permission-modal + verify-verb tokens as user
     feature questions, but the OUTER subject is engineering / first-person
     plural — they ask about QA, not a product feature.  Flagged by
-    ouroboros-agent on commit 4ae40d4.  ``_has_user_verify_feature_shape``
-    now requires the absence of a first-person-plural meta subject.
+    ouroboros-agent on commit 4ae40d4 (English/French) and again on commit
+    5e60302 for cases where other product-behavior matchers (English
+    ``should…delete`` or Spanish ``pueden…eliminar``) match the inner
+    permission clause.  Routing now demotes VERIFICATION only when the
+    user-verify shape itself matches, not whenever any product-behavior
+    matcher fires.
     """
     answerer = AutoAnswerer()
     questions = (
         "Should we verify users can reset passwords?",
         "How should we validate admins can log in?",
         "Devrions-nous vérifier que les utilisateurs peuvent se connecter?",
+        # Bot's commit-5e60302 reproductions (inner permission clause
+        # triggers other product-behavior matchers too).
+        "Should we verify users can delete branches?",
+        "Devrions-nous vérifier que les utilisateurs peuvent supprimer des branches?",
+        "¿Deberíamos verificar que los usuarios pueden eliminar ramas?",
+        "我们是否应该验证用户可以删除分支？",
     )
     for question in questions:
         answer = answerer.answer(question, SeedDraftLedger.from_goal("Build an auth service"))

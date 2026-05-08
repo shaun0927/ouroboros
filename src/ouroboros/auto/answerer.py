@@ -135,10 +135,21 @@ class AutoAnswerer:
         # ``"用户可以验证他们的电子邮件吗？"``, ``"사용자가 이메일을
         # 확인할 수 있나요?"``) preserve the product feature contract instead
         # of being collapsed into a generic verification-plan template.
-        product_present = QuestionIntent.PRODUCT_BEHAVIOR in intents
-        if QuestionIntent.VERIFICATION in intents and not product_present:
+        # Demote VERIFICATION / ACCEPTANCE_CRITERIA in favour of
+        # PRODUCT_BEHAVIOR ONLY when the question is a user-facing
+        # verification feature (actor + permission modal + verify-verb,
+        # without a first-person-plural meta subject).  Other
+        # product-behavior matchers (English ``should…delete``, Spanish
+        # ``pueden…eliminar``, etc.) match the INNER permission clause of
+        # meta-verify questions like ``"Should we verify users can delete
+        # branches?"`` — those should still route to ``_verification_answer``,
+        # not ``_product_behavior_answer``.
+        demote_for_user_verify = (
+            QuestionIntent.PRODUCT_BEHAVIOR in intents and _has_user_verify_feature_shape(lowered)
+        )
+        if QuestionIntent.VERIFICATION in intents and not demote_for_user_verify:
             return self._verification_answer(question)
-        if QuestionIntent.ACCEPTANCE_CRITERIA in intents and not product_present:
+        if QuestionIntent.ACCEPTANCE_CRITERIA in intents and not demote_for_user_verify:
             return self._feature_acceptance_answer(question)
         if QuestionIntent.RUNTIME_CONTEXT in intents and _should_preserve_runtime_route(lowered):
             answer = self._runtime_answer(question, context)
@@ -552,6 +563,19 @@ _INTENT_CUES: Mapping[QuestionIntent, tuple[str, ...]] = {
         "verification",
         "validate",
         "validation",
+        # Spanish / German verify-verb infinitives so meta-verify questions
+        # like ``"¿Deberíamos verificar que los usuarios pueden eliminar
+        # ramas?"`` and ``"Sollten wir verifizieren, ob Benutzer Branches
+        # löschen können?"`` still classify as VERIFICATION (the routing
+        # layer then preserves the verification path because the question
+        # has a first-person-plural meta subject).
+        "verificar",
+        "comprobar",
+        "confirmar",
+        "verifizieren",
+        "validieren",
+        "bestätigen",
+        "bestaetigen",
         # NB: ``"test"`` is intentionally NOT in this list — bare substring
         # matching of ``"test"`` would silently route unrelated questions
         # like ``"Should users contest charges?"`` or ``"What is the latest
@@ -1130,7 +1154,19 @@ _FIRST_PERSON_META_RE = re.compile(
     r"\b(we|us|our|ours|"
     r"nous|notre|nos|"
     r"wir|uns|unser|unsere|unseren|unserem|unserer|"
-    r"nosotros|nosotras|nuestro|nuestra|nuestros|nuestras)\b"
+    r"nosotros|nosotras|nuestro|nuestra|nuestros|nuestras|"
+    # Spanish first-person plural verb forms.  ``-mos`` is unambiguously
+    # 1pp in standard usage, so these are safe meta signals.  Listing the
+    # specific common verbs keeps the matcher precise.
+    r"deber[íi]amos|debemos|deb[íi]amos|"
+    r"podr[íi]amos|podemos|pod[íi]amos|"
+    r"verificamos|verificar[íi]amos|validamos|comprobamos|confirmamos|"
+    r"necesitamos|necesitar[íi]amos|hacemos|haremos|queremos|"
+    # French first-person plural ``-ons`` verb forms.
+    r"devrions|devons|devions|"
+    r"pourrions|pouvons|pouvions|"
+    r"v[ée]rifions|v[ée]rifierions|validons|confirmons|approuvons|"
+    r"voulons|voudrions)\b"
     r"|私たち|私達|我们|我們|우리|저희"
 )
 
