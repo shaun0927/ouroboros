@@ -21,12 +21,14 @@ from this store.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 
 TRUST_SCHEMA_VERSION = "0.1"
@@ -43,6 +45,28 @@ TRUST_SCHEMA_VERSION = "0.1"
 # lives in a sibling directory so the hashed artifact stays immutable
 # under user-driven trust state changes.
 DEFAULT_TRUST_ROOT = Path.home() / ".ouroboros" / "trust"
+
+# Plugin name pattern, matching plugin.schema.json `/name`. Enforced here at
+# the persistence-API boundary so that a plugin name with path separators or
+# `..` cannot escape the trust root via `<root>/<plugin>/trust.json` and
+# read/write/delete arbitrary files. Higher layers (manifest validation,
+# manager) also reject malformed names; this is defence in depth.
+_PLUGIN_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$")
+
+
+def _validate_plugin_name(plugin: str) -> None:
+    """Reject plugin identifiers that could escape the trust root.
+
+    Raises:
+        ValueError: if ``plugin`` does not match the locked manifest name
+            pattern (lowercase alphanumeric + dashes, 3-64 chars, no leading
+            or trailing dash, no path separators).
+    """
+    if not isinstance(plugin, str) or not _PLUGIN_NAME_RE.fullmatch(plugin):
+        raise ValueError(
+            f"invalid plugin name {plugin!r}: must match "
+            r"^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$"
+        )
 
 
 @dataclass(frozen=True)
@@ -126,6 +150,7 @@ class TrustStore:
 
     def read(self, plugin: str) -> TrustRecord | None:
         """Read the trust record for `plugin`, or None if not present."""
+        _validate_plugin_name(plugin)
         path = self._path(plugin)
         if not path.is_file():
             return None
@@ -170,6 +195,39 @@ class TrustStore:
                 pass
             raise
 
+    @contextmanager
+    def _grant_lock(self, plugin: str) -> Iterator[None]:
+        """Serialize ``grant`` / ``reset`` / ``remove`` updates for one plugin.
+
+        Without this guard, two concurrent ``grant()`` calls for the same
+        plugin can both observe the same prior file and each write back a
+        one-scope payload, so the last writer silently deletes the other
+        grant — a real trust-state data-loss bug. ``Lockfile`` uses the
+        same ``fcntl.flock`` pattern; this mirrors it per-plugin so
+        cross-plugin grants don't serialize against each other.
+
+        Deliberately leaves ``trust.json.lock`` on disk after the
+        critical section: POSIX ``flock`` is attached to the inode
+        behind the lock-file path, so unlinking it would orphan the
+        inode and let a concurrent ``grant()`` open a brand-new inode
+        and run in parallel — reopening the very race the lock was
+        added to close.
+        """
+        path = self._path(plugin)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            import fcntl
+        except ImportError:  # pragma: no cover — non-POSIX platforms
+            yield
+            return
+        lock_path = path.with_suffix(path.suffix + ".lock")
+        with lock_path.open("w") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
     def grant(
         self,
         *,
@@ -197,48 +255,54 @@ class TrustStore:
 
         Idempotent: granting an already-granted scope is a no-op
         (timestamps preserved).
+
+        Concurrency-safe: the read-modify-write cycle is bracketed by
+        a per-plugin POSIX file lock so two concurrent ``grant()``
+        calls cannot drop one another's scope.
         """
+        _validate_plugin_name(plugin)
         when = when or datetime.now(tz=UTC)
         ts = when.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        existing = self.read(plugin)
-        if existing is not None and not _subject_matches(
-            existing,
-            version=version,
-            source_type=source_type,
-            source_identity=source_identity,
-            artifact_digest=artifact_digest,
-        ):
-            existing = None  # subject changed — treat as fresh
+        with self._grant_lock(plugin):
+            existing = self.read(plugin)
+            if existing is not None and not _subject_matches(
+                existing,
+                version=version,
+                source_type=source_type,
+                source_identity=source_identity,
+                artifact_digest=artifact_digest,
+            ):
+                existing = None  # subject changed — treat as fresh
 
-        granted = list(existing.granted_scopes) if existing else []
-        if all(g.scope != scope for g in granted):
-            granted.append(GrantedScope(scope=scope, granted_at=ts, granted_by=granted_by))
+            granted = list(existing.granted_scopes) if existing else []
+            if all(g.scope != scope for g in granted):
+                granted.append(GrantedScope(scope=scope, granted_at=ts, granted_by=granted_by))
 
-        payload = {
-            "schema_version": TRUST_SCHEMA_VERSION,
-            "plugin": plugin,
-            "version": version,
-            "granted_scopes": [
-                {"scope": g.scope, "granted_at": g.granted_at, "granted_by": g.granted_by}
-                for g in granted
-            ],
-        }
-        if source_type:
-            payload["source_type"] = source_type
-        if source_identity:
-            payload["source_identity"] = source_identity
-        if artifact_digest:
-            payload["artifact_digest"] = artifact_digest
-        self._write_atomic(plugin, payload)
-        return TrustRecord(
-            plugin=plugin,
-            version=version,
-            granted_scopes=tuple(granted),
-            source_type=source_type,
-            source_identity=source_identity,
-            artifact_digest=artifact_digest,
-        )
+            payload = {
+                "schema_version": TRUST_SCHEMA_VERSION,
+                "plugin": plugin,
+                "version": version,
+                "granted_scopes": [
+                    {"scope": g.scope, "granted_at": g.granted_at, "granted_by": g.granted_by}
+                    for g in granted
+                ],
+            }
+            if source_type:
+                payload["source_type"] = source_type
+            if source_identity:
+                payload["source_identity"] = source_identity
+            if artifact_digest:
+                payload["artifact_digest"] = artifact_digest
+            self._write_atomic(plugin, payload)
+            return TrustRecord(
+                plugin=plugin,
+                version=version,
+                granted_scopes=tuple(granted),
+                source_type=source_type,
+                source_identity=source_identity,
+                artifact_digest=artifact_digest,
+            )
 
     def reset_for_subject_change(
         self,
@@ -255,20 +319,25 @@ class TrustStore:
         ``(version, source.type, source_identity, artifact_digest)``
         tuple voids prior grants. Writes a fresh trust file pinned to the
         new subject with empty grants — the user must re-consent.
+
+        Bracketed by the same per-plugin lock as ``grant()`` so a reset
+        cannot race with a concurrent grant for the prior subject.
         """
-        payload: dict = {
-            "schema_version": TRUST_SCHEMA_VERSION,
-            "plugin": plugin,
-            "version": new_version,
-            "granted_scopes": [],
-        }
-        if new_source_type:
-            payload["source_type"] = new_source_type
-        if new_source_identity:
-            payload["source_identity"] = new_source_identity
-        if new_artifact_digest:
-            payload["artifact_digest"] = new_artifact_digest
-        self._write_atomic(plugin, payload)
+        _validate_plugin_name(plugin)
+        with self._grant_lock(plugin):
+            payload: dict = {
+                "schema_version": TRUST_SCHEMA_VERSION,
+                "plugin": plugin,
+                "version": new_version,
+                "granted_scopes": [],
+            }
+            if new_source_type:
+                payload["source_type"] = new_source_type
+            if new_source_identity:
+                payload["source_identity"] = new_source_identity
+            if new_artifact_digest:
+                payload["artifact_digest"] = new_artifact_digest
+            self._write_atomic(plugin, payload)
 
     # Backwards-compatible alias retained because the previous lock-step
     # was version-only. Production callers should prefer
@@ -287,6 +356,7 @@ class TrustStore:
         Use `clear_disable` for that, or call `wipe_subject` to remove
         both at once.
         """
+        _validate_plugin_name(plugin)
         path = self._path(plugin)
         if not path.is_file():
             return False

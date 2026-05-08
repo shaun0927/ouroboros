@@ -622,6 +622,381 @@ def test_auto_answerer_routes_common_input_output_prompts_to_io_ledger() -> None
         assert not {"constraints", "failure_modes"} >= updated_sections
 
 
+def test_auto_answerer_routes_multilingual_questions_by_ledger_intent() -> None:
+    answerer = AutoAnswerer()
+    cases = (
+        ("¿Quién es el usuario principal?", {"actors", "inputs", "outputs"}),
+        ("Quelles sorties le CLI doit-il produire?", {"actors", "inputs", "outputs"}),
+        (
+            "Quels critères d'acceptation le rapport doit-il satisfaire?",
+            {"acceptance_criteria", "verification_plan"},
+        ),
+        ("¿Cómo verificamos que funciona?", {"verification_plan", "acceptance_criteria"}),
+        ("어떤 런타임과 저장소 구조를 사용해야 하나요?", {"runtime_context", "constraints"}),
+        ("哪些功能不在范围内?", {"non_goals"}),
+        ("リポジトリのランタイムは何を使いますか?", {"runtime_context", "constraints"}),
+    )
+
+    for question, expected_sections in cases:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a CLI"))
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+
+        assert answer.blocker is None, question
+        assert expected_sections <= updated_sections, question
+
+
+def test_auto_answerer_multilingual_permission_questions_route_to_product_behavior() -> None:
+    """Multilingual permission/product-behavior questions must NOT misroute to
+    actor/IO just because they contain an actor noun + interrogative.  Without
+    multilingual product-behavior detection the classifier was asymmetric:
+    actor cues recognised non-English wording but PRODUCT_BEHAVIOR did not, so
+    questions like ``Quels utilisateurs peuvent supprimer des branches?`` and
+    ``哪些用户可以删除分支?`` silently injected ``actors``/``inputs``/``outputs``
+    assumptions instead of preserving the requested authorization behavior.
+    Flagged by ouroboros-agent on commit 4694da0.
+    """
+    answerer = AutoAnswerer()
+    questions = (
+        "Quels utilisateurs peuvent supprimer des branches?",
+        "哪些用户可以删除分支?",
+        "어떤 사용자가 브랜치를 삭제할 수 있나요?",
+        "Welche Benutzer dürfen Branches löschen?",
+        "¿Qué usuarios pueden eliminar ramas?",
+    )
+
+    for question in questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a CLI"))
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+
+        assert answer.blocker is None, question
+        # Product-behavior contract is preserved (constraints + acceptance) and
+        # actor/IO assumptions are NOT injected.
+        assert {"constraints", "acceptance_criteria"} <= updated_sections, (
+            question,
+            updated_sections,
+        )
+        assert "actors" not in updated_sections, question
+        assert "inputs" not in updated_sections, question
+        assert "outputs" not in updated_sections, question
+
+
+def test_auto_answerer_cjk_property_lookup_does_not_misroute_to_runtime() -> None:
+    """CJK runtime cues paired with bare noun-style "selection shape" tokens
+    (``설정`` / ``設定`` / ``配置``) used to misroute property/status lookups
+    like ``런타임 설정은 어디에 표시되나요?`` into ``_runtime_answer()``.
+    Flagged by ouroboros-agent on commit 4c1ee42.  Selection shape now
+    requires a verb-distinctive cue (``사용``/``선택``/``채택``/``도입`` etc.).
+    """
+    answerer = AutoAnswerer()
+    questions = (
+        "런타임 설정은 어디에 표시되나요?",
+        "ランタイム設定はどこに表示されますか?",
+        "运行时配置显示在哪里？",
+    )
+    for question in questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a CLI"))
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+        assert answer.blocker is None, question
+        assert "runtime_context" not in updated_sections, (question, updated_sections)
+
+
+def test_auto_answerer_user_settings_questions_route_to_product_behavior() -> None:
+    """``"What user settings should be displayed?"`` and ``"Which user fields
+    should be editable?"`` are product-behavior questions about a user-facing
+    feature, not actor / IO contract questions.  Flagged by ouroboros-agent
+    on commit 8e0d789 — the bare ``"what user"`` / ``"which user"`` actor
+    cues caused these to misroute to ``_io_actor_answer``.  Routing now
+    drops those cues and ``_is_product_behavior_question`` recognises
+    past-participle forms (``displayed`` / ``shown`` / ``stored`` / etc.).
+    """
+    answerer = AutoAnswerer()
+    questions = (
+        "What user settings should be displayed?",
+        "Which user settings should be displayed?",
+        "Which user fields should be shown?",
+    )
+    for question in questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a CLI"))
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+        assert answer.blocker is None, question
+        # Must NOT inject actor / IO assumptions for a settings/fields question.
+        assert "actors" not in updated_sections, (question, updated_sections)
+        assert "inputs" not in updated_sections, (question, updated_sections)
+        assert "outputs" not in updated_sections, (question, updated_sections)
+        # Should preserve the requested behavior in constraints + acceptance.
+        assert {"constraints", "acceptance_criteria"} <= updated_sections, (
+            question,
+            updated_sections,
+        )
+
+
+def test_auto_answerer_english_user_actor_questions_route_to_actor_io() -> None:
+    """Common English actor questions like ``"Who is the primary user?"`` and
+    ``"Which user is the primary user?"`` must populate ``actors`` /
+    ``inputs`` / ``outputs``.  Flagged by ouroboros-agent on commit f59d4e7
+    after the actor cue list previously omitted ``user``/``users``.
+    """
+    answerer = AutoAnswerer()
+    questions = (
+        "Who is the primary user?",
+        "Which user is the primary user?",
+        "Who is the end user?",
+    )
+    for question in questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a CLI"))
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+        assert answer.blocker is None, question
+        assert {"actors", "inputs", "outputs"} <= updated_sections, (question, updated_sections)
+
+
+def test_auto_answerer_multilingual_direct_lookup_routes_to_runtime() -> None:
+    """Bare direct-lookup runtime questions in non-English languages must
+    populate ``runtime_context``.  Flagged by ouroboros-agent on commit
+    6a939bf — without a multilingual direct-lookup shape, examples like
+    ``"¿Qué framework?"``, ``"ランタイムは何ですか?"``, and ``"框架是什么？"``
+    fell through to ``_default_answer()``.
+    """
+    answerer = AutoAnswerer()
+    questions = (
+        "¿Qué framework?",
+        "Quel framework ?",
+        "Welches Framework?",
+        "ランタイムは何ですか?",
+        "框架是什么？",
+        "런타임은 무엇인가요?",
+    )
+    for question in questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a CLI"))
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+        assert answer.blocker is None, question
+        assert "runtime_context" in updated_sections, (question, updated_sections)
+
+
+def test_auto_answerer_cjk_questions_produce_distinct_ledger_keys() -> None:
+    """``_slug_key()`` must keep Unicode letters so different CJK questions
+    produce different ledger keys instead of all collapsing onto the
+    fallback ``"requested_behavior"``.  Flagged by ouroboros-agent on
+    commit 1581a7b — the contract boundary regression where multilingual
+    routing landed correctly but ledger keys silently merged unrelated
+    requirements together.
+    """
+    answerer = AutoAnswerer()
+    question_a = "哪些用户可以删除分支?"
+    question_b = "用户可以验证他们的电子邮件吗？"
+
+    answer_a = answerer.answer(question_a, SeedDraftLedger.from_goal("Build a CLI"))
+    answer_b = answerer.answer(question_b, SeedDraftLedger.from_goal("Build an auth service"))
+
+    keys_a = sorted({entry.key for _section, entry in answer_a.ledger_updates})
+    keys_b = sorted({entry.key for _section, entry in answer_b.ledger_updates})
+
+    # Both questions must produce ``constraints.behavior.<subject>`` keys
+    # (or ``acceptance.<subject>`` keys for acceptance routes).
+    assert any(".behavior." in k or k.startswith("acceptance.") for k in keys_a), keys_a
+    assert any(".behavior." in k or k.startswith("acceptance.") for k in keys_b), keys_b
+    # Keys must NOT collapse onto the language-blind fallback.
+    assert not any(k.endswith(".requested_behavior") for k in keys_a), keys_a
+    assert not any(k.endswith(".requested_behavior") for k in keys_b), keys_b
+    # Keys for two distinct questions must differ.
+    assert keys_a != keys_b, (keys_a, keys_b)
+
+
+def test_auto_answerer_acceptance_status_does_not_misroute_to_acceptance_route() -> None:
+    """Bare ``"acceptance"`` substring must not classify property/status
+    questions like ``"What is the acceptance status?"`` as
+    ``ACCEPTANCE_CRITERIA``.  Flagged by ouroboros-agent on commit f59d4e7 —
+    same false-positive class as ``output`` / ``repository`` substring
+    matches.
+    """
+    answerer = AutoAnswerer()
+    answer = answerer.answer(
+        "What is the acceptance status?",
+        SeedDraftLedger.from_goal("Build a CLI"),
+    )
+    updated_sections = {section for section, _entry in answer.ledger_updates}
+    assert answer.blocker is None
+    # Must fall through to the conservative default — no acceptance /
+    # verification ledger sections written, no actor/IO injection.
+    assert "acceptance_criteria" not in updated_sections, updated_sections
+    assert "verification_plan" not in updated_sections, updated_sections
+
+
+def test_auto_answerer_meta_verify_questions_stay_on_verification_route() -> None:
+    """Meta-verification questions like ``"Should we verify users can reset
+    passwords?"`` and ``"How should we validate admins can log in?"`` share
+    the same actor-noun + permission-modal + verify-verb tokens as user
+    feature questions, but the OUTER subject is engineering / first-person
+    plural — they ask about QA, not a product feature.  Flagged by
+    ouroboros-agent on commit 4ae40d4 (English/French) and again on commit
+    5e60302 for cases where other product-behavior matchers (English
+    ``should…delete`` or Spanish ``pueden…eliminar``) match the inner
+    permission clause.  Routing now demotes VERIFICATION only when the
+    user-verify shape itself matches, not whenever any product-behavior
+    matcher fires.
+    """
+    answerer = AutoAnswerer()
+    questions = (
+        "Should we verify users can reset passwords?",
+        "How should we validate admins can log in?",
+        "Devrions-nous vérifier que les utilisateurs peuvent se connecter?",
+        # Bot's commit-5e60302 reproductions (inner permission clause
+        # triggers other product-behavior matchers too).
+        "Should we verify users can delete branches?",
+        "Devrions-nous vérifier que les utilisateurs peuvent supprimer des branches?",
+        "¿Deberíamos verificar que los usuarios pueden eliminar ramas?",
+        "我们是否应该验证用户可以删除分支？",
+    )
+    for question in questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build an auth service"))
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+        assert answer.blocker is None, question
+        # Verification route writes verification_plan + acceptance_criteria;
+        # the product-behavior route would write constraints with a
+        # ``constraints.behavior.<subject>`` key, which must NOT appear here.
+        assert "verification_plan" in updated_sections, (question, updated_sections)
+        for _section, entry in answer.ledger_updates:
+            assert not entry.key.startswith("constraints.behavior."), (
+                question,
+                entry.key,
+            )
+
+
+def test_auto_answerer_user_verify_feature_routes_to_product_behavior() -> None:
+    """User-verify feature questions like ``Can users verify their email?``
+    must route to PRODUCT_BEHAVIOR instead of being collapsed into a generic
+    verification-plan template.  Flagged by ouroboros-agent on commit
+    4c1ee42 in English / French / Chinese / Korean variants.  Routing
+    precedence now prefers PRODUCT_BEHAVIOR over VERIFICATION when both are
+    inferred, and verify-style verbs are recognised as product actions.
+    """
+    answerer = AutoAnswerer()
+    questions = (
+        "Can users verify their email?",
+        "Les utilisateurs peuvent-ils vérifier leur e-mail ?",
+        "用户可以验证他们的电子邮件吗？",
+        "사용자가 이메일을 확인할 수 있나요?",
+    )
+    for question in questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build an auth service"))
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+        assert answer.blocker is None, question
+        assert {"constraints", "acceptance_criteria"} <= updated_sections, (
+            question,
+            updated_sections,
+        )
+        # The product behavior subject must be surfaced in the constraint key.
+        constraint_keys = [
+            entry.key
+            for section, entry in answer.ledger_updates
+            if section == "constraints" and entry.key.startswith("constraints.behavior.")
+        ]
+        assert constraint_keys, (question, [k for _s, e in answer.ledger_updates for k in [e.key]])
+
+
+def test_auto_answerer_broad_design_cues_do_not_misroute_to_runtime() -> None:
+    """Broad design nouns (``architecture``, ``estructura``, ``cadre``) plus a
+    generic selection verb must NOT be classified as runtime intent.  The
+    previous cue list paired ``estructura`` with selection verbs like
+    ``usamos`` and silently routed design questions such as
+    ``¿Qué estructura usamos para los datos?`` into ``_runtime_answer()``.
+    Flagged by ouroboros-agent on commit 0230bab.  Cues are now anchored to
+    repository-/runtime-specific phrases only.
+    """
+    answerer = AutoAnswerer()
+    questions = (
+        "¿Qué estructura usamos para los datos?",
+        "Quelle architecture utilisons-nous pour le rapport?",
+        "What architecture should the report use?",
+    )
+    for question in questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a CLI"))
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+        assert answer.blocker is None, question
+        assert "runtime_context" not in updated_sections, (question, updated_sections)
+
+
+def test_auto_answerer_substring_cues_do_not_misroute_unrelated_words() -> None:
+    """Bare ASCII substring cues (e.g. ``"test"``) must not match unrelated
+    words (``"contest"``, ``"latest"``, ``"protest"``, ``"attestations"``).
+    Flagged by ouroboros-agent on commit 52a9ee7 as a silent verification
+    misrouting regression.  Cue matching now uses regex word boundaries for
+    ASCII Latin cues.
+    """
+    answerer = AutoAnswerer()
+    questions = (
+        "Should users contest charges?",
+        "What is the latest output path?",
+        "How are protest votes counted?",
+    )
+    for question in questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a CLI"))
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+        assert answer.blocker is None, question
+        assert "verification_plan" not in updated_sections, (question, updated_sections)
+
+
+def test_auto_answerer_german_ascii_transliteration_routes_to_product_behavior() -> None:
+    """German ASCII transliterations (``duerfen``/``loeschen``) must be treated
+    the same as their umlauted forms.  Flagged by ouroboros-agent on commit
+    52a9ee7 as a realistic silent-misrouting gap because most German keyboards
+    on dev workstations type ``ue``/``ae``/``oe`` rather than ``ü``/``ä``/``ö``.
+    """
+    answerer = AutoAnswerer()
+    answer = answerer.answer(
+        "Welche Benutzer duerfen Branches loeschen?",
+        SeedDraftLedger.from_goal("Build a CLI"),
+    )
+    updated_sections = {section for section, _entry in answer.ledger_updates}
+    assert answer.blocker is None
+    assert {"constraints", "acceptance_criteria"} <= updated_sections
+    assert "actors" not in updated_sections
+    assert "inputs" not in updated_sections
+    assert "outputs" not in updated_sections
+
+
+def test_auto_answerer_property_lookup_cues_do_not_misroute_to_intent_handlers() -> None:
+    """Broad cue substrings (``input``, ``output``, ``repository``, ``architecture``)
+    must not by themselves trigger ACTOR_IO or RUNTIME_CONTEXT routing.  These
+    questions are property/status lookups, not contract or selection questions,
+    and would otherwise mutate ledger state with the wrong contract — the exact
+    silent misrouting flagged by ouroboros-agent on commit 9ab5ae1.
+    """
+    answerer = AutoAnswerer()
+    questions = (
+        "What is the output directory?",
+        "What is the input schema?",
+        "What is the repository status?",
+        "What architecture decisions are documented?",
+    )
+
+    for question in questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build a CLI"))
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+
+        assert answer.blocker is None, question
+        assert answer.source == AutoAnswerSource.CONSERVATIVE_DEFAULT, question
+        # Routing must not write actor/IO or runtime ledger entries for these
+        # property-shaped questions — the safe default is the only outcome.
+        assert "actors" not in updated_sections, question
+        assert "inputs" not in updated_sections, question
+        assert "outputs" not in updated_sections, question
+        assert "runtime_context" not in updated_sections, question
+
+
+def test_auto_answerer_unknown_multilingual_question_uses_safe_default() -> None:
+    answer = AutoAnswerer().answer(
+        "¿Cuál es el color favorito del tablero?",
+        SeedDraftLedger.from_goal("Build a dashboard"),
+    )
+
+    assert answer.blocker is None
+    assert answer.source == AutoAnswerSource.CONSERVATIVE_DEFAULT
+    assert [entry.key for _section, entry in answer.ledger_updates] == [
+        "constraints.conservative_mvp",
+        "failure_modes.unverified_or_scope_creep",
+    ]
+
+
 def test_auto_answerer_blocks_production_environment_selection_variants() -> None:
     questions = (
         "Which production environment should we deploy to?",
@@ -1739,3 +2114,132 @@ def test_ledger_summary_treats_inference_only_sections_as_assumption_only() -> N
     assert "actors" in summary["provenance"].get("inference", [])
     assert "actors" not in summary["evidence_backed_sections"]
     assert "actors" in summary["assumption_only_sections"]
+
+
+def test_auto_answerer_possessive_actor_routes_to_product_behavior() -> None:
+    """Possessive determiners modifying the actor noun must NOT trip the
+    first-person-plural meta filter.
+
+    ``Can our users verify their email?`` is a user-facing feature question:
+    the actor is ``users`` and ``our`` is just a possessive modifier.  An
+    earlier revision treated any occurrence of ``our``/``ours`` (and the
+    French/German/Spanish possessive equivalents ``notre``/``nos``/
+    ``unser*``/``nuestro*``) as an engineering meta subject, which silently
+    demoted user-feature verification questions to
+    ``_verification_answer()`` and corrupted the ledger contract.
+
+    Ref: ouroboros-agent[bot] BLOCKING on commit a447fc1 — answerer.py:1094.
+    """
+    answerer = AutoAnswerer()
+    questions = (
+        "Can our users verify their email?",
+        "Can ours users verify their email?",
+        "Les utilisateurs de notre plateforme peuvent-ils vérifier leur e-mail ?",
+        "¿Pueden nuestros usuarios verificar su correo electrónico?",
+        "Können unsere Benutzer ihre E-Mail verifizieren?",
+    )
+    ledger = SeedDraftLedger.from_goal("Build an auth service")
+    for question in questions:
+        answer = answerer.answer(question, ledger)
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+        assert answer.blocker is None, question
+        assert {"constraints", "acceptance_criteria"} <= updated_sections, (
+            question,
+            updated_sections,
+        )
+        constraint_keys = [
+            entry.key
+            for section, entry in answer.ledger_updates
+            if section == "constraints" and entry.key.startswith("constraints.behavior.")
+        ]
+        assert constraint_keys, (
+            question,
+            [entry.key for _section, entry in answer.ledger_updates],
+        )
+
+
+def test_auto_answerer_meta_first_person_subject_still_routes_to_verification() -> None:
+    """Meta-QA questions whose OUTER subject is engineering ("we"/"nous"/
+    "wir"/"deberíamos"/"devrions"/"我们是否"…) must keep routing to the
+    verification handler so the meta path tightening from the previous
+    review remains intact.
+    """
+    answerer = AutoAnswerer()
+    questions = (
+        "Should we verify users can reset passwords?",
+        "Devrions-nous vérifier que les utilisateurs peuvent supprimer des branches?",
+        "¿Deberíamos verificar que los usuarios pueden eliminar ramas?",
+        "Sollten wir verifizieren, dass Benutzer Branches löschen können?",
+        "我们是否应该验证用户可以删除分支？",
+    )
+    ledger = SeedDraftLedger.from_goal("Build a CLI")
+    for question in questions:
+        answer = answerer.answer(question, ledger)
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+        assert answer.blocker is None, question
+        # Meta-QA questions must populate verification_plan / acceptance_criteria,
+        # NOT the product-behavior constraints path.
+        assert "verification_plan" in updated_sections, (question, updated_sections)
+        behavior_keys = [
+            entry.key
+            for section, entry in answer.ledger_updates
+            if section == "constraints" and entry.key.startswith("constraints.behavior.")
+        ]
+        assert not behavior_keys, (question, behavior_keys)
+
+
+def test_auto_answerer_blocks_compliance_policy_noun_questions() -> None:
+    """``support|enable|allow + regulated noun + (data) + policy noun`` must
+    remain blocked even when no active-form compliance verb is used.
+
+    Phrasings such as ``Should the app support HIPAA data retention?`` or
+    ``Should the platform enable GDPR data storage?`` skip the
+    ``_COMPLIANCE_POLICY_ACTIVE_VERBS_RE`` check (no active verb), and the
+    original ``_BARE_COMPLIANCE_SCOPE_RE`` only fired when the regulated
+    noun ended the clause.  That left the policy-as-toggle wording
+    incorrectly classified as safe product behaviour.
+
+    Ref: ouroboros-agent[bot] BLOCKING on commit a447fc1 — answerer.py:1561.
+    """
+    answerer = AutoAnswerer()
+    blocked_questions = (
+        ("Should the app support HIPAA data retention?", "regulated data handling"),
+        ("Should the platform enable GDPR data storage?", "regulated data handling"),
+        ("Should the system allow PII encryption?", "regulated personal data handling"),
+        ("Should the service support SOX data governance?", "regulated data handling"),
+        ("Should the platform support GDPR data processing?", "regulated data handling"),
+        ("Should the app enable HIPAA disclosure?", "regulated data handling"),
+        ("Should the system allow PII collection?", "regulated personal data handling"),
+    )
+
+    ledger = SeedDraftLedger.from_goal("Build a regulated data app")
+    for question, reason in blocked_questions:
+        answer = answerer.answer(question, ledger)
+        assert answer.source == AutoAnswerSource.BLOCKER, question
+        assert answer.blocker is not None, question
+        assert answer.blocker.reason == reason, question
+
+
+def test_auto_answerer_allows_qualified_compliance_policy_features() -> None:
+    """Concrete product features whose name happens to contain a compliance
+    policy noun must NOT be over-blocked by the new policy-noun rejector.
+
+    When the policy noun is followed by a qualifying feature noun
+    (``HIPAA retention reports``, ``GDPR storage dashboards``,
+    ``PII redaction in exports``) the question is asking about a bounded
+    product feature, not setting compliance policy.  These must continue to
+    pass through.
+    """
+    answerer = AutoAnswerer()
+    allowed_questions = (
+        "Should the platform support HIPAA retention reports?",
+        "Should the app enable GDPR storage dashboards?",
+        "Should the system allow PII redaction in exports?",
+        "Should the service support SOX compliance reporting?",
+    )
+
+    ledger = SeedDraftLedger.from_goal("Build a regulated data app")
+    for question in allowed_questions:
+        answer = answerer.answer(question, ledger)
+        assert answer.blocker is None, question
+        assert answer.source != AutoAnswerSource.BLOCKER, question
