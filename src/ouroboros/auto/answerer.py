@@ -1067,6 +1067,22 @@ _USER_VERIFY_VERB_RE = re.compile(
 )
 
 
+# Meta-verification questions ("Should WE verify users can reset passwords?",
+# "How should WE validate admins can log in?") share the same actor-noun +
+# permission-modal + verify-verb tokens as user-facing feature questions but
+# the OUTER subject is engineering / first-person-plural ("we", "nous",
+# "wir", "我们", "우리", etc.).  When that meta-subject is present the
+# question is asking about QA, not a product feature, so we defer back to
+# VERIFICATION instead of demoting it.
+_FIRST_PERSON_META_RE = re.compile(
+    r"\b(we|us|our|ours|"
+    r"nous|notre|nos|"
+    r"wir|uns|unser|unsere|unseren|unserem|unserer|"
+    r"nosotros|nosotras|nuestro|nuestra|nuestros|nuestras)\b"
+    r"|私たち|私達|我们|我們|우리|저희"
+)
+
+
 def _has_user_verify_feature_shape(lowered: str) -> bool:
     """Detect ``ACTOR + permission-modal + verify-verb`` feature questions.
 
@@ -1077,12 +1093,19 @@ def _has_user_verify_feature_shape(lowered: str) -> bool:
     QA questions like ``"How should we verify the HIPAA worker tests
     pass?"`` continue to route to ``_verification_answer()`` and through
     the existing regulated-data blocker.
+
+    A first-person-plural subject (``we``/``nous``/``wir``/``我们``/``우리``…)
+    is also disqualifying — those questions ask about engineering-side QA
+    even when they mention an actor, e.g. ``"Should we verify users can
+    reset passwords?"``.
     """
-    return bool(
-        _USER_VERIFY_ACTOR_RE.search(lowered)
-        and _USER_VERIFY_MODAL_RE.search(lowered)
-        and _USER_VERIFY_VERB_RE.search(lowered)
-    )
+    if not _USER_VERIFY_ACTOR_RE.search(lowered):
+        return False
+    if not _USER_VERIFY_MODAL_RE.search(lowered):
+        return False
+    if not _USER_VERIFY_VERB_RE.search(lowered):
+        return False
+    return not _FIRST_PERSON_META_RE.search(lowered)
 
 
 def _has_product_behavior_intent(lowered: str) -> bool:

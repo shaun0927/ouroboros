@@ -700,6 +700,36 @@ def test_auto_answerer_cjk_property_lookup_does_not_misroute_to_runtime() -> Non
         assert "runtime_context" not in updated_sections, (question, updated_sections)
 
 
+def test_auto_answerer_meta_verify_questions_stay_on_verification_route() -> None:
+    """Meta-verification questions like ``"Should we verify users can reset
+    passwords?"`` and ``"How should we validate admins can log in?"`` share
+    the same actor-noun + permission-modal + verify-verb tokens as user
+    feature questions, but the OUTER subject is engineering / first-person
+    plural — they ask about QA, not a product feature.  Flagged by
+    ouroboros-agent on commit 4ae40d4.  ``_has_user_verify_feature_shape``
+    now requires the absence of a first-person-plural meta subject.
+    """
+    answerer = AutoAnswerer()
+    questions = (
+        "Should we verify users can reset passwords?",
+        "How should we validate admins can log in?",
+        "Devrions-nous vérifier que les utilisateurs peuvent se connecter?",
+    )
+    for question in questions:
+        answer = answerer.answer(question, SeedDraftLedger.from_goal("Build an auth service"))
+        updated_sections = {section for section, _entry in answer.ledger_updates}
+        assert answer.blocker is None, question
+        # Verification route writes verification_plan + acceptance_criteria;
+        # the product-behavior route would write constraints with a
+        # ``constraints.behavior.<subject>`` key, which must NOT appear here.
+        assert "verification_plan" in updated_sections, (question, updated_sections)
+        for _section, entry in answer.ledger_updates:
+            assert not entry.key.startswith("constraints.behavior."), (
+                question,
+                entry.key,
+            )
+
+
 def test_auto_answerer_user_verify_feature_routes_to_product_behavior() -> None:
     """User-verify feature questions like ``Can users verify their email?``
     must route to PRODUCT_BEHAVIOR instead of being collapsed into a generic
