@@ -106,15 +106,18 @@ def _record_applies_to_subject(
     firewall would key on. Mirrors ``firewall._record_matches_subject``
     so the CLI displays scopes only when invocation would honor them.
 
-    Empty fields on the record are tolerated (legacy / pre-RFC trust
-    files) so existing callers don't lose their grant display, but any
-    populated field that disagrees with the lockfile entry voids the
-    application.
+    Empty fields on the record are tolerated only when the lockfile entry
+    has no plumbed subject fields (legacy / pre-RFC callers). Once the
+    entry carries a subject, any blank record subject column means the
+    record cannot prove it applies to this install.
     """
     if record is None:
         return False
     if record.version != manifest.version:
         return False
+    if entry.source_identity or entry.artifact_digest:
+        if not record.source_type or not record.source_identity or not record.artifact_digest:
+            return False
     if record.source_type and record.source_type != manifest.source.type:
         return False
     if record.source_identity and entry.source_identity:

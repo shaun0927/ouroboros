@@ -311,6 +311,57 @@ def test_describe_trust_state_refuses_legacy_record_when_subject_plumbed(
     assert state_with_subject == "installed"
 
 
+def test_inspect_legacy_grant_with_subject_hides_stale_scopes(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """A pre-RFC grant cannot be shown as effective once the lockfile
+    carries the post-RFC install subject.
+    """
+    plugin_home = tmp_path / "plugin_home"
+    _write_manifest(plugin_home, REFERENCE_MANIFEST)
+    lock_path = tmp_path / "plugins.lock"
+    trust_root = tmp_path / "trust"
+    Lockfile(lock_path).add(
+        LockEntry(
+            name="github-pr-ops",
+            version="0.1.0",
+            source_kind="local",
+            repository=None,
+            git_sha=None,
+            manifest_checksum="sha256:0",
+            installed_at="2026-05-08T00:00:00Z",
+            plugin_home=str(plugin_home),
+            source_type="local_path",
+            source_identity=str(plugin_home),
+            artifact_digest="sha256:" + "a" * 64,
+        )
+    )
+    TrustStore(root=trust_root).grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+    )
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "inspect",
+            "github-pr-ops",
+            "--lockfile",
+            str(lock_path),
+            "--trust-root",
+            str(trust_root),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "trust_state:    installed" in result.output
+    granted_line = next(line for line in result.output.splitlines() if "granted_scopes:" in line)
+    assert "none" in granted_line
+    assert "github:read" not in granted_line
+
+
 def test_inspect_partial_trust_reports_installed_not_trusted(
     runner: CliRunner, tmp_path: Path
 ) -> None:
@@ -780,6 +831,59 @@ def test_list_json_partial_trust_reports_installed_not_trusted(
     # And the row exposes the firewall-blocking scopes as structured
     # output so consumers can pipe to jq for an automated re-trust step.
     assert row["missing_required_scopes"] == ["github:pull_request:write"]
+
+
+def test_list_json_legacy_grant_with_subject_hides_stale_scopes(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """`list --json` must not expose stale pre-RFC grants as effective
+    scopes after the lockfile has a post-RFC subject.
+    """
+    plugin_home = tmp_path / "ph"
+    _write_manifest(plugin_home, REFERENCE_MANIFEST)
+    lock_path = tmp_path / "plugins.lock"
+    trust_root = tmp_path / "trust"
+    Lockfile(lock_path).add(
+        LockEntry(
+            name="github-pr-ops",
+            version="0.1.0",
+            source_kind="local",
+            repository=None,
+            git_sha=None,
+            manifest_checksum="sha256:0",
+            installed_at="2026-05-08T00:00:00Z",
+            plugin_home=str(plugin_home),
+            source_type="local_path",
+            source_identity=str(plugin_home),
+            artifact_digest="sha256:" + "a" * 64,
+        )
+    )
+    TrustStore(root=trust_root).grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+    )
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "list",
+            "--json",
+            "--lockfile",
+            str(lock_path),
+            "--trust-root",
+            str(trust_root),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output.strip())
+    assert isinstance(data, list) and len(data) == 1
+    row = data[0]
+    assert row["trust_state"] == "installed"
+    assert row["granted_scopes"] == []
+    assert row["missing_required_scopes"] == ["github:read"]
 
 
 def test_list_survives_doubly_corrupt_row(runner: CliRunner, tmp_path: Path) -> None:
