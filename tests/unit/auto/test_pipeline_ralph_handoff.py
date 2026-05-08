@@ -934,10 +934,11 @@ async def test_handoff_to_ralph_persists_job_id_before_terminal_poll(tmp_path) -
 @pytest.mark.asyncio
 async def test_handoff_to_ralph_falls_back_for_legacy_starter_without_hook(tmp_path) -> None:
     """Older ``RalphStarter`` implementations that don't accept the
-    ``on_dispatched`` keyword must still work — the pipeline retries
-    without the hook so the legacy contract is preserved (the test/library
-    callers without a job manager opt out of the early-checkpoint
-    guarantee, accepting the documented stranded-resume risk)."""
+    ``on_dispatched`` keyword must still work — the pipeline detects the
+    signature before invocation and calls without the hook so the legacy
+    contract is preserved (the test/library callers without a job manager
+    opt out of the early-checkpoint guarantee, accepting the documented
+    stranded-resume risk)."""
     state = _state_at_run_phase(tmp_path)
 
     async def legacy_ralph_starter(
@@ -968,3 +969,48 @@ async def test_handoff_to_ralph_falls_back_for_legacy_starter_without_hook(tmp_p
 
     assert result.status == "complete"
     assert state.ralph_job_id == "job_legacy_ralph"
+
+
+@pytest.mark.asyncio
+async def test_handoff_to_ralph_does_not_retry_type_error_after_dispatch(tmp_path) -> None:
+    """A starter that accepts ``on_dispatched`` and then fails with
+    ``TypeError`` has already dispatched Ralph work, so the pipeline must
+    fail the session without invoking the starter a second time."""
+    state = _state_at_run_phase(tmp_path)
+    calls = 0
+
+    async def ralph_starter(
+        _seed: Seed,
+        *,
+        lineage_id: str,
+        on_dispatched: Any | None = None,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        if on_dispatched is not None:
+            on_dispatched(
+                {
+                    "job_id": "job_ralph_dispatched_once",
+                    "lineage_id": lineage_id,
+                    "dispatch_mode": "job",
+                }
+            )
+        raise TypeError("starter failed after dispatch")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert calls == 1
+    assert result.status == "failed"
+    assert state.phase is AutoPhase.FAILED
+    assert state.ralph_job_id == "job_ralph_dispatched_once"
+    assert state.last_error == "ralph handoff failed: starter failed after dispatch"
