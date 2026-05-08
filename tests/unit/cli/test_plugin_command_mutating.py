@@ -994,6 +994,66 @@ def test_install_named_with_from_local_path(runner: CliRunner, tmp_path: Path) -
     )
 
 
+def test_install_default_form_resolves_via_known_catalog(runner: CliRunner, tmp_path: Path) -> None:
+    """After `ooo plugin add` registers a catalog, `install <name>` with no
+    `--from` must resolve through the catalog and re-install — the
+    register-on-first-use contract per the RFC's "How sources enter the
+    known catalog" section.
+    """
+    paths = _common_paths(tmp_path)
+    repo_root = tmp_path / "repo"
+    _make_repo_layout(repo_root, [REFERENCE_MANIFEST])
+    catalog_state = tmp_path / "catalog-state.json"
+    runner.invoke(
+        plugin_app,
+        [
+            "add",
+            str(repo_root),
+            "--plugin",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--catalog-state",
+            str(catalog_state),
+        ],
+    )
+    # Now remove the install but keep the catalog so the default form
+    # has something to resolve against.
+    runner.invoke(
+        plugin_app,
+        [
+            "remove",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+        ],
+    )
+    # Default form must hit the catalog and re-install without `--from`.
+    result = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--catalog-state",
+            str(catalog_state),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "github-pr-ops" in Lockfile(paths["lockfile"]).read()
+
+
 def test_install_named_default_form_with_no_known_catalog_errors(
     runner: CliRunner, tmp_path: Path
 ) -> None:
