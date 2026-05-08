@@ -3205,3 +3205,132 @@ def test_trust_reenables_disabled_plugin_with_only_optional_permissions(
     assert reenable_result.exit_code == 0, reenable_result.output
     trust = TrustStore(root=paths["trust_root"])
     assert not trust.is_disabled("github-pr-ops")
+
+
+def test_add_registers_full_repo_catalog_regardless_of_selection(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:1523.
+
+    The locked RFC ("How sources enter the known catalog") states that
+    ``ooo plugin add <repo>`` makes the repo a known catalog at that
+    moment, regardless of which plugins the user selects. Sibling
+    plugins that were not chosen during the original ``add`` MUST
+    still be addressable by ``ooo plugin install <name>`` later, so
+    every discovered manifest in the repo's ``plugins/`` directory
+    must end up in ``plugin-catalogs.json``.
+    """
+    paths = _common_paths(tmp_path)
+    repo = tmp_path / "multi-plugin-repo"
+    sibling = json.loads(json.dumps(REFERENCE_MANIFEST))
+    sibling["name"] = "github-issue-ops"
+    sibling["source"] = {
+        "type": "local_path",
+        "path": "plugins/github-issue-ops",
+    }
+    _make_repo_layout(repo, [REFERENCE_MANIFEST, sibling])
+
+    catalog_state = tmp_path / "plugin-catalogs.json"
+    result = runner.invoke(
+        plugin_app,
+        [
+            "add",
+            str(repo),
+            "--plugin",
+            "github-pr-ops",  # only one of two siblings selected
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--catalog-state",
+            str(catalog_state),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    payload = json.loads(catalog_state.read_text())
+    plugins_recorded: set[str] = set()
+    for entry in payload["catalogs"]:
+        plugins_recorded.update(entry.get("plugins", []))
+    assert "github-pr-ops" in plugins_recorded
+    assert "github-issue-ops" in plugins_recorded, (
+        "the unselected sibling MUST still be addressable via "
+        "`ooo plugin install <name>` after `add`; missing it strands "
+        "the rest of the repo from name-only resolution"
+    )
+
+
+def test_trust_friendly_error_on_unwritable_audit_log(runner: CliRunner, tmp_path: Path) -> None:
+    """Regression for the bot's follow-up on plugin.py:2172.
+
+    ``trust_command()`` opens ``--audit-log`` for append. If the parent
+    directory does not exist (or the file is not writable), the open
+    raises ``OSError`` and would dump a raw traceback BEFORE any grant
+    was attempted. The fix surfaces the same controlled-exit shape as
+    every other state-file failure in this command.
+    """
+    paths = _common_paths(tmp_path)
+    src = tmp_path / "src"
+    _install_reference_plugin(runner, plugin_dir=src, paths=paths)
+
+    # Point ``--audit-log`` at a path whose parent does not exist.
+    bad_audit_log = tmp_path / "missing-parent" / "audit.jsonl"
+    assert not bad_audit_log.parent.exists()
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "trust",
+            "github-pr-ops",
+            "--scope",
+            "github:read",
+            "--granted-by",
+            "user:tester",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--audit-log",
+            str(bad_audit_log),
+        ],
+    )
+    assert result.exit_code == 1, result.output
+    plain = " ".join(result.output.split())
+    assert "could not open audit log" in plain
+    assert "Traceback" not in result.output
+
+
+def test_inspect_friendly_error_on_corrupt_disabled_json(runner: CliRunner, tmp_path: Path) -> None:
+    """Regression for the bot's BLOCKING finding on trust_store.py:461.
+
+    ``inspect`` / ``list`` / dispatch read the disable record via
+    ``read_disable``; a malformed ``disabled.json`` previously escaped
+    as a raw ``JSONDecodeError`` traceback in the very commands
+    operators use to repair plugin state. With the fix, ``read_disable``
+    raises a typed ``ValueError`` that the existing CLI wrappers
+    (``(ValueError, OSError)``) convert into a friendly recovery hint.
+    """
+    paths = _common_paths(tmp_path)
+    src = tmp_path / "src"
+    _install_reference_plugin(runner, plugin_dir=src, paths=paths)
+
+    # Corrupt disabled.json by writing invalid JSON at the documented path.
+    disabled_path = paths["trust_root"] / "github-pr-ops" / "disabled.json"
+    disabled_path.parent.mkdir(parents=True, exist_ok=True)
+    disabled_path.write_text("{ truncated json")
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "inspect",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    # The command MUST surface a controlled error, NOT a raw traceback.
+    assert "Traceback" not in result.output, result.output

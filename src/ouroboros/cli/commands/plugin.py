@@ -1461,6 +1461,35 @@ def add_command(
     # the prior install if the post-swap write still fails.
     _read_lock_or_exit(lock)
 
+    # Per the locked RFC ("How sources enter the known catalog"): `add
+    # <repo>` makes the repo a known catalog at that moment, regardless
+    # of which plugins the user picks (or skips) at the selection
+    # prompt. Registering every discovered manifest here — before the
+    # install loop — preserves three properties:
+    #   - empty / cancelled selections still publish the repo, so a
+    #     later `ooo plugin install <name>` resolves without re-fetching
+    #   - sibling plugins not chosen on this `add` call are addressable
+    #     by name on the next `install`
+    #   - per-plugin install failures inside the loop don't strand the
+    #     rest of the repo from name-only resolution
+    # The recorded ``source_identity`` MUST match the lockfile's
+    # per-plugin ``source_identity`` so a future `install <name>`
+    # resolved through the catalog appears to come from the same source
+    # (RFC: trust subject is keyed by ``source_identity``). For URL
+    # repos the per-plugin and repo-root identities are the same
+    # normalized URL; for local catalogs we record the per-plugin
+    # absolute path so catalog and lockfile agree.
+    for catalog_entry in catalog:
+        catalog_plugin_source_identity = (
+            str(catalog_entry.plugin_dir.resolve()) if source_kind == "local" else source_identity
+        )
+        _register_catalog_or_warn(
+            catalog_state,
+            source_type=catalog_entry.manifest.source.type,
+            source_identity=catalog_plugin_source_identity,
+            plugin_name=catalog_entry.manifest.name,
+        )
+
     installed: list[str] = []
     for entry in selected:
         manifest = entry.manifest
@@ -2169,7 +2198,24 @@ def trust_command(
         )
         raise typer.Exit(code=1) from exc
 
-    audit_handle = audit_log_path.open("a", encoding="utf-8") if audit_log_path else None
+    # ``--audit-log`` is operator-supplied and routinely points at a
+    # path the user expects to exist (e.g. inside a pre-created log
+    # directory). When the parent directory is missing or the file is
+    # unwritable, ``open("a")`` raises ``OSError``; without this guard
+    # the whole `trust` command would dump a raw traceback BEFORE any
+    # grant was written, which is exactly the failure shape the rest
+    # of this command is hardened against (corrupt lockfile, corrupt
+    # trust file, etc.). Surface the same controlled-exit shape so the
+    # operator can see the path and re-run after fixing it.
+    try:
+        audit_handle = audit_log_path.open("a", encoding="utf-8") if audit_log_path else None
+    except OSError as exc:
+        print_error(
+            f"could not open audit log at {audit_log_path}: {exc}. "
+            f"Ensure the parent directory exists and is writable, then "
+            f"re-run `ooo plugin trust {name} --scope <...>`."
+        )
+        raise typer.Exit(code=1) from exc
     try:
         for scope in scopes:
             try:

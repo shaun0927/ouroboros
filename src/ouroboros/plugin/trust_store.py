@@ -471,12 +471,26 @@ class TrustStore:
         return not (recorded_identity and recorded_identity != source_identity)
 
     def read_disable(self, plugin: str) -> dict | None:
-        """Return the parsed disable record, or None."""
+        """Return the parsed disable record, or None.
+
+        Raises ``ValueError`` for any structurally-invalid
+        ``disabled.json`` (malformed JSON or non-object root). The
+        callers (firewall, ``inspect``, ``list``, dispatch) only
+        catch ``ValueError`` / ``OSError``; without this wrap a raw
+        ``JSONDecodeError`` would escape as a traceback in the very
+        commands operators use to repair plugin state.
+        """
         path = self._disable_path(plugin)
         if not path.is_file():
             return None
-        with path.open(encoding="utf-8") as handle:
-            return json.load(handle)
+        try:
+            with path.open(encoding="utf-8") as handle:
+                data = json.load(handle)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"disable file {path} is not valid JSON: {exc}") from exc
+        if not isinstance(data, dict):
+            raise ValueError(f"disable file {path} is not a JSON object")
+        return data
 
     def write_disable(
         self,

@@ -260,3 +260,32 @@ def test_concurrent_grants_do_not_lose_scopes(tmp_path: Path) -> None:
     assert persisted == set(scopes), (
         f"trust store lost {set(scopes) - persisted} under concurrent grants"
     )
+
+
+def test_read_disable_raises_value_error_on_malformed_json(tmp_path):
+    """Regression for the bot's BLOCKING finding on trust_store.py:461.
+
+    ``read_disable`` is read by the firewall, ``inspect``, ``list``, and
+    the top-level dispatch path. Those callers catch
+    ``(ValueError, OSError)`` only — a raw ``json.JSONDecodeError``
+    would escape as a traceback in the very commands operators use to
+    repair plugin state. Truncated / non-object ``disabled.json`` files
+    must surface as ``ValueError`` so the friendly recovery hint shape
+    holds end to end.
+    """
+    from ouroboros.plugin.trust_store import TrustStore
+
+    store = TrustStore(root=tmp_path)
+    plugin_root = tmp_path / "broken-plugin"
+    plugin_root.mkdir()
+
+    # Truncated JSON.
+    disabled = plugin_root / "disabled.json"
+    disabled.write_text("{ truncated")
+    with pytest.raises(ValueError, match="not valid JSON"):
+        store.read_disable("broken-plugin")
+
+    # Parseable JSON but a non-object root (e.g. a stray array).
+    disabled.write_text("[]")
+    with pytest.raises(ValueError, match="not a JSON object"):
+        store.read_disable("broken-plugin")
