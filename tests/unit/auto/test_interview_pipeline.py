@@ -584,6 +584,13 @@ def test_safe_default_still_blocks_when_negation_does_not_cover_unsafe_term() ->
             "Without billing integration, send email notifications to customers.",
             "external side effect",
         ),
+        # Comma + noun-led counter-clause (no imperative verb) also breaks
+        # the scope when the sentence has no list connector — the second
+        # clause is a positive assertion that must still flag.
+        (
+            "No production deploys, customer credentials from Vault are still required.",
+            "credentials",
+        ),
         # Semicolon also breaks the scope.
         (
             "No external API; deploy to production for the first launch.",

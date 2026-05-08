@@ -411,21 +411,48 @@ _IMPERATIVE_VERBS_AFTER_COMMA = (
 
 _IMPERATIVE_VERBS_ALT = "|".join(_IMPERATIVE_VERBS_AFTER_COMMA)
 
-_NEGATION_CLAUSE_PATTERN = re.compile(
-    # Negation cue at a word boundary, then the rest of the clause it scopes
-    # up to the next sentence break, contrastive conjunction, or comma that
-    # introduces a fresh imperative clause. This lets ``No production
-    # deployment`` and ``Do not use customer credentials`` be stripped before
-    # the unsafe regex bank runs, while keeping mixed clauses like
-    # ``No production deploys, use customer credentials from Vault`` visible
-    # past the comma so the second clause still flags.
+_NEGATION_CUES = (
     r"\b(?:no|not|never|don[’']t|do not|do n[’']t|without|none(?:\s+of)?|neither|nor|"
-    r"skip|skips|skipped|avoid|avoids|avoided|exclude|excludes|excluded|forbid|forbids|forbidden)\b"
+    r"skip|skips|skipped|avoid|avoids|avoided|exclude|excludes|excluded|"
+    r"forbid|forbids|forbidden)\b"
+)
+
+# Negation pattern with two scope modes:
+#
+# * List mode (lookahead succeeds): the same sentence contains "and"/"or"/"nor"
+#   somewhere before the next sentence break. Scope extends through commas so
+#   list-style negations like "No auth, credentials, and production deployment"
+#   stay fully scoped. A comma followed by an imperative verb still ends the
+#   scope, and the first contrastive conjunction (but/however/although/except)
+#   ends it too.
+#
+# * Non-list mode: no list connector ahead. Scope ends at the FIRST comma in
+#   addition to the usual sentence breaks and contrastive conjunctions.
+#   This is what catches mixed clauses like
+#   "No production deploys, customer credentials from Vault are still required"
+#   or "Without billing integration, send email notifications" — the second
+#   clause stays visible to the unsafe regex bank because the negation only
+#   covers up to the first comma.
+_NEGATION_CLAUSE_PATTERN = re.compile(
+    rf"{_NEGATION_CUES}"
+    r"(?:"
+    # ----- Alt 1: list-mode (scope continues past commas) -----
+    r"(?="
+    r"(?:(?!\b(?:but|however|although|except)\b)[^.;?!\n])*?"
+    r"\b(?:and|or|nor)\b"
+    r")"
     r"(?:"
     r"(?!\b(?:but|however|although|except)\b)"
     rf"(?!,\s*\b(?:{_IMPERATIVE_VERBS_ALT})\b)"
     r"[^.;?!\n]"
-    r")*",
+    r")*"
+    r"|"
+    # ----- Alt 2: non-list mode (scope ends at first comma too) -----
+    r"(?:"
+    r"(?!\b(?:but|however|although|except)\b)"
+    r"[^.;?!\n,]"
+    r")*"
+    r")",
     re.IGNORECASE,
 )
 
