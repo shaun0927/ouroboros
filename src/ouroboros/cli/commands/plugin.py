@@ -730,6 +730,16 @@ def add_command(
             "Used to invalidate prior grants on a version bump.",
         ),
     ] = None,
+    catalog_state_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--catalog-state",
+            help=(
+                "Override the known-catalog state path "
+                "(default: ~/.ouroboros/plugin-catalogs.json)."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Install one or more plugins from a repo URL or local path.
 
@@ -786,7 +796,10 @@ def add_command(
     # so future `ooo plugin install <name>` invocations can resolve it
     # without re-fetching. The catalog file is keyed by source_identity.
     catalog_state = CatalogRegistry(
-        catalog_root=plugin_home_root.parent if plugin_home_root else None
+        state_path=catalog_state_path,
+        catalog_root=(
+            plugin_home_root.parent if catalog_state_path is None and plugin_home_root else None
+        ),
     )
 
     installed: list[str] = []
