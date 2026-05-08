@@ -71,6 +71,47 @@ def test_wrap_does_not_mutate_input() -> None:
     assert json.dumps(ev, sort_keys=True) == snapshot
 
 
+def test_wrap_isolates_envelope_from_post_wrap_caller_mutation() -> None:
+    """Regression for the bot's follow-up on ledger_adapter.py:92.
+
+    Plugin audit events have nested dicts (``plugin``, ``command``,
+    ``result``, ``provenance``). A shallow ``dict(audit_event)`` copy
+    would alias those nested dicts, so a caller that mutated the
+    original after wrapping would silently corrupt the already-wrapped
+    envelope's payload — and, by extension, the audit log.
+    """
+    ev = _audit_event("plugin.completed")
+    env = wrap_plugin_event(ev, correlation_id="x")
+
+    # Mutate every nested dict on the *original* event after wrapping.
+    ev["plugin"]["name"] = "evil-rename"
+    ev["command"]["argv"].append("--inject")
+    ev["result"]["status"] = "blocked"
+
+    # The envelope's payload must remain bound to the values at wrap
+    # time — anything else is audit-log corruption.
+    assert env["payload"]["plugin"]["name"] == "github-pr-ops"
+    assert env["payload"]["command"]["argv"] == ["url"]
+    assert env["payload"]["result"]["status"] == "success"
+
+
+def test_unwrap_isolates_caller_from_envelope_mutation() -> None:
+    """Symmetric guard: an envelope read back from the store must
+    survive caller-side mutation of the unwrapped event. Without a
+    deep copy, a downstream consumer that edited the event in place
+    would mutate the envelope still held in memory by another
+    consumer."""
+    ev = _audit_event("plugin.invoked")
+    env = wrap_plugin_event(ev, correlation_id="x")
+    out = unwrap_plugin_event(env)
+
+    out["plugin"]["name"] = "evil-rename"
+    out["command"]["argv"].append("--inject")
+
+    assert env["payload"]["plugin"]["name"] == "github-pr-ops"
+    assert env["payload"]["command"]["argv"] == ["url"]
+
+
 def test_wrap_does_not_inject_fields_into_audit_event() -> None:
     """Envelope fields stay above the audit event boundary.
 

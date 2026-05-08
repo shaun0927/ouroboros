@@ -272,3 +272,40 @@ def test_dispatch_requires_confirmation_command_prompts_user(
         f"declined confirmation must produce a non-zero exit; "
         f"got {result.exit_code}; stdout={result.stdout!r}"
     )
+
+
+def test_dispatch_friendly_error_on_corrupt_trust_state(
+    stub_default_paths: dict[str, Path],
+) -> None:
+    """Regression for the bot's BLOCKING finding on plugin_dispatch.py:111.
+
+    The dispatcher is now a primary user-facing invocation path, so a
+    malformed ``trust.json`` MUST produce a controlled refusal — not a
+    raw traceback from ``trust.read()``. The fix wraps the
+    trust/disable lookup in a try/except so the user sees a one-line
+    error pointing at the recovery action and the process exits
+    non-zero.
+    """
+    plugin_home = _stage_installed_plugin(
+        home_root=stub_default_paths["homes"],
+        lockfile_path=stub_default_paths["lockfile"],
+        trust_root=stub_default_paths["trust"],
+    )
+    # Corrupt the trust file post-install. ``trust.read()`` must raise.
+    trust_file = stub_default_paths["trust"] / REFERENCE_MANIFEST["name"] / "trust.json"
+    trust_file.write_text("{ malformed json")
+
+    cmd = build_plugin_dispatch_command("github-pr-ops")
+    assert cmd is not None
+    runner = CliRunner()
+    result = runner.invoke(cmd, ["review", "https://example.com/pr/1"])
+    assert result.exit_code != 0, (
+        f"corrupt trust state must produce a non-zero exit; "
+        f"got {result.exit_code}; stdout={result.stdout!r}"
+    )
+    # No raw traceback in user-facing output.
+    assert "Traceback" not in result.output
+    assert "unreadable" in result.output, result.output
+    # Sanity: the plugin home is untouched (no install state was
+    # mutated by the failed dispatch).
+    assert plugin_home.exists()

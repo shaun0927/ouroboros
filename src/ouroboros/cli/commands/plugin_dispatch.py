@@ -109,12 +109,25 @@ def build_plugin_dispatch_command(cmd_name: str) -> click.Command | None:
             raise click.exceptions.Exit(code=1)
 
         trust = TrustStore(root=DEFAULT_TRUST_ROOT)
-        record = trust.read(program.name)
-        is_disabled = trust.is_disabled_for_subject(
-            program.name,
-            source_type=entry.source_type or "",
-            source_identity=entry.source_identity or "",
-        )
+        # The dispatcher is now a primary user-facing invocation path,
+        # so a malformed `trust.json` / `disabled.json` MUST produce a
+        # controlled refusal here instead of a traceback. Surface a
+        # one-line message that names the recovery action and exit
+        # non-zero — the same shape every other CLI failure takes.
+        try:
+            record = trust.read(program.name)
+            is_disabled = trust.is_disabled_for_subject(
+                program.name,
+                source_type=entry.source_type or "",
+                source_identity=entry.source_identity or "",
+            )
+        except (ValueError, OSError) as exc:
+            print_error(
+                f"trust state for {program.name!r} is unreadable: {exc}. "
+                f"Run `ooo plugin inspect {program.name}` for details, or "
+                f"remove the offending file under {DEFAULT_TRUST_ROOT}."
+            )
+            raise click.exceptions.Exit(code=1) from exc
         plugin_home = Path(entry.plugin_home).expanduser()
 
         # Per the locked RFC ("Invocation Contract / Confirmation gate"),

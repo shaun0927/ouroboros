@@ -33,6 +33,7 @@ async session and bridges to `append_fn`.
 from __future__ import annotations
 
 from collections.abc import Callable
+import copy
 import uuid
 
 PLUGIN_AGGREGATE_TYPE = "plugin"
@@ -89,7 +90,11 @@ def wrap_plugin_event(
         "aggregate_type": PLUGIN_AGGREGATE_TYPE,
         "aggregate_id": aggregate_id or correlation_id,
         "event_type": audit_event["event_type"],
-        "payload": dict(audit_event),  # shallow copy so callers can't mutate stored form
+        # Deep copy: plugin audit events have nested dicts (`plugin`,
+        # `command`, `result`, `provenance`). A shallow `dict(...)`
+        # would let a caller's later mutation of any nested dict bleed
+        # into the wrapped envelope and corrupt the audit log.
+        "payload": copy.deepcopy(audit_event),
         "timestamp": audit_event["occurred_at"],
     }
 
@@ -117,7 +122,9 @@ def unwrap_plugin_event(envelope: dict) -> dict:
     payload = envelope.get("payload")
     if not isinstance(payload, dict):
         raise ValueError("envelope payload is missing or not a dict")
-    return dict(payload)
+    # Symmetric with `wrap_plugin_event` — caller-side mutation of the
+    # unwrapped event must not bleed back into the stored envelope.
+    return copy.deepcopy(payload)
 
 
 def make_event_sink(

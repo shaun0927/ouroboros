@@ -143,7 +143,7 @@ def _subject_drift_reason(
     return "subject changed"
 
 
-def _trust_state_label(
+def _describe_trust_state(
     manifest: PluginManifest,
     trust_store: TrustStore,
     *,
@@ -151,6 +151,13 @@ def _trust_state_label(
     expected_artifact_digest: str | None = None,
 ) -> str:
     """Compute the displayed trust state for a manifest.
+
+    Note on naming: ``firewall.py`` defines a sibling helper that takes
+    a ``TrustRecord``. This CLI helper deliberately takes the
+    ``TrustStore`` itself because ``inspect``/``list`` need the
+    name-only ``is_disabled`` fallback, which only the store can
+    answer. Distinct names prevent reviewers from inferring the wrong
+    signature from the call site.
 
     Per the locked RFC ("Trust identity"), the full install subject is
     ``(version, source.type, source_identity, artifact_digest)``;
@@ -555,7 +562,7 @@ def inspect_command(
     if entry.git_sha:
         console.print(f"  git_sha:        {entry.git_sha}")
     console.print(
-        f"  trust_state:    {_trust_state_label(manifest, trust, expected_source_identity=entry.source_identity or None, expected_artifact_digest=entry.artifact_digest or None)}"
+        f"  trust_state:    {_describe_trust_state(manifest, trust, expected_source_identity=entry.source_identity or None, expected_artifact_digest=entry.artifact_digest or None)}"
     )
     console.print(f"  granted_scopes: {', '.join(granted) if granted else '(none)'}")
     if record is not None and not applies:
@@ -660,7 +667,7 @@ def list_command(
         # operator should still see every other plugin's state.
         try:
             record = trust.read(entry.name)
-            trust_state = _trust_state_label(
+            trust_state = _describe_trust_state(
                 manifest,
                 trust,
                 expected_source_identity=entry.source_identity or None,
