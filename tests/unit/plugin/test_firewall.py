@@ -430,6 +430,143 @@ def test_stale_trust_record_after_version_bump_blocks(tmp_path: Path) -> None:
     assert events[0]["trust_state"] == "installed"
 
 
+# ---------------------------------------------------------------------------
+# RFC trust-subject + cwd contract tests (`docs/rfc/userlevel-plugins.md`)
+# ---------------------------------------------------------------------------
+
+
+def test_artifact_digest_drift_blocks_with_trust_subject_changed(tmp_path: Path) -> None:
+    """Per the RFC ("Trust identity"), the firewall recomputes the
+    canonical tree hash of `plugin_home` before every invocation and
+    refuses to launch on drift, with `result.status="trust_subject_changed"`.
+    """
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    events: list[dict] = []
+    # Pretend the lockfile recorded a digest that does NOT match what's
+    # currently on disk in `tmp_path`.
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-drift",
+        plugin_home=tmp_path,
+        expected_artifact_digest=(
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+        ),
+        subprocess_runner=_fake_runner(),
+    )
+    assert result.status == "blocked"
+    types = [e["event_type"] for e in events]
+    assert types == ["plugin.failed"]
+    assert "plugin.invoked" not in types
+    assert events[0]["result"]["status"] == "trust_subject_changed"
+    assert "current_artifact_digest" in events[0]["provenance"]
+
+
+def test_artifact_digest_match_proceeds(tmp_path: Path) -> None:
+    """When the recomputed digest matches the lockfile-recorded digest,
+    the trust check + invocation proceed normally.
+    """
+    from ouroboros.plugin.digest import canonical_tree_hash
+
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    expected_digest = canonical_tree_hash(tmp_path)
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-match",
+        plugin_home=tmp_path,
+        expected_artifact_digest=expected_digest,
+        subprocess_runner=_fake_runner(stdout="ok"),
+    )
+    assert result.status == "success"
+    types = [e["event_type"] for e in events]
+    assert types == ["plugin.invoked", "plugin.permission_used", "plugin.completed"]
+
+
+def test_disable_record_blocks_independently_of_trust(tmp_path: Path) -> None:
+    """A disabled plugin must be refused by the firewall regardless of
+    trust state. RFC: the firewall MUST consult the disable record before
+    any invocation.
+    """
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,  # fully trusted
+        event_sink=events.append,
+        correlation_id="corr-disabled",
+        is_disabled=True,
+        subprocess_runner=_fake_runner(),
+    )
+    assert result.status == "blocked"
+    types = [e["event_type"] for e in events]
+    assert types == ["plugin.failed"]
+    assert events[0]["trust_state"] == "disabled"
+    assert events[0]["provenance"]["reason"] == "disabled"
+
+
+def test_subprocess_invoked_with_plugin_home_as_cwd(tmp_path: Path) -> None:
+    """When the caller plumbs `plugin_home`, the entrypoint subprocess
+    must be launched with `cwd=plugin_home` so that
+    `python -m github_pr_ops` resolves the plugin's modules from the
+    installed root, not from the user's terminal cwd.
+
+    Regression catch for the bot's BLOCKING finding on
+    `firewall.py:319` (cwd / import-path adjustment missing).
+    """
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    seen_cwds: list[object] = []
+
+    def _spy(argv, *args, **kwargs):
+        seen_cwds.append(kwargs.get("cwd"))
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+
+    invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=lambda _e: None,
+        correlation_id="corr-cwd",
+        plugin_home=tmp_path,
+        subprocess_runner=_spy,
+    )
+    assert seen_cwds == [str(tmp_path)], seen_cwds
+
+
 def test_entrypoint_missing_emits_failed_127(tmp_path: Path) -> None:
     """Test 9: subprocess FileNotFoundError → status=failed, exit_code=127."""
     program = _make_program(tmp_path)

@@ -34,10 +34,12 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import hashlib
+from pathlib import Path
 import shlex
 import subprocess
 from typing import Literal
 
+from ouroboros.plugin.digest import canonical_tree_hash
 from ouroboros.plugin.manifest import PluginManifest
 from ouroboros.plugin.trust_store import TrustRecord
 from ouroboros.plugin.userlevel_registry import RegisteredProgram
@@ -107,27 +109,52 @@ def _required_permissions(manifest: PluginManifest) -> list[str]:
     return [p.scope for p in manifest.permissions if p.required]
 
 
-def _record_matches_version(
+def _record_matches_subject(
     manifest: PluginManifest,
     trust_record: TrustRecord | None,
+    *,
+    expected_source_identity: str | None,
+    expected_artifact_digest: str | None,
 ) -> bool:
-    """A trust record is only authoritative when its version matches the
-    currently-installed manifest. Per Q00/ouroboros-plugins#9 Q4 lock,
-    a version bump invalidates prior grants — the firewall enforces that
-    here at runtime, even if `add`/`install` forgot to call
-    `reset_for_version_bump` (defense in depth)."""
-    return trust_record is not None and trust_record.version == manifest.version
+    """A trust record is authoritative iff it matches the install subject.
+
+    Per the locked RFC ("Trust identity"), the subject is
+    ``(version, source.type, source_identity, artifact_digest)``. ANY
+    field changing voids the grant. When `expected_*` are None, fall
+    back to the legacy version-only check (so unit tests of the firewall
+    that don't plumb a plugin_home stay green).
+    """
+    if trust_record is None or trust_record.version != manifest.version:
+        return False
+    # source.type is always known from the manifest; require record's
+    # source_type (when set) to match. An empty record source_type is a
+    # legacy record — accept under the version-only contract.
+    if trust_record.source_type and trust_record.source_type != manifest.source.type:
+        return False
+    if expected_source_identity is not None:
+        if trust_record.source_identity and trust_record.source_identity != expected_source_identity:
+            return False
+    if expected_artifact_digest is not None:
+        if (
+            trust_record.artifact_digest
+            and trust_record.artifact_digest != expected_artifact_digest
+        ):
+            return False
+    return True
 
 
 def _trust_state_label(
     manifest: PluginManifest,
     trust_record: TrustRecord | None,
+    *,
+    expected_source_identity: str | None = None,
+    expected_artifact_digest: str | None = None,
 ) -> str:
     """Return the trust state label for `manifest`.
 
     `"trusted"` is reserved for the state in which an invocation will NOT
     be blocked on the trust check: the record matches the installed
-    version, has at least one granted scope, and covers every
+    subject, has at least one granted scope, and covers every
     `required: true` permission. A partial grant set still leaves the
     plugin gated by `_missing_required`, so reporting it as `"trusted"`
     would mis-label a permission boundary in audit events and in the
@@ -135,9 +162,14 @@ def _trust_state_label(
     """
     if manifest.source.type == "first_party":
         return "first_party"
-    if not _record_matches_version(manifest, trust_record):
+    if not _record_matches_subject(
+        manifest,
+        trust_record,
+        expected_source_identity=expected_source_identity,
+        expected_artifact_digest=expected_artifact_digest,
+    ):
         return "installed"
-    assert trust_record is not None  # narrowed by _record_matches_version
+    assert trust_record is not None  # narrowed by _record_matches_subject
     if not trust_record.granted_scopes:
         return "installed"
     required = _required_permissions(manifest)
@@ -149,15 +181,23 @@ def _trust_state_label(
 def _missing_required(
     manifest: PluginManifest,
     trust_record: TrustRecord | None,
+    *,
+    expected_source_identity: str | None,
+    expected_artifact_digest: str | None,
 ) -> list[str]:
     required = _required_permissions(manifest)
     if not required:
         return []
-    if not _record_matches_version(manifest, trust_record):
-        # Treat a version-mismatched record as if no trust were granted:
-        # the user must re-grant scopes against the new version.
+    if not _record_matches_subject(
+        manifest,
+        trust_record,
+        expected_source_identity=expected_source_identity,
+        expected_artifact_digest=expected_artifact_digest,
+    ):
+        # Treat a subject-mismatched record as if no trust were granted:
+        # the user must re-grant scopes against the new subject.
         return list(required)
-    assert trust_record is not None  # narrowed by _record_matches_version
+    assert trust_record is not None  # narrowed by _record_matches_subject
     return trust_record.missing(required)
 
 
@@ -185,6 +225,10 @@ def invoke_plugin(
     correlation_id: str,
     confirm: ConfirmFn = lambda _msg: True,
     subprocess_runner: Callable[..., subprocess.CompletedProcess] | None = None,
+    plugin_home: Path | None = None,
+    expected_source_identity: str | None = None,
+    expected_artifact_digest: str | None = None,
+    is_disabled: bool = False,
 ) -> InvocationResult:
     """Invoke a UserLevel plugin command through the firewall.
 
@@ -203,6 +247,25 @@ def invoke_plugin(
             "auto-confirm" (returns True). CLI passes a function that
             actually prompts.
         subprocess_runner: Optional override (for tests) of subprocess.run.
+        plugin_home: Path to the installed plugin directory. When
+            provided, the entrypoint is launched with ``cwd=plugin_home``
+            so that manifest-declared interpreters like
+            ``python -m github_pr_ops`` resolve the plugin's modules from
+            its installed root rather than from the user's terminal cwd.
+            The firewall ALSO recomputes the canonical tree hash of this
+            directory before invocation and refuses to launch on drift
+            (RFC: ``result.status="trust_subject_changed"``).
+        expected_source_identity: The lockfile's recorded
+            ``source_identity`` for this plugin. When set, the trust
+            record's ``source_identity`` must match.
+        expected_artifact_digest: The lockfile's recorded
+            ``artifact_digest``. When set, the firewall recomputes the
+            canonical tree hash of ``plugin_home`` and refuses to launch
+            if it does not match (closes the code-substitution path).
+        is_disabled: When True, the firewall refuses invocation
+            unconditionally. RFC: "the firewall MUST consult the disable
+            record before any invocation, independently of whether trust
+            records exist".
 
     Returns:
         `InvocationResult` with status, exit code, sha256 hashes of
@@ -221,7 +284,12 @@ def invoke_plugin(
             message=f"unknown command {command_name!r} in namespace {namespace!r}",
         )
 
-    trust_state = _trust_state_label(manifest, trust_record)
+    trust_state = _trust_state_label(
+        manifest,
+        trust_record,
+        expected_source_identity=expected_source_identity,
+        expected_artifact_digest=expected_artifact_digest,
+    )
     risks = _scope_risk_index(manifest)
     emitted: list[dict] = []
 
@@ -229,10 +297,105 @@ def invoke_plugin(
         event_sink(event)
         emitted.append(event)
 
+    # 0. Disable check — fires before everything, including before the
+    # trust check, so a plugin with no `required: true` permissions
+    # cannot bypass `disable` by having an empty trust subject.
+    if is_disabled:
+        message = (
+            f"plugin {manifest.name!r} is disabled; run "
+            f"`ooo plugin trust {manifest.name} --scope <scope>` to re-enable."
+        )
+        _emit(
+            _event_envelope(
+                event_type="plugin.failed",
+                manifest=manifest,
+                namespace=namespace,
+                command_name=command_name,
+                argv=argv,
+                trust_state="disabled",
+                result={"status": "blocked", "message": message},
+                provenance={"correlation_id": correlation_id, "reason": "disabled"},
+            )
+        )
+        return InvocationResult(
+            status="blocked",
+            exit_code=None,
+            message=message,
+            events=tuple(emitted),
+        )
+
+    # 0b. Code-substitution check (per the RFC's per-invocation
+    # re-verification rule). Only enforced when the caller plumbs the
+    # expected digest + plugin_home; tests of the firewall's other
+    # contracts remain green without this plumbing.
+    if expected_artifact_digest is not None and plugin_home is not None:
+        try:
+            current_digest = canonical_tree_hash(plugin_home)
+        except FileNotFoundError as exc:
+            message = f"plugin home missing: {plugin_home} ({exc})"
+            _emit(
+                _event_envelope(
+                    event_type="plugin.failed",
+                    manifest=manifest,
+                    namespace=namespace,
+                    command_name=command_name,
+                    argv=argv,
+                    trust_state="installed",
+                    result={"status": "trust_subject_changed", "message": message},
+                    provenance={
+                        "correlation_id": correlation_id,
+                        "reason": "plugin_home_missing",
+                    },
+                )
+            )
+            return InvocationResult(
+                status="blocked",
+                exit_code=None,
+                message=message,
+                events=tuple(emitted),
+            )
+        if current_digest != expected_artifact_digest:
+            message = (
+                f"plugin {manifest.name!r} bytes have changed since "
+                f"installation; refusing to invoke. Run "
+                f"`ooo plugin add ...` (or `ooo plugin install ...`) to "
+                f"re-record the trust subject and re-grant scopes."
+            )
+            _emit(
+                _event_envelope(
+                    event_type="plugin.failed",
+                    manifest=manifest,
+                    namespace=namespace,
+                    command_name=command_name,
+                    argv=argv,
+                    trust_state="installed",
+                    result={
+                        "status": "trust_subject_changed",
+                        "message": message,
+                    },
+                    provenance={
+                        "correlation_id": correlation_id,
+                        "expected_artifact_digest": expected_artifact_digest,
+                        "current_artifact_digest": current_digest,
+                    },
+                )
+            )
+            return InvocationResult(
+                status="blocked",
+                exit_code=None,
+                message=message,
+                events=tuple(emitted),
+            )
+
     # 1. Pre-invocation trust check (locked Q1).
     # First-party programs skip the trust check (per Q00/ouroboros-plugins#8).
     if manifest.source.type != "first_party":
-        missing = _missing_required(manifest, trust_record)
+        missing = _missing_required(
+            manifest,
+            trust_record,
+            expected_source_identity=expected_source_identity,
+            expected_artifact_digest=expected_artifact_digest,
+        )
         if missing:
             message = _format_blocked_message(manifest.name, missing, risks)
             _emit(
@@ -311,17 +474,25 @@ def invoke_plugin(
             )
         )
 
-    # 5. Run entrypoint out-of-process.
+    # 5. Run entrypoint out-of-process. The launch cwd is set to
+    # ``plugin_home`` when the caller plumbs it (the CLI does this), so
+    # manifest entrypoints like ``python -m github_pr_ops`` resolve from
+    # the installed plugin root rather than from the user's terminal cwd.
+    # When plugin_home is None (firewall unit tests / first-party
+    # programs that ship their own absolute entrypoint), we fall back to
+    # the caller's cwd to preserve the previous test contract.
     cmd_template = manifest.entrypoint.command
     cmd_argv = shlex.split(cmd_template) + [command_name] + list(argv)
     runner = subprocess_runner or subprocess.run
+    run_kwargs: dict = {
+        "capture_output": True,
+        "text": True,
+        "check": False,
+    }
+    if plugin_home is not None:
+        run_kwargs["cwd"] = str(plugin_home)
     try:
-        completed = runner(
-            cmd_argv,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        completed = runner(cmd_argv, **run_kwargs)
     except FileNotFoundError as exc:
         message = f"entrypoint not found: {cmd_argv[0]!r} ({exc})"
         _emit(

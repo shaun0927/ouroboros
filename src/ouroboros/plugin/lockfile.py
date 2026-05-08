@@ -33,7 +33,25 @@ DEFAULT_LOCKFILE_PATH = Path.home() / ".ouroboros" / "plugins.lock"
 
 @dataclass(frozen=True)
 class LockEntry:
-    """One installed plugin's lockfile record."""
+    """One installed plugin's lockfile record.
+
+    Per the locked RFC (`docs/rfc/userlevel-plugins.md`, "Trust identity"),
+    the install subject is keyed by the tuple
+    ``(source.type, source_identity, artifact_digest)``:
+
+    - ``source_type`` is the manifest's ``source.type`` enum
+      (``local_path`` | ``plugin_home`` | ``first_party``). It is mapped
+      from ``source_kind`` ("git" | "local") at install time.
+    - ``source_identity`` is the normalized repo URL (for ``plugin_home``)
+      or absolute resolved filesystem path (for ``local_path``).
+    - ``artifact_digest`` is the canonical tree hash of the **complete
+      installed artifact** (see ``ouroboros.plugin.digest``), recomputed
+      before every invocation by the firewall.
+
+    The triple is recorded at install time so the firewall can detect
+    code substitution under the same source: a digest mismatch fails
+    closed with ``result.status="trust_subject_changed"``.
+    """
 
     name: str
     version: str
@@ -43,6 +61,13 @@ class LockEntry:
     manifest_checksum: str  # "sha256:<hex>"
     installed_at: str  # RFC3339
     plugin_home: str  # filesystem path
+    # New trust-subject fields (RFC). Older lockfile rows that pre-date
+    # this contract will read as empty strings; the firewall treats
+    # empty values conservatively (legacy → no digest enforcement, but
+    # CLI install paths always populate them so prod records are bound).
+    source_type: str = ""  # manifest source.type ("local_path" | "plugin_home")
+    source_identity: str = ""  # normalized repo URL or absolute local path
+    artifact_digest: str = ""  # canonical tree hash, "sha256:<hex>"
 
     def to_toml_lines(self) -> list[str]:
         lines = ["[[plugin]]"]
@@ -56,6 +81,12 @@ class LockEntry:
         lines.append(f"manifest_checksum = {_toml_str(self.manifest_checksum)}")
         lines.append(f"installed_at = {_toml_str(self.installed_at)}")
         lines.append(f"plugin_home = {_toml_str(self.plugin_home)}")
+        if self.source_type:
+            lines.append(f"source_type = {_toml_str(self.source_type)}")
+        if self.source_identity:
+            lines.append(f"source_identity = {_toml_str(self.source_identity)}")
+        if self.artifact_digest:
+            lines.append(f"artifact_digest = {_toml_str(self.artifact_digest)}")
         return lines
 
 
@@ -113,6 +144,9 @@ class Lockfile:
                 manifest_checksum=raw["manifest_checksum"],
                 installed_at=raw["installed_at"],
                 plugin_home=raw["plugin_home"],
+                source_type=raw.get("source_type", ""),
+                source_identity=raw.get("source_identity", ""),
+                artifact_digest=raw.get("artifact_digest", ""),
             )
             result[entry.name] = entry
         return result

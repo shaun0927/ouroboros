@@ -809,3 +809,359 @@ def test_remove_uninstalled_errors(runner: CliRunner, tmp_path: Path) -> None:
     )
     assert result.exit_code == 1
     assert "is not installed" in result.output
+
+
+# ---------------------------------------------------------------------------
+# RFC-contract tests (`docs/rfc/userlevel-plugins.md`)
+# ---------------------------------------------------------------------------
+
+
+def _install_reference_plugin(
+    runner: CliRunner,
+    *,
+    plugin_dir: Path,
+    paths: dict[str, Path],
+) -> None:
+    """Helper: stamp a reference manifest at `plugin_dir` and install it."""
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    (plugin_dir / "ouroboros.plugin.json").write_text(json.dumps(REFERENCE_MANIFEST))
+    runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(plugin_dir),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+
+
+def test_install_records_artifact_digest_in_lockfile(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """The lockfile must record the canonical tree hash + source identity
+    so the firewall can detect code substitution per the RFC.
+    """
+    paths = _common_paths(tmp_path)
+    plugin_dir = tmp_path / "src"
+    _install_reference_plugin(runner, plugin_dir=plugin_dir, paths=paths)
+
+    entries = Lockfile(paths["lockfile"]).read()
+    entry = entries["github-pr-ops"]
+    assert entry.source_type == "local_path"
+    assert entry.source_identity, "source_identity must be recorded"
+    assert entry.artifact_digest.startswith("sha256:")
+    # Digest should match recomputing from disk.
+    from ouroboros.plugin.digest import canonical_tree_hash
+
+    on_disk = canonical_tree_hash(paths["plugin_home_root"] / "github-pr-ops")
+    assert entry.artifact_digest == on_disk
+
+
+def test_trust_binds_to_install_subject(runner: CliRunner, tmp_path: Path) -> None:
+    """`trust` must record the lockfile's source_identity + digest on the
+    trust file, so a future code-substitution invalidates the grant.
+    """
+    paths = _common_paths(tmp_path)
+    plugin_dir = tmp_path / "src"
+    _install_reference_plugin(runner, plugin_dir=plugin_dir, paths=paths)
+    runner.invoke(
+        plugin_app,
+        [
+            "trust",
+            "github-pr-ops",
+            "--scope",
+            "github:read",
+            "--granted-by",
+            "user:test",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    record = TrustStore(root=paths["trust_root"]).read("github-pr-ops")
+    assert record is not None
+    assert record.source_type == "local_path"
+    assert record.source_identity, "source_identity must be on the trust record"
+    assert record.artifact_digest.startswith("sha256:")
+    # Mismatched digest invalidates the subject — same trust record, but
+    # passed a substituted digest, must not match.
+    assert not record.matches_subject(
+        version="0.1.0",
+        source_type="local_path",
+        source_identity=record.source_identity,
+        artifact_digest="sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    )
+    # And exact match still resolves.
+    assert record.matches_subject(
+        version="0.1.0",
+        source_type="local_path",
+        source_identity=record.source_identity,
+        artifact_digest=record.artifact_digest,
+    )
+
+
+def test_install_same_version_different_source_invalidates_trust(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """The RFC's "same-name reinstall under a different source" path: a
+    second install of the same name+version from a DIFFERENT directory
+    must NOT inherit the prior trust grants — the source_identity has
+    changed, so the trust subject is fresh.
+    """
+    paths = _common_paths(tmp_path)
+    src_a = tmp_path / "src_a"
+    src_b = tmp_path / "src_b"
+    _install_reference_plugin(runner, plugin_dir=src_a, paths=paths)
+    runner.invoke(
+        plugin_app,
+        [
+            "trust",
+            "github-pr-ops",
+            "--scope",
+            "github:read",
+            "--granted-by",
+            "user:test",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    pre = TrustStore(root=paths["trust_root"]).read("github-pr-ops")
+    assert pre is not None and pre.has_scope("github:read")
+
+    # Same version, same name, different source directory.
+    src_b.mkdir()
+    (src_b / "ouroboros.plugin.json").write_text(json.dumps(REFERENCE_MANIFEST))
+    runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(src_b),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    post = TrustStore(root=paths["trust_root"]).read("github-pr-ops")
+    assert post is not None
+    # Trust must have been reset because source_identity changed.
+    assert post.granted_scopes == (), (
+        f"reinstall from a different source must clear trust; got {post.granted_scopes}"
+    )
+
+
+def test_install_named_with_from_local_path(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """RFC qualified form: `install <name> --from <local-path>` is the
+    register-on-first-use entrypoint for local_path sources.
+    """
+    paths = _common_paths(tmp_path)
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "ouroboros.plugin.json").write_text(json.dumps(REFERENCE_MANIFEST))
+    catalog_state = tmp_path / "catalog-state.json"
+    result = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            "github-pr-ops",
+            "--from",
+            str(src.resolve()),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--catalog-state",
+            str(catalog_state),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "github-pr-ops" in Lockfile(paths["lockfile"]).read()
+    # Catalog registered the local_path entry.
+    payload = json.loads(catalog_state.read_text())
+    catalogs = payload["catalogs"]
+    assert any(
+        c["source_type"] == "local_path" and "github-pr-ops" in c["plugins"]
+        for c in catalogs
+    )
+
+
+def test_install_named_default_form_with_no_known_catalog_errors(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """`install <name>` with no known catalog must error and tell the user
+    how to recover (RFC: name BOTH `add <repo>` and the `--from <path>`
+    qualified form so users with a local checkout aren't misdirected).
+    """
+    paths = _common_paths(tmp_path)
+    catalog_state = tmp_path / "catalog-state.json"
+    result = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--catalog-state",
+            str(catalog_state),
+        ],
+    )
+    assert result.exit_code == 1
+    # Rich panel wraps long messages and inserts │ border chars; strip
+    # ANSI + panel borders before matching.
+    import re
+
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    plain = plain.replace("│", " ").replace("╭", " ").replace("╮", " ")
+    plain = plain.replace("╰", " ").replace("╯", " ").replace("─", " ")
+    flat = " ".join(plain.split())
+    assert "not in any known catalog" in flat
+    assert "ooo plugin add" in flat
+    assert "--from" in flat
+
+
+def test_disable_writes_record_persisting_across_install(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """RFC: a disable record is keyed by (name, source.type, source_identity)
+    without artifact_digest, so it survives upgrades (and any reinstall
+    that lands the same source identity).
+    """
+    paths = _common_paths(tmp_path)
+    src = tmp_path / "src"
+    _install_reference_plugin(runner, plugin_dir=src, paths=paths)
+
+    # Disable.
+    res = runner.invoke(
+        plugin_app,
+        [
+            "disable",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    assert res.exit_code == 0, res.output
+    trust = TrustStore(root=paths["trust_root"])
+    assert trust.is_disabled("github-pr-ops")
+    rec = trust.read_disable("github-pr-ops")
+    assert rec is not None
+    assert rec["source_type"] == "local_path"
+    assert rec["source_identity"]
+
+    # Re-install at a different version (artifact_digest WILL change)
+    # but from the same source directory. The disable record must still
+    # be present.
+    bumped = {**REFERENCE_MANIFEST, "version": "0.2.0"}
+    (src / "ouroboros.plugin.json").write_text(json.dumps(bumped))
+    runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(src),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    assert trust.is_disabled("github-pr-ops"), (
+        "disable record must survive upgrades — it is keyed without artifact_digest"
+    )
+
+
+def test_trust_clears_disable_record(runner: CliRunner, tmp_path: Path) -> None:
+    """Re-trusting is the re-enable path per the RFC: it MUST clear any
+    disable record AND grant the requested scope under the current
+    install subject.
+    """
+    paths = _common_paths(tmp_path)
+    src = tmp_path / "src"
+    _install_reference_plugin(runner, plugin_dir=src, paths=paths)
+    runner.invoke(
+        plugin_app,
+        [
+            "disable",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    assert TrustStore(root=paths["trust_root"]).is_disabled("github-pr-ops")
+    runner.invoke(
+        plugin_app,
+        [
+            "trust",
+            "github-pr-ops",
+            "--scope",
+            "github:read",
+            "--granted-by",
+            "user:test",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    trust = TrustStore(root=paths["trust_root"])
+    assert not trust.is_disabled("github-pr-ops"), (
+        "trust must clear the disable record (re-enable path)"
+    )
+    rec = trust.read("github-pr-ops")
+    assert rec is not None and rec.has_scope("github:read")
+
+
+def test_remove_clears_disable_record(runner: CliRunner, tmp_path: Path) -> None:
+    """RFC: `remove` ALSO deletes the disable record so a fresh future
+    install starts un-trusted-but-enabled (not silently disabled).
+    """
+    paths = _common_paths(tmp_path)
+    src = tmp_path / "src"
+    _install_reference_plugin(runner, plugin_dir=src, paths=paths)
+    runner.invoke(
+        plugin_app,
+        [
+            "disable",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    assert TrustStore(root=paths["trust_root"]).is_disabled("github-pr-ops")
+    runner.invoke(
+        plugin_app,
+        [
+            "remove",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+        ],
+    )
+    assert not TrustStore(root=paths["trust_root"]).is_disabled("github-pr-ops")

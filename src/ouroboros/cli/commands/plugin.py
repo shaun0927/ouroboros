@@ -32,6 +32,11 @@ from ouroboros.cli.formatters.panels import (
     print_success,
 )
 from ouroboros.cli.formatters.tables import create_table, print_table
+from ouroboros.plugin.digest import (
+    canonical_tree_hash,
+    normalize_local_path,
+    normalize_repo_url,
+)
 from ouroboros.plugin.ledger_adapter import wrap_plugin_event
 from ouroboros.plugin.lockfile import DEFAULT_LOCKFILE_PATH, LockEntry, Lockfile
 from ouroboros.plugin.manifest import (
@@ -157,25 +162,172 @@ def _atomic_replace_dir(src: Path, dest: Path) -> None:
         shutil.rmtree(backup, ignore_errors=True)
 
 
+def _maybe_invalidate_trust_for_subject_change(
+    *,
+    name: str,
+    new_version: str,
+    new_source_type: str,
+    new_source_identity: str,
+    new_artifact_digest: str,
+    trust: TrustStore,
+) -> None:
+    """Invalidate the trust file when the install subject changes.
+
+    Per the locked RFC ("Trust identity"), the trust subject is the tuple
+    ``(version, source.type, source_identity, artifact_digest)``. ANY
+    field changing voids prior grants — that closes both the same-name
+    reinstall path and the code-substitution path.
+
+    We compare against the trust record's own subject (not the lockfile's
+    prior entry) because callers run this AFTER `_install_one` has
+    updated the lockfile. The trust file remains the authoritative
+    pointer to the subject that was last consented to.
+    """
+    record = trust.read(name)
+    if record is None:
+        return
+    if (
+        record.version == new_version
+        # Treat empty record fields as "legacy / unbound" — match if the
+        # new value matches OR the record is silent on that field.
+        and (not record.source_type or record.source_type == new_source_type)
+        and (not record.source_identity or record.source_identity == new_source_identity)
+        and (not record.artifact_digest or record.artifact_digest == new_artifact_digest)
+    ):
+        return
+    trust.reset_for_subject_change(
+        name,
+        new_version=new_version,
+        new_source_type=new_source_type,
+        new_source_identity=new_source_identity,
+        new_artifact_digest=new_artifact_digest,
+    )
+
+
+# Retained for callers that only know the version (no install-subject
+# context). New code should prefer the subject-aware variant.
 def _maybe_invalidate_trust_for_version_bump(
     *,
     name: str,
     new_version: str,
     trust: TrustStore,
 ) -> None:
-    """If the existing trust record's version no longer matches `new_version`,
-    reset the trust file. Per Q00/ouroboros-plugins#9 Q4 lock — a version
-    bump must invalidate prior grants so the user is forced to re-consent.
-
-    We compare against the trust record's own version (not the lockfile's
-    prior entry) because callers run this AFTER `_install_one` has updated
-    the lockfile. The trust file remains the authoritative pointer to the
-    version that was last consented to.
-    """
     record = trust.read(name)
     if record is None or record.version == new_version:
         return
     trust.reset_for_version_bump(name, new_version)
+
+
+# ---------------------------------------------------------------------------
+# Known-catalog registry — backs `ooo plugin install <name>` resolution.
+# ---------------------------------------------------------------------------
+
+
+DEFAULT_CATALOG_STATE_PATH = Path.home() / ".ouroboros" / "plugin-catalogs.json"
+
+
+class CatalogRegistry:
+    """Persistent record of catalogs the user has interacted with.
+
+    Per the locked RFC ("How sources enter the known catalog"), v0 has
+    exactly two registration paths:
+
+    - ``plugin_home`` sources are registered by ``ooo plugin add <repo>``.
+      The repo URL becomes a known catalog at that moment, regardless of
+      whether the user proceeds to install anything from the selection
+      prompt. Subsequent ``install``s can address that ``name`` without
+      re-fetching.
+    - ``local_path`` sources are registered the first time the user runs
+      ``ooo plugin install <name> --from <local-path>`` against an
+      absolute path.
+
+    The registry stores one entry per ``(source_type, source_identity)``
+    keying directly on the canonical identity, so reinstalls from the
+    same source are idempotent.
+    """
+
+    def __init__(
+        self,
+        *,
+        state_path: Path | None = None,
+        catalog_root: Path | None = None,
+    ) -> None:
+        if state_path is not None:
+            self.state_path = state_path
+        elif catalog_root is not None:
+            self.state_path = catalog_root / "plugin-catalogs.json"
+        else:
+            self.state_path = DEFAULT_CATALOG_STATE_PATH
+
+    def _load(self) -> dict:
+        if not self.state_path.is_file():
+            return {"schema_version": "0.1", "catalogs": []}
+        with self.state_path.open(encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def _save(self, payload: dict) -> None:
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        # Atomic write via temp + replace so a crash mid-update never
+        # leaves the catalog half-written.
+        tmp = self.state_path.with_suffix(self.state_path.suffix + ".tmp")
+        with tmp.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, self.state_path)
+
+    def register(
+        self,
+        *,
+        source_type: str,
+        source_identity: str,
+        plugin_name: str,
+    ) -> None:
+        """Idempotently record a (source, plugin) pair."""
+        data = self._load()
+        catalogs: list[dict] = data.setdefault("catalogs", [])
+        for entry in catalogs:
+            if (
+                entry.get("source_type") == source_type
+                and entry.get("source_identity") == source_identity
+            ):
+                names = set(entry.get("plugins", []))
+                names.add(plugin_name)
+                entry["plugins"] = sorted(names)
+                self._save(data)
+                return
+        catalogs.append(
+            {
+                "source_type": source_type,
+                "source_identity": source_identity,
+                "plugins": [plugin_name],
+            }
+        )
+        self._save(data)
+
+    def find_sources_for(self, plugin_name: str) -> list[dict]:
+        """Return every catalog entry that exposes ``plugin_name``."""
+        data = self._load()
+        return [
+            entry
+            for entry in data.get("catalogs", [])
+            if plugin_name in entry.get("plugins", [])
+        ]
+
+    def find_by_identity(
+        self,
+        *,
+        source_type: str,
+        source_identity: str,
+    ) -> dict | None:
+        data = self._load()
+        for entry in data.get("catalogs", []):
+            if (
+                entry.get("source_type") == source_type
+                and entry.get("source_identity") == source_identity
+            ):
+                return entry
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -513,8 +665,17 @@ def _install_one(
     source_kind: str,
     repository: str | None,
     git_sha: str | None,
+    source_type: str,
+    source_identity: str,
+    artifact_digest: str,
 ) -> LockEntry:
-    """Register one plugin in the lockfile. No trust granted here."""
+    """Register one plugin in the lockfile. No trust granted here.
+
+    Per the locked RFC ("Trust identity"), the lockfile entry carries the
+    full ``(source.type, source_identity, artifact_digest)`` triple so
+    the firewall can detect code substitution and same-name reinstalls
+    from a different source.
+    """
     entry = LockEntry(
         name=manifest.name,
         version=manifest.version,
@@ -524,6 +685,9 @@ def _install_one(
         manifest_checksum=_manifest_checksum(plugin_home),
         installed_at=datetime.datetime.now(tz=datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         plugin_home=str(plugin_home),
+        source_type=source_type,
+        source_identity=source_identity,
+        artifact_digest=artifact_digest,
     )
     lock.add(entry)
     return entry
@@ -601,6 +765,8 @@ def add_command(
         repo_root = clone_dest
         source_kind = "git"
         repository = target
+        source_type = "plugin_home"
+        source_identity = normalize_repo_url(target)
     else:
         # Local path source.
         repo_root = Path(target).expanduser().resolve()
@@ -610,18 +776,39 @@ def add_command(
         git_sha = None
         source_kind = "local"
         repository = None
+        source_type = "local_path"
+        # Each catalog plugin gets its own canonical source_identity
+        # (its absolute path on disk), recorded per-plugin below.
+        source_identity = ""  # set per-plugin below
 
     catalog = _enumerate_catalog(repo_root)
     selected = _select_plugins(catalog, plugin_names)
 
+    # Per the RFC, `add` registers each catalog source as a known catalog
+    # so future `ooo plugin install <name>` invocations can resolve it
+    # without re-fetching. The catalog file is keyed by source_identity.
+    catalog_state = CatalogRegistry(
+        catalog_root=plugin_home_root.parent if plugin_home_root else None
+    )
+
     installed: list[str] = []
     for manifest in selected:
         plugin_home = plugin_home_root / manifest.name
+        # Per-plugin source_identity for local catalogs.
+        if source_kind == "local":
+            plugin_source_identity = str((repo_root / "plugins" / manifest.name).resolve())
+        else:
+            plugin_source_identity = source_identity
         # Atomic install: prior plugin home survives any copy failure.
         # We DO NOT invalidate trust before this step — if the copy
         # fails, the user should still own the unchanged install with
         # its prior grants intact.
         _atomic_replace_dir(repo_root / "plugins" / manifest.name, plugin_home)
+        # Compute the canonical tree hash of the freshly-installed bytes.
+        # Per the RFC, this is the input to the trust subject's
+        # ``artifact_digest`` field; the firewall recomputes it before
+        # every invocation and fails closed on drift.
+        artifact_digest = canonical_tree_hash(plugin_home)
         _install_one(
             manifest=manifest,
             plugin_home=plugin_home,
@@ -629,18 +816,45 @@ def add_command(
             source_kind=source_kind,
             repository=repository,
             git_sha=git_sha,
+            source_type=source_type,
+            source_identity=plugin_source_identity,
+            artifact_digest=artifact_digest,
+        )
+        # Catalog registration: record the source so `install <name>`
+        # can find it later. Also record the plugin -> source mapping so
+        # ambiguity detection works across multiple known catalogs.
+        catalog_state.register(
+            source_type=source_type,
+            source_identity=(
+                normalize_repo_url(target)
+                if source_kind == "git"
+                else str(repo_root.resolve())
+            ),
+            plugin_name=manifest.name,
         )
         # Now that the new version is on disk and recorded in the
-        # lockfile, fulfill Q4: invalidate prior grants on a version
-        # bump. The firewall additionally enforces version-mismatch
-        # invalidation as defense-in-depth, so a crash in the narrow
-        # window between _install_one and this call still keeps the
-        # plugin gated until the user re-grants.
-        _maybe_invalidate_trust_for_version_bump(
+        # lockfile, invalidate prior grants if ANY field of the install
+        # subject changed (RFC: subject = (version, source.type,
+        # source_identity, artifact_digest)). The firewall additionally
+        # enforces subject-mismatch invalidation as defense-in-depth, so
+        # a crash in the narrow window between _install_one and this
+        # call still keeps the plugin gated until the user re-grants.
+        _maybe_invalidate_trust_for_subject_change(
             name=manifest.name,
             new_version=manifest.version,
+            new_source_type=source_type,
+            new_source_identity=plugin_source_identity,
+            new_artifact_digest=artifact_digest,
             trust=trust,
         )
+        # An install at any digest also clears the disable record for
+        # this subject (per the RFC: "remove ALSO deletes any disable
+        # record" and re-trust is the re-enable path). Keep the disable
+        # signal for `disable` and the subject-stable
+        # `(name, source.type, source_identity)` keying — meaning a
+        # vanilla `add`/`install` does NOT auto-clear disable. Only
+        # `trust` and `remove` clear it (RFC: "Re-enabling is performed
+        # by re-running ooo plugin trust").
         installed.append(f"{manifest.name} {manifest.version}")
         required = [p.scope for p in manifest.permissions if p.required]
         if required:
@@ -654,10 +868,27 @@ def add_command(
 
 @app.command("install")
 def install_command(
-    path: Annotated[
-        Path,
-        typer.Argument(help="Local plugin directory containing ouroboros.plugin.json."),
+    target: Annotated[
+        str,
+        typer.Argument(
+            help=(
+                "Either: a plugin name (resolves via the known-catalog registry — "
+                "ambiguous names require --from), OR a local plugin directory "
+                "containing ouroboros.plugin.json (legacy form)."
+            ),
+        ),
     ],
+    from_source: Annotated[
+        str | None,
+        typer.Option(
+            "--from",
+            help=(
+                "Qualify which source to install <name> from: a repo URL "
+                "(plugin_home) or an absolute local path (local_path, "
+                "register-on-first-use)."
+            ),
+        ),
+    ] = None,
     plugin_home_root: Annotated[
         Path | None,
         typer.Option("--plugin-home-root"),
@@ -671,21 +902,152 @@ def install_command(
         typer.Option(
             "--trust-root",
             help="Override the trust root (default: ~/.ouroboros/plugins). "
-            "Used to invalidate prior grants on a version bump.",
+            "Used to invalidate prior grants on a subject change.",
+        ),
+    ] = None,
+    cache_root: Annotated[
+        Path | None,
+        typer.Option(
+            "--cache-root",
+            help="Where to clone repo URLs for --from (default: ~/.ouroboros/cache).",
+        ),
+    ] = None,
+    catalog_state_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--catalog-state",
+            help="Override the known-catalog state path (default: ~/.ouroboros/plugin-catalogs.json).",
         ),
     ] = None,
 ) -> None:
-    """Register a single local plugin directory in the lockfile.
+    """Install one plugin.
 
-    Equivalent to `ooo plugin add <local-parent-dir> --plugin <name>`,
-    but accepts the plugin directory directly so callers don't need the
-    catalog convention.
+    The RFC ("UX / `add` vs `install`") defines `install` as the
+    non-interactive primitive, with three resolution paths:
+
+    - **Default form** — ``ooo plugin install <name>`` — succeeds only
+      if exactly one known catalog exposes that name. Multi-source
+      ambiguity raises an explicit error listing the candidates.
+    - **Qualified form** — ``ooo plugin install <name> --from <url|path>``
+      — selects an explicit source. For ``--from <local-path>`` this is
+      ALSO the register-on-first-use verb for `local_path` sources.
+    - **Legacy direct-directory form** — ``ooo plugin install
+      <plugin-dir>`` — kept for ergonomic parity with
+      ``ooo plugin discover`` / pre-RFC scripts. The argument must be
+      an existing directory containing ``ouroboros.plugin.json``.
     """
     plugin_home_root = plugin_home_root or Path.home() / ".ouroboros" / "plugins"
+    cache_root = cache_root or Path.home() / ".ouroboros" / "cache"
     lock = Lockfile(lockfile_path or DEFAULT_LOCKFILE_PATH)
     trust = TrustStore(root=trust_root or DEFAULT_TRUST_ROOT)
+    catalog_state = CatalogRegistry(
+        state_path=catalog_state_path,
+        catalog_root=plugin_home_root.parent if catalog_state_path is None else None,
+    )
 
-    src = path.expanduser().resolve()
+    candidate_path = Path(target).expanduser()
+
+    # --- Form A: legacy direct-directory form ---------------------------
+    # If the target is an existing directory containing a manifest, treat
+    # it as the historical "install <plugin-dir>" form. This keeps the
+    # existing test surface working unchanged while the new RFC contract
+    # is layered above.
+    if (
+        from_source is None
+        and candidate_path.is_dir()
+        and (candidate_path / "ouroboros.plugin.json").is_file()
+    ):
+        _install_from_local_directory(
+            src=candidate_path.resolve(),
+            plugin_home_root=plugin_home_root,
+            lock=lock,
+            trust=trust,
+            catalog_state=catalog_state,
+        )
+        return
+
+    # --- Form B: qualified form (`install <name> --from <...>`) ---------
+    if from_source is not None:
+        if _looks_like_url(from_source):
+            _install_named_from_url(
+                name=target,
+                repo_url=from_source,
+                cache_root=cache_root,
+                plugin_home_root=plugin_home_root,
+                lock=lock,
+                trust=trust,
+                catalog_state=catalog_state,
+            )
+            return
+        from_path = Path(from_source).expanduser()
+        if not from_path.is_absolute():
+            print_error(
+                f"--from <local-path> must be an absolute path, got: {from_source}"
+            )
+            raise typer.Exit(code=1)
+        if not from_path.is_dir():
+            print_error(f"--from path is not a directory: {from_path}")
+            raise typer.Exit(code=1)
+        _install_named_from_local_path(
+            name=target,
+            from_path=from_path,
+            plugin_home_root=plugin_home_root,
+            lock=lock,
+            trust=trust,
+            catalog_state=catalog_state,
+        )
+        return
+
+    # --- Form C: default form (`install <name>`) ------------------------
+    sources = catalog_state.find_sources_for(target)
+    if not sources:
+        print_error(
+            f"plugin {target!r} is not in any known catalog. "
+            "Either run `ooo plugin add <repo-url>` first, or re-run with "
+            "the qualified form `ooo plugin install <name> --from <local-path>`."
+        )
+        raise typer.Exit(code=1)
+    if len(sources) > 1:
+        listing = "\n  ".join(
+            f"- {s['source_type']}: {s['source_identity']}" for s in sources
+        )
+        print_error(
+            f"plugin name {target!r} is ambiguous across {len(sources)} known "
+            f"catalogs:\n  {listing}\nRe-run with --from <repo-url|local-path> "
+            "to qualify which source to install from."
+        )
+        raise typer.Exit(code=1)
+    only = sources[0]
+    if only["source_type"] == "plugin_home":
+        _install_named_from_url(
+            name=target,
+            repo_url=only["source_identity"],
+            cache_root=cache_root,
+            plugin_home_root=plugin_home_root,
+            lock=lock,
+            trust=trust,
+            catalog_state=catalog_state,
+        )
+    else:
+        _install_named_from_local_path(
+            name=target,
+            from_path=Path(only["source_identity"]),
+            plugin_home_root=plugin_home_root,
+            lock=lock,
+            trust=trust,
+            catalog_state=catalog_state,
+        )
+
+
+def _install_from_local_directory(
+    *,
+    src: Path,
+    plugin_home_root: Path,
+    lock: Lockfile,
+    trust: TrustStore,
+    catalog_state: CatalogRegistry,
+) -> None:
+    """Legacy `install <plugin-dir>` path (kept for back-compat)."""
     if not (src / "ouroboros.plugin.json").is_file():
         print_error(f"no ouroboros.plugin.json in {src}")
         raise typer.Exit(code=1)
@@ -701,8 +1063,10 @@ def install_command(
     plugin_home = plugin_home_root / manifest.name
     # Atomic install: a failed copy must leave the prior install (and
     # its trust grants) untouched. Trust is only invalidated AFTER the
-    # new version is committed to disk and the lockfile.
+    # new subject is committed to disk and the lockfile.
     _atomic_replace_dir(src, plugin_home)
+    artifact_digest = canonical_tree_hash(plugin_home)
+    source_identity = str(src)
 
     _install_one(
         manifest=manifest,
@@ -711,12 +1075,167 @@ def install_command(
         source_kind="local",
         repository=None,
         git_sha=None,
+        source_type="local_path",
+        source_identity=source_identity,
+        artifact_digest=artifact_digest,
     )
-    # Per Q4 lock: invalidate trust on version bump (post-success).
-    # The firewall also enforces version mismatch as defense-in-depth.
-    _maybe_invalidate_trust_for_version_bump(
+    catalog_state.register(
+        source_type="local_path",
+        source_identity=source_identity,
+        plugin_name=manifest.name,
+    )
+    _maybe_invalidate_trust_for_subject_change(
         name=manifest.name,
         new_version=manifest.version,
+        new_source_type="local_path",
+        new_source_identity=source_identity,
+        new_artifact_digest=artifact_digest,
+        trust=trust,
+    )
+    print_success(f"Installed: {manifest.name} {manifest.version}")
+
+
+def _install_named_from_local_path(
+    *,
+    name: str,
+    from_path: Path,
+    plugin_home_root: Path,
+    lock: Lockfile,
+    trust: TrustStore,
+    catalog_state: CatalogRegistry,
+) -> None:
+    """`install <name> --from <local-absolute-path>` register-on-first-use."""
+    src = normalize_local_path(from_path)
+    src_path = Path(src)
+    # Two layouts are accepted:
+    #  - a single-plugin directory (`<src>/ouroboros.plugin.json`)
+    #  - a catalog directory (`<src>/plugins/<name>/ouroboros.plugin.json`)
+    direct = src_path / "ouroboros.plugin.json"
+    nested = src_path / "plugins" / name / "ouroboros.plugin.json"
+    if direct.is_file():
+        candidate_root = src_path
+        manifest_path = direct
+    elif nested.is_file():
+        candidate_root = src_path / "plugins" / name
+        manifest_path = nested
+    else:
+        print_error(
+            f"no plugin {name!r} found at {src} (looked for "
+            f"`ouroboros.plugin.json` and `plugins/{name}/ouroboros.plugin.json`)"
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        manifest = load_manifest(manifest_path)
+    except PluginManifestError as exc:
+        print_error(
+            f"manifest invalid at {exc.path}: "
+            f"{exc.json_pointer or '(root)'}: {exc.args[0] if exc.args else ''}"
+        )
+        raise typer.Exit(code=1) from exc
+    if manifest.name != name:
+        print_error(
+            f"manifest at {manifest_path} declares name {manifest.name!r}, "
+            f"but the install command was given {name!r}; refusing to install "
+            "to avoid silent name aliasing."
+        )
+        raise typer.Exit(code=1)
+
+    plugin_home = plugin_home_root / manifest.name
+    _atomic_replace_dir(candidate_root, plugin_home)
+    artifact_digest = canonical_tree_hash(plugin_home)
+    source_identity = str(candidate_root.resolve())
+    _install_one(
+        manifest=manifest,
+        plugin_home=plugin_home,
+        lock=lock,
+        source_kind="local",
+        repository=None,
+        git_sha=None,
+        source_type="local_path",
+        source_identity=source_identity,
+        artifact_digest=artifact_digest,
+    )
+    catalog_state.register(
+        source_type="local_path",
+        source_identity=source_identity,
+        plugin_name=manifest.name,
+    )
+    _maybe_invalidate_trust_for_subject_change(
+        name=manifest.name,
+        new_version=manifest.version,
+        new_source_type="local_path",
+        new_source_identity=source_identity,
+        new_artifact_digest=artifact_digest,
+        trust=trust,
+    )
+    print_success(f"Installed: {manifest.name} {manifest.version}")
+
+
+def _install_named_from_url(
+    *,
+    name: str,
+    repo_url: str,
+    cache_root: Path,
+    plugin_home_root: Path,
+    lock: Lockfile,
+    trust: TrustStore,
+    catalog_state: CatalogRegistry,
+) -> None:
+    """`install <name> --from <repo-url>` qualified form for plugin_home sources."""
+    _reject_subdirectory_form(repo_url)
+    sanitized = (
+        repo_url.replace("https://", "")
+        .replace("http://", "")
+        .replace("git@", "")
+        .replace(":", "_")
+        .replace("/", "_")
+        .strip("_")
+    )
+    clone_dest = cache_root / sanitized
+    if clone_dest.exists():
+        shutil.rmtree(clone_dest)
+    try:
+        git_sha = _shallow_clone(repo_url, clone_dest)
+    except subprocess.CalledProcessError as exc:
+        print_error(f"git clone failed: {exc.stderr.strip() if exc.stderr else exc}")
+        raise typer.Exit(code=1) from exc
+
+    catalog = _enumerate_catalog(clone_dest)
+    by_name = {m.name: m for m in catalog}
+    if name not in by_name:
+        print_error(
+            f"plugin {name!r} not found in catalog at {repo_url} "
+            f"(available: {sorted(by_name)})"
+        )
+        raise typer.Exit(code=1)
+    manifest = by_name[name]
+    plugin_home = plugin_home_root / manifest.name
+    _atomic_replace_dir(clone_dest / "plugins" / manifest.name, plugin_home)
+    artifact_digest = canonical_tree_hash(plugin_home)
+    source_identity = normalize_repo_url(repo_url)
+    _install_one(
+        manifest=manifest,
+        plugin_home=plugin_home,
+        lock=lock,
+        source_kind="git",
+        repository=repo_url,
+        git_sha=git_sha,
+        source_type="plugin_home",
+        source_identity=source_identity,
+        artifact_digest=artifact_digest,
+    )
+    catalog_state.register(
+        source_type="plugin_home",
+        source_identity=source_identity,
+        plugin_name=manifest.name,
+    )
+    _maybe_invalidate_trust_for_subject_change(
+        name=manifest.name,
+        new_version=manifest.version,
+        new_source_type="plugin_home",
+        new_source_identity=source_identity,
+        new_artifact_digest=artifact_digest,
         trust=trust,
     )
     print_success(f"Installed: {manifest.name} {manifest.version}")
@@ -773,6 +1292,11 @@ def trust_command(
         print_error(f"{name!r} is not installed; nothing to trust")
         raise typer.Exit(code=1)
 
+    # Trust is bound to the install subject recorded in the lockfile.
+    # Re-trusting also clears the disable record (per the RFC: "Re-enabling
+    # is performed by re-running ooo plugin trust …").
+    trust.clear_disable(name)
+
     audit_handle = audit_log_path.open("a", encoding="utf-8") if audit_log_path else None
     try:
         for scope in scopes:
@@ -781,6 +1305,9 @@ def trust_command(
                 version=entry.version,
                 scope=scope,
                 granted_by=granted_by,
+                source_type=entry.source_type,
+                source_identity=entry.source_identity,
+                artifact_digest=entry.artifact_digest,
             )
             print_success(f"Granted: {scope} ({len(record.granted_scopes)} total scope(s))")
 
@@ -834,17 +1361,30 @@ def disable_command(
         ),
     ] = None,
 ) -> None:
-    """Disable an installed plugin (its trust file is wiped; lockfile entry stays)."""
+    """Disable an installed plugin.
+
+    Per the locked RFC ("Disable records"), `disable` writes a record
+    keyed by ``(name, source.type, source_identity)`` (no
+    ``artifact_digest``) so the disable signal survives every digest
+    change, including upgrades. The trust file is wiped at the same
+    time. The lockfile entry remains so the user can re-enable with
+    ``ooo plugin trust …``, which is the re-enable path.
+    """
     lock = Lockfile(lockfile_path or DEFAULT_LOCKFILE_PATH)
     entries = lock.read()
     if name not in entries:
         print_error(f"{name!r} is not installed")
         raise typer.Exit(code=1)
-    # Disabling = removing all trust grants. Lockfile entry remains so the
-    # user can re-enable with `ooo plugin trust ...`. Honor the explicit
-    # `--trust-root` override so that grants made under a non-default root
-    # are actually removed (not silently left behind).
+    entry = entries[name]
+    # Honor the explicit `--trust-root` override so that grants made
+    # under a non-default root are actually removed (not silently left
+    # behind).
     trust = TrustStore(root=trust_root or DEFAULT_TRUST_ROOT)
+    trust.write_disable(
+        name,
+        source_type=entry.source_type or ("plugin_home" if entry.source_kind == "git" else "local_path"),
+        source_identity=entry.source_identity or (entry.repository or entry.plugin_home),
+    )
     trust.remove(name)
     print_success(f"Disabled {name} (re-grant scopes to re-enable)")
 
@@ -885,10 +1425,16 @@ def remove_command(
     if plugin_home.is_dir():
         shutil.rmtree(plugin_home)
 
-    trust.remove(name)
+    # Per the locked RFC ("disable records"), `remove` ALSO clears the
+    # disable record so a future fresh install starts un-trusted-but-
+    # enabled rather than silently disabled. `wipe_subject` removes both
+    # the trust file and the disable record atomically.
+    trust.wipe_subject(name)
     lock.remove(name)
 
-    print_success(f"Removed {name} (lockfile entry + trust file + plugin home)")
+    print_success(
+        f"Removed {name} (lockfile entry + trust file + disable record + plugin home)"
+    )
 
 
 __all__ = [
