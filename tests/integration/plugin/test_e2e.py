@@ -24,7 +24,6 @@ loudly.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 import subprocess
 import sys
@@ -32,6 +31,7 @@ import sys
 from typer.testing import CliRunner
 
 from ouroboros.cli.commands.plugin import app as plugin_app
+from ouroboros.plugin.digest import canonical_tree_hash
 from ouroboros.plugin.firewall import invoke_plugin
 from ouroboros.plugin.ledger_adapter import (
     AUDIT_EVENT_TYPES,
@@ -103,19 +103,27 @@ def _build_program_for_invocation(paths: dict[str, Path]):
     return registry.register(manifest), plugin_home
 
 
-def _python_exec_runner(plugin_home: Path):
-    """Build a subprocess_runner that uses the current Python interpreter
-    against the fixture's `github_pr_ops` package."""
+def _python_exec_runner():
+    """Build a subprocess_runner that pins ``python`` to ``sys.executable``.
+
+    Rationale: the fixture manifest's ``entrypoint.command`` is
+    ``python -m github_pr_ops`` for portability across the upstream
+    plugin ecosystem; if the test ran the bare ``python`` token, it
+    would resolve against ``$PATH``, which on dev machines is often
+    Python 2 or a different minor version than the test interpreter.
+    Pinning to ``sys.executable`` makes the launch deterministic without
+    pre-bundling PYTHONPATH — the firewall now runs with
+    ``cwd=plugin_home`` (set when ``invoke_plugin`` receives a
+    ``plugin_home`` argument), so ``python -m github_pr_ops`` resolves
+    the package from the install root the same way ``plugin_dispatch``
+    invokes it in production. The previous shim injected PYTHONPATH,
+    which masked exactly this contract — a regression in the
+    cwd-from-plugin_home plumbing would have left the test green.
+    """
 
     def _run(argv, *args, **kwargs):
-        # The manifest's entrypoint is `python -m github_pr_ops`; the
-        # firewall splits this and appends the command + argv. Replace
-        # the bare `python` with sys.executable and add PYTHONPATH so
-        # the test doesn't depend on global pip installs.
         argv = [sys.executable if a == "python" else a for a in argv]
-        env = dict(os.environ)
-        env["PYTHONPATH"] = str(plugin_home) + os.pathsep + env.get("PYTHONPATH", "")
-        return subprocess.run(argv, env=env, **kwargs)
+        return subprocess.run(argv, **kwargs)
 
     return _run
 
@@ -155,6 +163,14 @@ def test_path_1_read_only_success(tmp_path: Path) -> None:
 
     program, plugin_home = _build_program_for_invocation(paths)
     trust_record = TrustStore(root=paths["trust_root"]).read("github-pr-ops")
+    # Compute the canonical tree hash of the installed plugin home and
+    # plumb it through so the firewall actually runs the pre-launch
+    # digest check (RFC: "Trust identity"). Production
+    # ``plugin_dispatch.py`` always supplies these arguments; without
+    # them this test would prove the audit-event shape only, not the
+    # critical-path contract a regression in digest plumbing or
+    # cwd-from-plugin_home would break.
+    expected_digest = canonical_tree_hash(plugin_home)
 
     envelopes: list[dict] = []
     sink = make_event_sink(envelopes.append, correlation_id="e2e-path-1")
@@ -165,7 +181,9 @@ def test_path_1_read_only_success(tmp_path: Path) -> None:
         trust_record=trust_record,
         event_sink=sink,
         correlation_id="e2e-path-1",
-        subprocess_runner=_python_exec_runner(plugin_home),
+        plugin_home=plugin_home,
+        expected_artifact_digest=expected_digest,
+        subprocess_runner=_python_exec_runner(),
     )
 
     assert result.status == "success", result.message
@@ -235,6 +253,7 @@ def test_path_3_subprocess_failure(tmp_path: Path) -> None:
 
     program, plugin_home = _build_program_for_invocation(paths)
     trust_record = TrustStore(root=paths["trust_root"]).read("github-pr-ops")
+    expected_digest = canonical_tree_hash(plugin_home)
 
     envelopes: list[dict] = []
     sink = make_event_sink(envelopes.append, correlation_id="e2e-path-3")
@@ -246,7 +265,9 @@ def test_path_3_subprocess_failure(tmp_path: Path) -> None:
         trust_record=trust_record,
         event_sink=sink,
         correlation_id="e2e-path-3",
-        subprocess_runner=_python_exec_runner(plugin_home),
+        plugin_home=plugin_home,
+        expected_artifact_digest=expected_digest,
+        subprocess_runner=_python_exec_runner(),
     )
 
     assert result.status == "failed"
@@ -263,6 +284,64 @@ def test_path_3_subprocess_failure(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Path 4 — pre-launch digest drift refusal.
+# ---------------------------------------------------------------------------
+
+
+def test_path_4_digest_drift_refuses_launch(tmp_path: Path) -> None:
+    """When the installed plugin home is mutated post-grant, the firewall
+    MUST recompute the canonical tree hash, see drift against the lockfile-
+    recorded digest, and refuse to launch the subprocess. The terminal
+    event is ``plugin.failed`` with ``result.status == "trust_subject_changed"``
+    and ``current_artifact_digest`` in provenance — without this branch
+    a tampered install would silently invoke.
+
+    Production ``plugin_dispatch.py`` always supplies
+    ``expected_artifact_digest``; this test fails red if a regression
+    drops the digest argument or short-circuits the comparison.
+    """
+    paths = _install_fixture_plugin(tmp_path)
+    _grant_trust(paths)
+
+    program, plugin_home = _build_program_for_invocation(paths)
+    trust_record = TrustStore(root=paths["trust_root"]).read("github-pr-ops")
+
+    # Snapshot the digest at install time (this is what the lockfile
+    # would record). Then mutate the plugin home — the firewall will
+    # recompute and detect drift.
+    original_digest = canonical_tree_hash(plugin_home)
+    tamper = plugin_home / "github_pr_ops" / "_tamper.py"
+    tamper.write_text("# adversarial post-grant mutation\n")
+
+    envelopes: list[dict] = []
+    sink = make_event_sink(envelopes.append, correlation_id="e2e-path-4")
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["https://example.com/pr/123"],
+        trust_record=trust_record,
+        event_sink=sink,
+        correlation_id="e2e-path-4",
+        plugin_home=plugin_home,
+        expected_artifact_digest=original_digest,
+        subprocess_runner=_python_exec_runner(),
+    )
+
+    # Subprocess MUST NOT have been launched.
+    assert result.status == "blocked"
+
+    payloads = [unwrap_plugin_event(env) for env in envelopes]
+    types = [p["event_type"] for p in payloads]
+    # ONLY plugin.failed — the trust check refused before any
+    # ``plugin.invoked`` / ``plugin.permission_used`` could fire.
+    assert types == ["plugin.failed"]
+    failed = payloads[0]
+    assert failed["result"]["status"] == "trust_subject_changed"
+    assert "current_artifact_digest" in failed["provenance"]
+    assert failed["provenance"]["current_artifact_digest"] != original_digest
+
+
+# ---------------------------------------------------------------------------
 # Cross-cutting safety check.
 # ---------------------------------------------------------------------------
 
@@ -275,6 +354,7 @@ def test_no_token_shaped_strings_in_any_envelope(tmp_path: Path) -> None:
     _grant_trust(paths)
     program, plugin_home = _build_program_for_invocation(paths)
     trust_record = TrustStore(root=paths["trust_root"]).read("github-pr-ops")
+    expected_digest = canonical_tree_hash(plugin_home)
 
     all_envelopes: list[dict] = []
     sink = make_event_sink(all_envelopes.append, correlation_id="e2e-tokens")
@@ -285,7 +365,9 @@ def test_no_token_shaped_strings_in_any_envelope(tmp_path: Path) -> None:
         trust_record=trust_record,
         event_sink=sink,
         correlation_id="e2e-tokens",
-        subprocess_runner=_python_exec_runner(plugin_home),
+        plugin_home=plugin_home,
+        expected_artifact_digest=expected_digest,
+        subprocess_runner=_python_exec_runner(),
     )
     serialized = json.dumps(all_envelopes).lower()
     for forbidden in ("ghp_", "bearer ", "x-api-key", "token=", '"token":'):

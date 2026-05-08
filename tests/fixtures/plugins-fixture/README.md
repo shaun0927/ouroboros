@@ -8,8 +8,11 @@ can run without cloning a remote repo or hitting the network.
 It carries:
 
 - `plugins/github-pr-ops/ouroboros.plugin.json` — manifest reflecting the
-  locked decisions (8+2 fields, `merge` removed, single 3-value risk enum,
-  schema_version `0.1`).
+  locked decisions: 8 required + 2 optional **top-level manifest fields**
+  per Q00/ouroboros-plugins#6, `merge` removed, single 3-value risk
+  enum, schema_version `0.1`. "8 + 2" describes the manifest's
+  top-level field set, not the permission count — the v0 reference
+  plugin declares a single read-only permission.
 - `plugins/github-pr-ops/github_pr_ops/__main__.py` — a minimal Python
   entrypoint that the firewall subprocess-launches. The fixture
   entrypoint is **deterministic** and does not contact GitHub: it accepts
