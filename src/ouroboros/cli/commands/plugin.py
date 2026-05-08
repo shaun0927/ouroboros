@@ -13,6 +13,7 @@ Anti-patterns explicitly rejected:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import datetime
 import hashlib
 import json
@@ -935,19 +936,44 @@ def _shallow_clone(repo_url: str, dest: Path) -> str:
     return sha
 
 
-def _enumerate_catalog(repo_root: Path) -> list[PluginManifest]:
+@dataclass(frozen=True)
+class CatalogEntry:
+    """One discovered plugin in a repo's ``plugins/`` directory.
+
+    Pairs the on-disk directory the manifest was loaded from with the
+    parsed manifest. The directory is preserved so install paths copy
+    bytes from the EXACT subtree that produced the validated manifest,
+    even when ``manifest.name`` differs from the directory name (e.g.
+    a vendored sibling whose folder is ``foo`` but whose manifest
+    declares ``name: bar``). Reconstructing the source path from
+    ``manifest.name`` would silently install bytes from
+    ``plugins/bar`` instead — breaking the manifest-to-artifact
+    binding the trust subject depends on.
+    """
+
+    plugin_dir: Path
+    manifest: PluginManifest
+
+
+def _enumerate_catalog(repo_root: Path) -> list[CatalogEntry]:
     """Read every `plugins/<name>/ouroboros.plugin.json` from a checked-out repo.
 
     Invalid sibling manifests must NOT block installing valid plugins from
     a mixed-quality repo. Each parse error is surfaced as a yellow `skip:`
     warning so the user sees what was bypassed; the function only fails if
     nothing at all parsed.
+
+    Returns ``CatalogEntry`` records that pair the on-disk directory
+    with its parsed manifest. Callers MUST copy bytes from
+    ``entry.plugin_dir`` (not from ``plugins/<manifest.name>``) so a
+    folder-name vs. manifest-name mismatch can never desynchronize the
+    validated manifest from the installed bytes.
     """
     plugins_dir = repo_root / "plugins"
     if not plugins_dir.is_dir():
         print_error(f"no `plugins/` directory in {repo_root}")
         raise typer.Exit(code=1)
-    manifests: list[PluginManifest] = []
+    entries: list[CatalogEntry] = []
     skipped: list[tuple[str, str]] = []
     for entry in sorted(plugins_dir.iterdir()):
         manifest_path = entry / "ouroboros.plugin.json"
@@ -976,21 +1002,21 @@ def _enumerate_catalog(repo_root: Path) -> list[PluginManifest]:
                 )
             )
             continue
-        manifests.append(candidate)
+        entries.append(CatalogEntry(plugin_dir=entry, manifest=candidate))
     for dir_name, reason in skipped:
         console.print(f"  [yellow]skip[/]: {dir_name}: invalid manifest ({reason})")
-    if not manifests:
+    if not entries:
         print_error(f"no valid manifests found under {plugins_dir}")
         raise typer.Exit(code=1)
-    return manifests
+    return entries
 
 
 def _select_plugins(
-    catalog: list[PluginManifest],
+    catalog: list[CatalogEntry],
     requested: list[str] | None,
-) -> list[PluginManifest]:
-    """Return manifests matching `requested`, or prompt interactively."""
-    by_name = {m.name: m for m in catalog}
+) -> list[CatalogEntry]:
+    """Return catalog entries matching `requested`, or prompt interactively."""
+    by_name = {entry.manifest.name: entry for entry in catalog}
 
     if requested:
         unknown = [r for r in requested if r not in by_name]
@@ -1016,10 +1042,13 @@ def _select_plugins(
 
     choices = [
         questionary.Choice(
-            title=f"{m.name:<25} {m.version}  {m.description or ''}",
-            value=m.name,
+            title=(
+                f"{entry.manifest.name:<25} {entry.manifest.version}  "
+                f"{entry.manifest.description or ''}"
+            ),
+            value=entry.manifest.name,
         )
-        for m in catalog
+        for entry in catalog
     ]
     answers = questionary.checkbox(
         "Select plugins to install:",
@@ -1236,11 +1265,19 @@ def add_command(
         raise typer.Exit(code=1) from exc
 
     installed: list[str] = []
-    for manifest in selected:
+    for entry in selected:
+        manifest = entry.manifest
+        # Use the plugin's actual on-disk directory (not
+        # ``plugins/<manifest.name>``). When folder-name and
+        # ``manifest.name`` disagree, the validated manifest still
+        # binds to the bytes in ``entry.plugin_dir`` — copying from
+        # ``plugins/<manifest.name>`` would silently install bytes
+        # from a different subtree.
+        source_dir = entry.plugin_dir
         plugin_home = plugin_home_root / manifest.name
         # Per-plugin source_identity for local catalogs.
         if source_kind == "local":
-            plugin_source_identity = str((repo_root / "plugins" / manifest.name).resolve())
+            plugin_source_identity = str(source_dir.resolve())
         else:
             plugin_source_identity = source_identity
         # Per the RFC, the persisted ``source_type`` is the manifest's
@@ -1250,16 +1287,20 @@ def add_command(
         # what the manifest says, so the firewall keeps a single
         # consistent identity for it.
         manifest_source_type = manifest.source.type
+        # Compute the canonical tree hash of the SOURCE bytes BEFORE
+        # mutating ``plugin_home``. ``canonical_tree_hash`` is
+        # content-addressable, so the post-replace tree has the same
+        # digest, but a hash failure here (escaping symlink, unsupported
+        # entry, etc.) must abort BEFORE the prior install is renamed
+        # away — otherwise the user is left in a split-brain state with
+        # the old install gone, the new bytes on disk, and no lockfile
+        # entry to reflect either.
+        artifact_digest = canonical_tree_hash(source_dir)
         # Atomic install: prior plugin home survives any copy failure.
         # We DO NOT invalidate trust before this step — if the copy
         # fails, the user should still own the unchanged install with
         # its prior grants intact.
-        _atomic_replace_dir(repo_root / "plugins" / manifest.name, plugin_home)
-        # Compute the canonical tree hash of the freshly-installed bytes.
-        # Per the RFC, this is the input to the trust subject's
-        # ``artifact_digest`` field; the firewall recomputes it before
-        # every invocation and fails closed on drift.
-        artifact_digest = canonical_tree_hash(plugin_home)
+        _atomic_replace_dir(source_dir, plugin_home)
         _install_one(
             manifest=manifest,
             plugin_home=plugin_home,
@@ -1534,11 +1575,15 @@ def _install_from_local_directory(
     _refuse_first_party_external_install(manifest)
 
     plugin_home = plugin_home_root / manifest.name
+    # Hash the SOURCE bytes first so a digest-time failure (escaping
+    # symlink, unsupported entry) aborts before the prior install is
+    # renamed away. The hash is content-addressable so the post-replace
+    # tree has the same digest.
+    artifact_digest = canonical_tree_hash(src)
     # Atomic install: a failed copy must leave the prior install (and
     # its trust grants) untouched. Trust is only invalidated AFTER the
     # new subject is committed to disk and the lockfile.
     _atomic_replace_dir(src, plugin_home)
-    artifact_digest = canonical_tree_hash(plugin_home)
     source_identity = str(src)
     # Per the RFC ("Trust identity"), the persisted ``source_type`` is
     # the manifest's declared semantic source, not the install
@@ -1624,8 +1669,10 @@ def _install_named_from_local_path(
     _refuse_first_party_external_install(manifest)
 
     plugin_home = plugin_home_root / manifest.name
+    # Hash source bytes first; abort before mutating ``plugin_home``
+    # if the tree contains an unsupported entry.
+    artifact_digest = canonical_tree_hash(candidate_root)
     _atomic_replace_dir(candidate_root, plugin_home)
-    artifact_digest = canonical_tree_hash(plugin_home)
     source_identity = str(candidate_root.resolve())
     # See `_install_from_local_directory` — persist manifest's source
     # type, not transport.
@@ -1687,16 +1734,21 @@ def _install_named_from_url(
         raise typer.Exit(code=1) from exc
 
     catalog = _enumerate_catalog(clone_dest)
-    by_name = {m.name: m for m in catalog}
+    by_name = {entry.manifest.name: entry for entry in catalog}
     if name not in by_name:
         print_error(
             f"plugin {name!r} not found in catalog at {repo_url} (available: {sorted(by_name)})"
         )
         raise typer.Exit(code=1)
-    manifest = by_name[name]
+    catalog_entry = by_name[name]
+    manifest = catalog_entry.manifest
+    # Use the actual on-disk directory, not ``plugins/<manifest.name>``.
+    source_dir = catalog_entry.plugin_dir
     plugin_home = plugin_home_root / manifest.name
-    _atomic_replace_dir(clone_dest / "plugins" / manifest.name, plugin_home)
-    artifact_digest = canonical_tree_hash(plugin_home)
+    # Hash source bytes first; abort before mutating ``plugin_home``
+    # if the tree contains an unsupported entry.
+    artifact_digest = canonical_tree_hash(source_dir)
+    _atomic_replace_dir(source_dir, plugin_home)
     source_identity = normalize_repo_url(repo_url)
     # See `_install_from_local_directory` — persist manifest's source
     # type, not transport. Cloning from a URL does not by itself imply

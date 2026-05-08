@@ -2464,6 +2464,148 @@ def test_install_dir_rejects_external_first_party_manifest(
     assert not paths["lockfile"].exists() or Lockfile(paths["lockfile"]).read() == {}
 
 
+def test_install_aborts_before_mutating_when_digest_fails(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:1257/1540/1698.
+
+    ``canonical_tree_hash`` must run on the SOURCE bytes BEFORE
+    ``_atomic_replace_dir``. If the hasher refuses (escaping symlink,
+    unsupported entry, etc.), the previous order had already renamed
+    the prior install away — leaving the user with the old install
+    gone, the new bytes on disk, and no lockfile entry to reflect
+    either. With the fix, a hash-time failure aborts before the prior
+    install is touched.
+    """
+    paths = _common_paths(tmp_path)
+
+    # Stage a prior install that the failed upgrade must NOT clobber.
+    prior_src = tmp_path / "prior"
+    prior_src.mkdir()
+    (prior_src / "ouroboros.plugin.json").write_text(json.dumps(REFERENCE_MANIFEST))
+    install_prior = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(prior_src),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    assert install_prior.exit_code == 0, install_prior.output
+    plugin_home = paths["plugin_home_root"] / REFERENCE_MANIFEST["name"]
+    prior_manifest_text = (plugin_home / "ouroboros.plugin.json").read_text()
+    assert prior_manifest_text, "prior install bytes missing"
+
+    # Stage a fresh src for the failing upgrade.
+    new_src = tmp_path / "new"
+    new_src.mkdir()
+    new_manifest = {**REFERENCE_MANIFEST, "version": "0.2.0"}
+    (new_src / "ouroboros.plugin.json").write_text(json.dumps(new_manifest))
+
+    import ouroboros.cli.commands.plugin as plugin_module
+
+    real_hash = plugin_module.canonical_tree_hash
+    call_count = {"n": 0}
+
+    def _failing_hash(path):  # noqa: ANN001
+        # First call is on the source path; raise to simulate an
+        # unsupported entry. Later calls (e.g. firewall recompute on
+        # the prior install) keep working so we don't break unrelated
+        # paths.
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise ValueError("synthetic: unsupported entry in source tree")
+        return real_hash(path)
+
+    monkeypatch.setattr(plugin_module, "canonical_tree_hash", _failing_hash)
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(new_src),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    # Install fails…
+    assert result.exit_code != 0, result.output
+    # …and crucially, the prior install bytes are intact.
+    assert (plugin_home / "ouroboros.plugin.json").read_text() == prior_manifest_text, (
+        "the prior install was clobbered by a failed upgrade"
+    )
+    # Lockfile still reports the prior version, not the failed upgrade.
+    entries = Lockfile(paths["lockfile"]).read()
+    assert REFERENCE_MANIFEST["name"] in entries
+    assert entries[REFERENCE_MANIFEST["name"]].version == REFERENCE_MANIFEST["version"], (
+        "lockfile version drifted to the failed-upgrade version"
+    )
+
+
+def test_add_uses_actual_plugin_dir_when_folder_name_disagrees_with_manifest(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Regression for the bot's BLOCKING finding on plugin.py:950.
+
+    When a repo contains ``plugins/foo/ouroboros.plugin.json`` whose
+    declared name is ``bar``, the previous code validated ``foo``'s
+    manifest but copied bytes from ``plugins/bar`` — silently
+    installing unvalidated code from a different subtree (or failing
+    to find it altogether). The fix tracks the directory each manifest
+    was loaded from and uses that for the byte copy AND the persisted
+    ``source_identity``, so the manifest-to-artifact binding is
+    preserved.
+    """
+    paths = _common_paths(tmp_path)
+    repo = tmp_path / "catalog"
+    plugins_dir = repo / "plugins"
+    plugins_dir.mkdir(parents=True)
+
+    # Folder name "vendored-name" differs from manifest name "github-pr-ops".
+    odd_dir = plugins_dir / "vendored-name"
+    odd_dir.mkdir()
+    sentinel = odd_dir / "BYTES_FROM_VENDORED_NAME.txt"
+    sentinel.write_text("source-of-truth-bytes")
+    (odd_dir / "ouroboros.plugin.json").write_text(json.dumps(REFERENCE_MANIFEST))
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "add",
+            str(repo),
+            "--plugin",
+            "github-pr-ops",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    plugin_home = paths["plugin_home_root"] / "github-pr-ops"
+    # Sentinel must be present — proves bytes came from the validated
+    # subtree, not from ``plugins/<manifest.name>``.
+    assert (plugin_home / "BYTES_FROM_VENDORED_NAME.txt").read_text() == "source-of-truth-bytes"
+    # Source identity in the lockfile points at the actual directory.
+    entries = Lockfile(paths["lockfile"]).read()
+    recorded = entries["github-pr-ops"].source_identity
+    assert recorded == str(odd_dir.resolve()), (
+        f"lockfile source_identity must point at the actual plugin dir; got {recorded!r}"
+    )
+
+
 def test_trust_failure_after_disable_check_keeps_disable_record(
     runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
