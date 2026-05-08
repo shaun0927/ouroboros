@@ -30,6 +30,8 @@ from ouroboros.mcp.types import (
 )
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.ralph_loop import (
+    DEFAULT_GRADE_REGRESSION_WINDOW,
+    DEFAULT_OSCILLATION_WINDOW,
     DEFAULT_PER_ITERATION_TIMEOUT_SECONDS,
     EvolveStepLike,
     RalphLoopConfig,
@@ -138,6 +140,30 @@ class RalphHandler:
                     required=False,
                     default=DEFAULT_PER_ITERATION_TIMEOUT_SECONDS,
                 ),
+                MCPToolParameter(
+                    name="oscillation_window",
+                    type=ToolInputType.INTEGER,
+                    description=(
+                        "Number of trailing iterations whose findings_hash must "
+                        "match (and QA must not have passed) to stop with "
+                        "stop_reason='oscillation_detected'. Default: 3. "
+                        f"Range: 1-{MAX_RALPH_GENERATIONS}."
+                    ),
+                    required=False,
+                    default=DEFAULT_OSCILLATION_WINDOW,
+                ),
+                MCPToolParameter(
+                    name="grade_regression_window",
+                    type=ToolInputType.INTEGER,
+                    description=(
+                        "Number of trailing iterations whose non-None grades must "
+                        "strictly decrease to stop with "
+                        "stop_reason='grade_regressing'. Default: 2. "
+                        f"Range: 1-{MAX_RALPH_GENERATIONS}."
+                    ),
+                    required=False,
+                    default=DEFAULT_GRADE_REGRESSION_WINDOW,
+                ),
             ),
         )
 
@@ -212,6 +238,44 @@ class RalphHandler:
                 )
             )
 
+        try:
+            oscillation_window = int(
+                arguments.get("oscillation_window", DEFAULT_OSCILLATION_WINDOW)
+            )
+        except (TypeError, ValueError):
+            return Result.err(
+                MCPToolError(
+                    "oscillation_window must be an integer",
+                    tool_name="ouroboros_ralph",
+                )
+            )
+        if oscillation_window < 1 or oscillation_window > MAX_RALPH_GENERATIONS:
+            return Result.err(
+                MCPToolError(
+                    f"oscillation_window must be between 1 and {MAX_RALPH_GENERATIONS}",
+                    tool_name="ouroboros_ralph",
+                )
+            )
+
+        try:
+            grade_regression_window = int(
+                arguments.get("grade_regression_window", DEFAULT_GRADE_REGRESSION_WINDOW)
+            )
+        except (TypeError, ValueError):
+            return Result.err(
+                MCPToolError(
+                    "grade_regression_window must be an integer",
+                    tool_name="ouroboros_ralph",
+                )
+            )
+        if grade_regression_window < 1 or grade_regression_window > MAX_RALPH_GENERATIONS:
+            return Result.err(
+                MCPToolError(
+                    f"grade_regression_window must be between 1 and {MAX_RALPH_GENERATIONS}",
+                    tool_name="ouroboros_ralph",
+                )
+            )
+
         if arguments.get("delegation_depth", 0):
             return Result.err(
                 MCPToolError(
@@ -229,6 +293,8 @@ class RalphHandler:
             project_dir=arguments.get("project_dir"),
             max_generations=max_generations,
             per_iteration_timeout_seconds=per_iteration_timeout_seconds,
+            oscillation_window=oscillation_window,
+            grade_regression_window=grade_regression_window,
         )
 
         if should_dispatch_via_plugin(self.agent_runtime_backend, self.opencode_mode):

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+import hashlib
+import json
 from typing import Any, Protocol
 
 from ouroboros.core.types import Result
@@ -19,6 +21,16 @@ _TERMINAL_SUCCESS_ACTIONS = frozenset({"converged"})
 _TERMINAL_FAILURE_ACTIONS = frozenset({"failed", "interrupted", "exhausted", "stagnated"})
 
 DEFAULT_PER_ITERATION_TIMEOUT_SECONDS = 1800.0
+DEFAULT_OSCILLATION_WINDOW = 3
+DEFAULT_GRADE_REGRESSION_WINDOW = 2
+
+_LETTER_GRADE_MAP: dict[str, float] = {
+    "A": 1.0,
+    "B": 0.75,
+    "C": 0.5,
+    "D": 0.25,
+    "F": 0.0,
+}
 
 
 class EvolveStepLike(Protocol):
@@ -39,6 +51,8 @@ class RalphLoopConfig:
     project_dir: str | None = None
     max_generations: int = 10
     per_iteration_timeout_seconds: float = DEFAULT_PER_ITERATION_TIMEOUT_SECONDS
+    oscillation_window: int = DEFAULT_OSCILLATION_WINDOW
+    grade_regression_window: int = DEFAULT_GRADE_REGRESSION_WINDOW
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +63,8 @@ class RalphIteration:
     action: str
     qa_verdict: str | None = None
     is_error: bool = False
+    findings_hash: str | None = None
+    grade: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,12 +204,16 @@ class RalphLoopRunner:
             action = str(final_result.meta.get("action", "unknown"))
             generation = _coerce_int(final_result.meta.get("generation"))
             qa_verdict = _extract_qa_verdict(final_result.meta)
+            findings_hash = _extract_findings_hash(final_result.meta)
+            grade = _extract_grade(final_result.meta)
             iterations.append(
                 RalphIteration(
                     generation=generation,
                     action=action,
                     qa_verdict=qa_verdict,
                     is_error=final_result.is_error,
+                    findings_hash=findings_hash,
+                    grade=grade,
                 )
             )
 
@@ -211,6 +231,15 @@ class RalphLoopRunner:
             if action in _TERMINAL_FAILURE_ACTIONS or final_result.is_error:
                 status = "failed"
                 stop_reason = action
+                break
+
+            if _is_oscillating(iterations, config.oscillation_window):
+                status = "failed"
+                stop_reason = "oscillation_detected"
+                break
+            if _is_grade_regressing(iterations, config.grade_regression_window):
+                status = "failed"
+                stop_reason = "grade_regressing"
                 break
 
             # Gen 2+ reconstructs state from EventStore by lineage_id.
@@ -251,3 +280,66 @@ def _extract_qa_verdict(meta: dict[str, Any]) -> str | None:
 def _qa_passed(meta: dict[str, Any]) -> bool:
     verdict = _extract_qa_verdict(meta)
     return verdict in {"pass", "passed"}
+
+
+def _extract_findings_hash(meta: dict[str, Any]) -> str | None:
+    """Compute (or pass through) a deterministic hash of evolve_step findings."""
+    findings = meta.get("findings")
+    if isinstance(findings, list):
+        try:
+            serialized = json.dumps(
+                findings,
+                sort_keys=True,
+                default=str,
+                ensure_ascii=False,
+            )
+        except (TypeError, ValueError):
+            return None
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    precomputed = meta.get("findings_hash")
+    if isinstance(precomputed, str) and precomputed:
+        return precomputed
+    return None
+
+
+def _extract_grade(meta: dict[str, Any]) -> float | None:
+    """Extract a numeric grade in [0.0, 1.0] from QA meta."""
+    qa = meta.get("qa")
+    if not isinstance(qa, dict):
+        return None
+    score = qa.get("score")
+    if isinstance(score, bool):
+        # Guard against bool subclass of int.
+        score = None
+    if isinstance(score, (int, float)):
+        score_value = float(score)
+        if 0.0 <= score_value <= 1.0:
+            return score_value
+    letter = qa.get("grade")
+    if isinstance(letter, str):
+        mapped = _LETTER_GRADE_MAP.get(letter.strip().upper())
+        if mapped is not None:
+            return mapped
+    return None
+
+
+def _is_oscillating(iterations: list[RalphIteration], window: int) -> bool:
+    """Return True when the last ``window`` iterations share one findings_hash."""
+    if window < 1 or len(iterations) < window:
+        return False
+    recent = iterations[-window:]
+    first_hash = recent[0].findings_hash
+    if first_hash is None:
+        return False
+    return all(item.findings_hash == first_hash for item in recent[1:])
+
+
+def _is_grade_regressing(iterations: list[RalphIteration], window: int) -> bool:
+    """Return True when the last ``window`` non-None grades strictly decrease."""
+    if window < 2 or len(iterations) < window:
+        return False
+    recent = iterations[-window:]
+    grades = [item.grade for item in recent]
+    if any(grade is None for grade in grades):
+        return False
+    return all(grades[i] > grades[i + 1] for i in range(len(grades) - 1))
