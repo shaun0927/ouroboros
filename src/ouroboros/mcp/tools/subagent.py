@@ -1171,6 +1171,7 @@ def build_ralph_subagent(
     per_iteration_timeout_seconds: float | None = None,
     oscillation_window: int | None = None,
     grade_regression_window: int | None = None,
+    max_total_seconds: float | None = None,
     delegation_depth: int = 1,
     allow_nested_ouroboros_ralph: bool = False,
 ) -> SubagentPayload:
@@ -1204,6 +1205,14 @@ def build_ralph_subagent(
             ``grade`` values must be strictly decreasing before the plugin
             child session must stop with ``stop_reason=grade_regressing``. When
             ``None``, the block is omitted from the prompt and context.
+        max_total_seconds: Total wall-clock budget for the entire Ralph loop,
+            forwarded from the MCP handler. The plugin child session must
+            check the cumulative wall-clock elapsed since the loop started
+            BEFORE launching each iteration and surface
+            ``stop_reason=wall_clock_exhausted`` to the parent on exhaustion.
+            When ``None``, the field is omitted from prompt and context
+            (legacy shape preserved for callers that don't care about the
+            bound).
     """
     seed_note = ""
     if seed_content is not None:
@@ -1268,6 +1277,18 @@ def build_ralph_subagent(
     if progress_stop_lines:
         progress_note = "\n## Progress Stop Conditions\n" + "\n".join(progress_stop_lines) + "\n"
 
+    budget_note = ""
+    if max_total_seconds is not None:
+        budget_note = (
+            "\n## Total Wall-Clock Budget\n"
+            f"max_total_seconds: {max_total_seconds:g}\n"
+            "Track wall-clock elapsed since the loop started. BEFORE launching "
+            "each next `evolve_step` iteration, abort the loop if the cumulative "
+            f"elapsed wall clock has met or exceeded {max_total_seconds:g} seconds; "
+            "that satisfies the public contract "
+            "`stop_reason=wall_clock_exhausted`.\n"
+        )
+
     prompt = f"""## Your Task
 
 Run a Ralph loop for the given lineage inside this OpenCode child session.
@@ -1283,6 +1304,8 @@ Repeat one evolutionary generation at a time until one stop condition is met:
   not yet passed (when supplied) — return stop_reason=oscillation_detected
 - the last `grade_regression_window` non-None grades are strictly decreasing
   (when supplied) — return stop_reason=grade_regressing
+- cumulative wall clock since loop start meets or exceeds max_total_seconds
+  (when supplied) — return stop_reason=wall_clock_exhausted
 
 ## Lineage ID
 {lineage_id}
@@ -1295,7 +1318,7 @@ Repeat one evolutionary generation at a time until one stop condition is met:
 - allow_nested_ouroboros_ralph: {str(allow_nested_ouroboros_ralph).lower()}
 - Do not call ouroboros_ralph from this child session. Run the loop directly
   by executing/evaluating one generation at a time.
-{seed_note}{mode_note}{parallel_note}{project_dir_note}{qa_note}{timeout_note}{progress_note}
+{seed_note}{mode_note}{parallel_note}{project_dir_note}{qa_note}{timeout_note}{progress_note}{budget_note}
 For generation 1, use the seed content when present. For later generations,
 reconstruct state from the lineage and continue without resending seed_content.
 
@@ -1321,6 +1344,8 @@ do not enqueue another background Ralph job."""
         context["oscillation_window"] = oscillation_window
     if grade_regression_window is not None:
         context["grade_regression_window"] = grade_regression_window
+    if max_total_seconds is not None:
+        context["max_total_seconds"] = max_total_seconds
 
     return build_subagent_payload(
         tool_name="ouroboros_ralph",

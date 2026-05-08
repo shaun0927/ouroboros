@@ -370,6 +370,7 @@ class RalphHandler:
                 per_iteration_timeout_seconds=config.per_iteration_timeout_seconds,
                 oscillation_window=config.oscillation_window,
                 grade_regression_window=config.grade_regression_window,
+                max_total_seconds=config.max_total_seconds,
             )
             await self._event_store.initialize()
             await emit_subagent_dispatched_event(

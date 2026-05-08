@@ -246,6 +246,8 @@ class TestBuildRalphSubagent:
         assert "Per-Iteration Timeout" not in payload.prompt
         # Likewise the progress-stop block is omitted when no windows supplied.
         assert "Progress Stop Conditions" not in payload.prompt
+        # Without max_total_seconds, the wall-clock budget block is omitted.
+        assert "Total Wall-Clock Budget" not in payload.prompt
         assert payload.context == {
             "lineage_id": "lin-ralph",
             "seed_content": "goal: ship",
@@ -296,6 +298,19 @@ class TestBuildRalphSubagent:
         assert "grade_regression_window: 3" in payload.prompt
         assert "stop_reason=oscillation_detected" in payload.prompt
         assert "stop_reason=grade_regressing" in payload.prompt
+
+    def test_forwards_max_total_seconds_to_prompt_and_context(self) -> None:
+        payload = build_ralph_subagent(
+            lineage_id="lin-budget",
+            seed_content="goal: ship",
+            max_generations=3,
+            max_total_seconds=1500,
+        )
+
+        assert payload.context["max_total_seconds"] == 1500
+        assert "max_total_seconds: 1500" in payload.prompt
+        assert "stop_reason=wall_clock_exhausted" in payload.prompt
+        assert "1500 seconds" in payload.prompt
 
     def test_serializes_seed_content_as_json_data(self) -> None:
         payload = build_ralph_subagent(
