@@ -75,6 +75,13 @@ class AutoAnswer:
     assumptions: list[str] = field(default_factory=list)
     non_goals: list[str] = field(default_factory=list)
     blocker: AutoBlocker | None = None
+    # True only when the answer came from the catch-all generic-default route
+    # (``_default_answer``). Feature-specific helpers
+    # (e.g. ``_feature_acceptance_answer``, ``_runtime_answer``) leave this
+    # ``False`` even when their ``source`` is ``CONSERVATIVE_DEFAULT``, so the
+    # interview driver can preserve repeated specific follow-ups instead of
+    # treating them as repeated generic fallbacks.
+    generic_default: bool = False
 
     @property
     def prefixed_text(self) -> str:
@@ -151,6 +158,57 @@ class AutoAnswerer:
                     blocker=risky_blocker,
                 )
         return answer
+
+    def answer_gap(
+        self,
+        section: str,
+        ledger: SeedDraftLedger,
+        context: AutoAnswerContext | None = None,
+    ) -> AutoAnswer:
+        """Return an answer targeted at an unresolved required ledger section.
+
+        This path is used when the backend keeps asking broad prompts and the
+        normal question-shaped answer would repeat or fail to close any open
+        required gap.  Keep it domain-neutral: it only fills Seed contract
+        sections with conservative, reversible defaults.
+        """
+        context = context or AutoAnswerContext()
+        if section == "goal":
+            blocker = AutoBlocker(reason="goal is unresolved", question="Clarify the primary goal.")
+            return AutoAnswer(
+                text="Cannot safely decide automatically: goal is unresolved",
+                source=AutoAnswerSource.BLOCKER,
+                confidence=1.0,
+                blocker=blocker,
+            )
+        if section in {"actors", "inputs", "outputs"}:
+            return self._io_actor_answer("Who are the actors, inputs, and outputs for this task?")
+        if section in {"constraints", "failure_modes"}:
+            return self._default_answer(
+                "What conservative constraints and failure modes should bound this MVP?", ledger
+            )
+        if section == "non_goals":
+            return self._non_goal_answer(
+                "What non-goals should explicitly remain out of scope?", ledger
+            )
+        if section in {"acceptance_criteria", "verification_plan"}:
+            return self._verification_answer(
+                "Which command output verifies the acceptance criteria?"
+            )
+        if section == "runtime_context":
+            return self._runtime_answer(
+                "Which runtime stack, repo, and project patterns should be used?", context
+            )
+        blocker = AutoBlocker(
+            reason=f"unsupported ledger gap section: {section}",
+            question=f"Clarify {section}.",
+        )
+        return AutoAnswer(
+            text=f"Cannot safely decide automatically: unsupported ledger gap section: {section}",
+            source=AutoAnswerSource.BLOCKER,
+            confidence=1.0,
+            blocker=blocker,
+        )
 
     def apply(self, answer: AutoAnswer, ledger: SeedDraftLedger, *, question: str) -> None:
         """Apply answer updates to ``ledger``."""
@@ -435,7 +493,13 @@ class AutoAnswerer:
                 ),
             ),
         ]
-        return AutoAnswer(value, AutoAnswerSource.CONSERVATIVE_DEFAULT, 0.82, updates)
+        return AutoAnswer(
+            value,
+            AutoAnswerSource.CONSERVATIVE_DEFAULT,
+            0.82,
+            updates,
+            generic_default=True,
+        )
 
 
 def _is_verification_question(lowered: str) -> bool:

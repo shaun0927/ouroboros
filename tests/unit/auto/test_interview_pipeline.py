@@ -1102,6 +1102,133 @@ async def test_interview_driver_steers_generic_questions_to_open_gaps(tmp_path) 
     assert any("runtime" in item.lower() for item in answers)
 
 
+@pytest.mark.asyncio
+async def test_interview_driver_uses_gap_answers_when_generic_defaults_repeat(tmp_path) -> None:
+    answers: list[str] = []
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("Anything else?", "interview_1")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        answers.append(text)
+        completed = len(answers) >= 5
+        return InterviewTurn("Anything else?", session_id, completed=completed)
+
+    state = AutoPipelineState(goal="Build a local report generator", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=6
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "seed_ready"
+    assert ledger.open_gaps() == []
+    assert sum("conservative mvp" in item.lower() for item in answers) == 1
+    assert any("single local user" in item.lower() for item in answers)
+    assert any("non-goals" in item.lower() or "non-goal" in item.lower() for item in answers)
+    assert any("runtime" in item.lower() for item in answers)
+
+
+@pytest.mark.asyncio
+async def test_interview_driver_preserves_specific_acceptance_answers_with_open_gaps(
+    tmp_path,
+) -> None:
+    answers: list[str] = []
+    questions = iter(
+        [
+            "What acceptance criteria should the search feature satisfy?",
+            "What acceptance criteria should the export feature satisfy?",
+        ]
+    )
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(next(questions), "interview_1")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        answers.append(text)
+        try:
+            next_q = next(questions)
+        except StopIteration:
+            return InterviewTurn("Anything else?", session_id, completed=True)
+        return InterviewTurn(next_q, session_id)
+
+    state = AutoPipelineState(goal="Build a local CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=4
+    )
+
+    await driver.run(state, ledger)
+
+    # Both specific feature/acceptance prompts should produce feature-specific
+    # answers even though other required ledger sections (e.g. actors,
+    # runtime_context) remain open. The driver must not replace them with
+    # gap-targeted fallbacks.
+    assert len(answers) >= 2, answers
+    assert "search feature" in answers[0].lower()
+    assert "export feature" in answers[1].lower()
+
+
+@pytest.mark.asyncio
+async def test_interview_driver_preserves_repeated_specific_acceptance_answer(
+    tmp_path,
+) -> None:
+    """A specific feature/acceptance prompt asked twice while other sections are
+    still open should still be answered specifically each time, not silently
+    replaced by a gap-targeted fallback.
+    """
+    answers: list[str] = []
+    repeated_question = "What acceptance criteria should the search feature satisfy?"
+    rounds = {"n": 0}
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(repeated_question, "interview_1")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        answers.append(text)
+        rounds["n"] += 1
+        if rounds["n"] >= 2:
+            return InterviewTurn("Anything else?", session_id, completed=True)
+        return InterviewTurn(repeated_question, session_id)
+
+    state = AutoPipelineState(goal="Build a local CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=4
+    )
+
+    await driver.run(state, ledger)
+
+    assert len(answers) >= 2, answers
+    assert "search feature" in answers[0].lower()
+    assert "search feature" in answers[1].lower()
+
+
+@pytest.mark.asyncio
+async def test_interview_driver_blocks_blank_goal_before_gap_defaults(tmp_path) -> None:
+    answers: list[str] = []
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("Anything else?", "interview_1")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        answers.append(text)
+        return InterviewTurn("Anything else?", session_id)
+
+    state = AutoPipelineState(goal="Build a local tool", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal("")
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=3
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "blocked"
+    assert "goal is weak" in (result.blocker or "")
+    assert answers == []
+
+
 def test_auto_state_rejects_malformed_resume_optional_fields() -> None:
     base = AutoPipelineState(goal="Build a CLI", cwd="/tmp/project").to_dict()
     base["pending_question"] = []
@@ -2765,3 +2892,131 @@ def test_interview_start_timeout_state_routes_to_interview_on_resume_with_retry_
     assert state.pending_question is None
     assert _recoverable_phase_for_tool("interview.start") is AutoPhase.INTERVIEW
     assert state.resume_capability() is AutoResumeCapability.RETRY
+
+
+@pytest.mark.asyncio
+async def test_convergence_contract_broad_benign_goal_resolves_with_safe_assumptions(
+    tmp_path,
+) -> None:
+    """Broad benign goals may proceed only with auditable required sections."""
+
+    rounds = 0
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What else should we know?", "interview_contract")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        nonlocal rounds
+        rounds += 1
+        return InterviewTurn(
+            "What else should we know?",
+            session_id,
+            seed_ready=rounds >= 5,
+            completed=rounds >= 5,
+        )
+
+    state = AutoPipelineState(goal="Build a local note taking CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=6,
+        timeout_seconds=1,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "seed_ready"
+    assert ledger.is_seed_ready()
+    assert ledger.open_gaps() == []
+    for required in (
+        "actors",
+        "inputs",
+        "outputs",
+        "non_goals",
+        "acceptance_criteria",
+        "verification_plan",
+        "runtime_context",
+    ):
+        assert ledger.sections[required].entries, required
+    assert {entry.source for entry in ledger.sections["actors"].entries} <= {
+        LedgerSource.ASSUMPTION,
+        LedgerSource.USER_GOAL,
+    }
+    assert any(
+        entry.status == LedgerStatus.DEFAULTED
+        for entry in ledger.sections["acceptance_criteria"].entries
+    )
+
+
+@pytest.mark.asyncio
+async def test_convergence_contract_unsafe_authority_question_blocks(tmp_path) -> None:
+    """Unsafe authority gaps are blockers, not auto-filled defaults."""
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn(
+            "Which production access token should auto configure?",
+            "interview_contract",
+        )
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("unsafe blocker should stop before backend.answer")
+
+    state = AutoPipelineState(goal="Deploy a service", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=3,
+        timeout_seconds=1,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "blocked"
+    assert state.phase == AutoPhase.BLOCKED
+    assert "credential or secret value required" in (result.blocker or "")
+
+
+@pytest.mark.asyncio
+async def test_convergence_contract_stalled_generic_followups_report_actionable_gaps(
+    tmp_path,
+) -> None:
+    """Generic ``What else?`` follow-up loops must blocker on unresolved sections.
+
+    This pins the documented stall pattern from
+    ``docs/auto-interview-convergence-contract.md``: when the backend keeps asking
+    ``What else?`` / ``Any additional context?``-style questions and required
+    sections never resolve, the round-cap blocker has to name the unresolved
+    gaps, not just say that ``max_rounds`` was reached.
+    """
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What else should we know?", "interview_contract")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What else should we know?", session_id)
+
+    state = AutoPipelineState(
+        goal="Build a small note-taking CLI",
+        cwd=str(tmp_path),
+    )
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+        timeout_seconds=1,
+    )
+
+    result = await driver.run(state, ledger)
+
+    blocker = result.blocker or ""
+    assert result.status == "blocked"
+    assert state.phase == AutoPhase.BLOCKED
+    assert "unresolved gaps" in blocker
+    open_gaps = ledger.open_gaps()
+    assert open_gaps, "stalled generic loop must leave at least one open required gap"
+    # The blocker must name at least one specific unresolved section, not just
+    # report that max_rounds was reached.
+    assert any(section in blocker for section in open_gaps)

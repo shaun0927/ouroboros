@@ -20,7 +20,7 @@ from ouroboros.auto.answerer import (
     AutoBlocker,
 )
 from ouroboros.auto.blocker_attribution import record_authoring_backend
-from ouroboros.auto.gap_detector import Gap, GapDetector
+from ouroboros.auto.gap_detector import GapDetector
 from ouroboros.auto.ledger import LedgerStatus, SeedDraftLedger
 from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
 from ouroboros.auto.repo_context import repo_auto_answer_context
@@ -276,27 +276,102 @@ class AutoInterviewDriver:
         answer = self.answerer.answer(question, ledger, context)
         if answer.blocker is not None:
             return answer
+        open_before = tuple(ledger.open_gaps())
+        if not open_before:
+            return answer
         gaps = self.gap_detector.detect(ledger)
-        if not gaps:
-            return answer
-        updated_sections = {section for section, _entry in answer.ledger_updates}
-        if any(gap.section in updated_sections for gap in gaps):
-            return answer
-        next_gap = gaps[0]
-        if not _can_steer_with_gap_prompt(question):
-            return answer
-        if next_gap.section == "goal" or next_gap.state in {
-            LedgerStatus.CONFLICTING,
-            LedgerStatus.BLOCKED,
-        }:
-            blocker = AutoBlocker(reason=next_gap.message, question=question)
+        first_gap = gaps[0]
+
+        # `goal` can never be filled by an auto-default — it must come from the
+        # user. Block immediately so callers don't send placeholder text to the
+        # backend.
+        if first_gap.section == "goal":
+            blocker = AutoBlocker(reason=first_gap.message, question=question)
             return AutoAnswer(
-                text=f"Cannot safely decide automatically: {next_gap.message}",
+                text=f"Cannot safely decide automatically: {first_gap.message}",
                 source=AutoAnswerSource.BLOCKER,
                 confidence=1.0,
                 blocker=blocker,
             )
-        return self.answerer.answer(_gap_prompt(next_gap), ledger, context)
+
+        # Steering only kicks in when the answer is a repeated generic fallback
+        # or the prompt is broad enough that gap-targeted steering is helpful.
+        # Backend-specific answers (e.g. an acceptance follow-up) are preserved
+        # even if they don't reduce the required-gap set this turn.
+        is_repeated_default = self._is_repeated_default_answer(answer, ledger)
+        is_broad_prompt = _can_steer_with_gap_prompt(question)
+        if not (is_repeated_default or is_broad_prompt):
+            return answer
+
+        # Same-turn repair: a current answer that actually reduces required
+        # gaps — including a CONFLICTING/BLOCKED one — is allowed through
+        # before we raise a hard blocker. This lets the driver recover from
+        # persisted ledger conflicts when the next prompt yields a correcting
+        # answer.
+        if not is_repeated_default and self._answer_reduces_open_gaps(
+            question, answer, ledger, open_before
+        ):
+            return answer
+
+        if first_gap.state in {LedgerStatus.CONFLICTING, LedgerStatus.BLOCKED}:
+            blocker = AutoBlocker(reason=first_gap.message, question=question)
+            return AutoAnswer(
+                text=f"Cannot safely decide automatically: {first_gap.message}",
+                source=AutoAnswerSource.BLOCKER,
+                confidence=1.0,
+                blocker=blocker,
+            )
+
+        gap_answer = self.answerer.answer_gap(first_gap.section, ledger, context)
+        if gap_answer.blocker is not None:
+            return gap_answer
+        if self._answer_reduces_open_gaps(question, gap_answer, ledger, open_before):
+            return gap_answer
+
+        blocker = AutoBlocker(
+            reason=(
+                f"auto answer did not reduce open required ledger gaps: {', '.join(open_before)}"
+            ),
+            question=question,
+        )
+        return AutoAnswer(
+            text=(
+                "Cannot safely decide automatically: auto answer did not reduce open "
+                f"required ledger gaps: {', '.join(open_before)}"
+            ),
+            source=AutoAnswerSource.BLOCKER,
+            confidence=1.0,
+            blocker=blocker,
+        )
+
+    def _answer_reduces_open_gaps(
+        self,
+        question: str,
+        answer: AutoAnswer,
+        ledger: SeedDraftLedger,
+        open_before: tuple[str, ...],
+    ) -> bool:
+        if answer.blocker is not None:
+            return False
+        simulated = SeedDraftLedger.from_dict(ledger.to_dict())
+        self.answerer.apply(answer, simulated, question=question)
+        open_after = tuple(simulated.open_gaps())
+        return len(open_after) < len(open_before) and set(open_after).issubset(open_before)
+
+    def _is_repeated_default_answer(self, answer: AutoAnswer, ledger: SeedDraftLedger) -> bool:
+        # Only the catch-all generic-default route counts as a "repeated
+        # generic fallback". Feature-specific helpers (acceptance, runtime,
+        # IO/actor, verification, non-goal, product behavior) may also use
+        # ``CONSERVATIVE_DEFAULT`` as their answer source but should not be
+        # treated as fallback answers — repeated specific follow-ups stay
+        # preserved instead of being swapped for an unrelated gap fill.
+        if not answer.generic_default:
+            return False
+        proposed = _normalize_answer_text(answer.prefixed_text)
+        return any(
+            _normalize_answer_text(item.get("answer", "")) == proposed
+            for item in ledger.question_history
+        )
 
     def _handle_completed_turn(
         self, state: AutoPipelineState, ledger: SeedDraftLedger, turn: InterviewTurn, rounds: int
@@ -432,30 +507,15 @@ def _generate_interview_id() -> str:
     return f"interview_{uuid4().hex[:16]}"
 
 
+_BROAD_PROMPT_RE = re.compile(
+    r"\b(what else|anything else|additional context|more context|"
+    r"what should we know|clarify further)\b"
+)
+
+
 def _can_steer_with_gap_prompt(question: str) -> bool:
-    lowered = question.lower()
-    return bool(
-        re.search(
-            r"\b(what else|anything else|additional context|more context|what should we know|clarify further)\b",
-            lowered,
-        )
-    )
-
-
-def _gap_prompt(gap: Gap) -> str:
-    prompts = {
-        "goal": "Clarify the primary user goal for the Seed.",
-        "actors": "Who are the actors, inputs, and outputs for this task?",
-        "inputs": "Who are the actors, inputs, and outputs for this task?",
-        "outputs": "Who are the actors, inputs, and outputs for this task?",
-        "constraints": "What conservative constraints and failure modes should bound this MVP?",
-        "failure_modes": "What conservative constraints and failure modes should bound this MVP?",
-        "non_goals": "What non-goals should explicitly remain out of scope?",
-        "acceptance_criteria": "Which command output verifies the acceptance criteria?",
-        "verification_plan": "Which command output verifies the acceptance criteria?",
-        "runtime_context": "Which runtime stack, repo, and project patterns should be used?",
-    }
-    return prompts.get(gap.section, gap.message)
+    """Return True when ``question`` is broad enough to benefit from gap-targeted steering."""
+    return bool(_BROAD_PROMPT_RE.search(question.lower()))
 
 
 _AUTO_ANSWER_LOG_LIMIT = 25
@@ -494,6 +554,10 @@ def _truncate(text: str, limit: int) -> str:
     if len(flat) <= limit:
         return flat
     return f"{flat[: limit - 3]}..."
+
+
+def _normalize_answer_text(text: str) -> str:
+    return " ".join(str(text).casefold().split())
 
 
 def _validate_turn(value: object) -> InterviewTurn:
