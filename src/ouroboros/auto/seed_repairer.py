@@ -142,10 +142,17 @@ class SeedRepairer:
 
         ``max_iterations`` caps the number of recorded repair attempts. Once
         ``len(history) >= self.max_iterations`` the loop returns the most
-        recent reviewed ``(seed, review, history)`` without invoking the
-        reviewer again — this is the upper bound the pipeline relies on to
-        prevent unbounded LLM cost when the reviewer keeps producing the
-        same finding.
+        recent reviewed ``(seed, review, history)`` — this is the upper bound
+        the pipeline relies on to prevent unbounded LLM cost when the reviewer
+        keeps producing the same finding.
+
+        When the bound is reached *immediately after* applying a repair, the
+        last cached ``review`` still describes the *pre-repair* seed; in that
+        case we perform exactly one final reconciliation review so the
+        returned ``(seed, review)`` pair is consistent. The pipeline persists
+        ``state.last_grade`` / ``state.findings`` from this review, so a stale
+        review here would block a seed that the final allowed repair actually
+        fixed (PR #785 review-1).
         """
         history: list[RepairResult] = []
         previous_high_fingerprints: set[str] = set()
@@ -163,8 +170,10 @@ class SeedRepairer:
                 return current, review, history
             current = repair.seed
             if len(history) >= self.max_iterations:
-                # Bound hit: return the last known review without spending
-                # another reviewer call.
+                # Bound hit *after* a successful repair: the cached ``review``
+                # still describes the previous (pre-repair) seed. Re-review
+                # ``current`` once so the returned pair is consistent.
+                review = self.reviewer.review(current, ledger=ledger)
                 return current, review, history
             if high and high == previous_high_fingerprints:
                 review = self.reviewer.review(current, ledger=ledger)

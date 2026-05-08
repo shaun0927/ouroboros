@@ -169,19 +169,163 @@ def test_converge_respects_custom_max_iterations() -> None:
     assert len(history) == 2
 
 
-def test_converge_does_not_review_again_after_bound_hit() -> None:
-    """Once ``len(history) >= max_iterations`` the loop must NOT call reviewer again."""
+def test_converge_reviews_once_more_to_reconcile_after_bound_hit() -> None:
+    """Once ``len(history) >= max_iterations`` the loop must NOT keep repairing.
+
+    The original AC was "don't keep repairing past the bound" — we still honor
+    that. But when the bound is reached *immediately after* a successful
+    repair, the cached review still describes the pre-repair seed. PR #785
+    review-1 requires exactly one final reconciliation review so the returned
+    ``(seed, review)`` pair is consistent (the pipeline persists
+    ``state.last_grade`` / ``state.findings`` from this review).
+    """
     reviewer = _AlwaysVagueReviewer()
     repairer = SeedRepairer(reviewer=reviewer, max_iterations=3)
     seed = _seed()
 
     _, _, history = repairer.converge(seed)
 
-    # 1 initial review + 1 review after each repair (skipping the trailing
-    # post-bound call). Without the bound-skip the reviewer would be called
-    # max_iterations + 1 == 4 times.
+    # 1 initial review + 1 review after each non-final repair (2)
+    # + 1 final reconciliation review at the bound = 4. No further repair
+    # attempts run, so ``history`` is still exactly ``max_iterations``.
     assert len(history) == 3
-    assert reviewer.calls == 3
+    assert reviewer.calls == 4
+
+
+def test_converge_returned_seed_and_review_are_consistent_at_bound() -> None:
+    """At the bound the returned ``(seed, review)`` pair must be consistent.
+
+    Regression test for PR #785 review-1: previously when the loop hit
+    ``max_iterations`` immediately after applying a repair, the returned
+    ``review`` still described the *pre-repair* seed. Re-running the reviewer
+    on the returned seed produced a different review than the one returned —
+    that drove ``AutoPipeline.run`` to persist a stale ``last_grade`` /
+    ``findings`` and could block a seed that the final allowed repair fixed.
+    """
+
+    class _SwitchOnReconcileReviewer:
+        """Returns vague findings until the reconciliation review at the bound.
+
+        With ``max_iterations=2`` the converge loop calls reviewer 3 times:
+          - call 1 (initial review)            → vague
+          - call 2 (post first repair)         → vague (drives second repair)
+          - call 3 (reconciliation at bound)   → clean A-grade
+
+        The pre-fix code skipped call 3 and returned the call-2 vague review
+        describing the *pre-second-repair* seed. Re-running the reviewer on
+        the returned seed produced the clean call-3 review — i.e., the pair
+        was inconsistent.
+        """
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def review(self, seed: Seed, *, ledger: SeedDraftLedger | None = None) -> SeedReview:  # noqa: ARG002 — protocol shape
+            self.calls += 1
+            if self.calls < 3:
+                return _vague_review(message=f"Still vague pass {self.calls}")
+            return SeedReview(
+                grade_result=GradeResult(
+                    grade=SeedGrade.A,
+                    scores={
+                        "coverage": 0.95,
+                        "ambiguity": 0.95,
+                        "testability": 0.95,
+                        "execution_feasibility": 0.95,
+                        "risk": 0.05,
+                    },
+                    findings=[],
+                    blockers=[],
+                    may_run=True,
+                ),
+                findings=(),
+            )
+
+    reviewer = _SwitchOnReconcileReviewer()
+    repairer = SeedRepairer(reviewer=reviewer, max_iterations=2)
+    seed = _seed()
+
+    returned_seed, returned_review, history = repairer.converge(seed)
+
+    # The bound was reached after a repair was applied, so the loop ran one
+    # final reconciliation review. The returned review describes the returned
+    # seed (clean A) — not the stale pre-repair vague review.
+    assert len(history) == 2
+    assert returned_review.grade_result.grade == SeedGrade.A
+    assert returned_review.findings == ()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_last_grade_reflects_returned_seed_at_bound(tmp_path) -> None:
+    """``AutoPipeline.run`` must persist a grade consistent with the returned seed.
+
+    Regression for PR #785 review-1: with the pre-fix code, hitting the
+    repair bound immediately after a fix would persist the pre-repair grade
+    onto ``state.last_grade``, blocking a seed that was actually fixed.
+    """
+
+    class _SwitchOnReconcileReviewer:
+        """Vague until the reconciliation review at the bound, then A-grade."""
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def review(self, seed: Seed, *, ledger: SeedDraftLedger | None = None) -> SeedReview:  # noqa: ARG002 — protocol shape
+            self.calls += 1
+            if self.calls < 3:
+                return _vague_review(message=f"pass {self.calls}")
+            return SeedReview(
+                grade_result=GradeResult(
+                    grade=SeedGrade.A,
+                    scores={
+                        "coverage": 0.95,
+                        "ambiguity": 0.95,
+                        "testability": 0.95,
+                        "execution_feasibility": 0.95,
+                        "risk": 0.05,
+                    },
+                    findings=[],
+                    blockers=[],
+                    may_run=True,
+                ),
+                findings=(),
+            )
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("done", "interview_1", seed_ready=True, completed=True)
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("completed interview should not need another answer")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        return _seed()
+
+    reviewer = _SwitchOnReconcileReviewer()
+    repairer = SeedRepairer(reviewer=reviewer, max_iterations=2)
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path), max_rounds=1
+    )
+    pipeline = AutoPipeline(
+        driver,
+        generate_seed,
+        store=AutoStore(tmp_path),
+        repairer=repairer,
+        skip_run=True,
+    )
+
+    await pipeline.run(state)
+
+    # The repair at the bound produced a clean seed: the persisted grade and
+    # findings must reflect the post-repair review, not the stale pre-repair
+    # one. With the pre-fix code ``state.last_grade`` would be "B".
+    assert state.last_grade == "A"
+    assert state.findings == []
 
 
 # ---------------------------------------------------------------------------
