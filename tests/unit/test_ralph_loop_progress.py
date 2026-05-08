@@ -241,6 +241,70 @@ async def test_ralph_handler_rejects_oscillation_window_above_ceiling() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ralph_handler_rejects_fractional_oscillation_window() -> None:
+    """Fractional floats must not be silently truncated to int.
+
+    Wiring lock for #788 review-3: ``int(2.9)`` would coerce to ``2`` and
+    pass the floor check, changing oscillation semantics behind the
+    caller's back. The MCP parameter is declared INTEGER, so reject any
+    float that is not exactly integral.
+    """
+    handler = RalphHandler(evolve_handler=_ImmediateEvolveHandler())  # type: ignore[arg-type]
+
+    for value in (2.9, 2.5, 3.1):
+        result = await handler.handle(
+            {
+                "lineage_id": "lin_osc_frac",
+                "oscillation_window": value,
+            }
+        )
+        assert result.is_err, f"value={value!r} should be rejected"
+        assert "oscillation_window" in str(result.error)
+        assert "integer" in str(result.error)
+
+
+def test_coerce_window_accepts_integer_valued_float_and_strings() -> None:
+    """Integer-valued floats / numeric strings round-trip; bools fall through.
+
+    Direct unit test of the helper — exercising it via ``RalphHandler.handle``
+    would also spin up a job manager and event store, which is unrelated to
+    the contract under test.
+    """
+    from ouroboros.mcp.errors import MCPToolError
+    from ouroboros.mcp.tools.ralph_handlers import _coerce_window
+
+    assert _coerce_window(3, field_name="x") == 3
+    assert _coerce_window(3.0, field_name="x") == 3
+    assert _coerce_window("4", field_name="x") == 4
+
+    bad = _coerce_window(2.9, field_name="oscillation_window")
+    assert isinstance(bad, MCPToolError)
+    assert "oscillation_window" in str(bad)
+    assert "integer" in str(bad)
+
+    bad_str = _coerce_window("not-a-number", field_name="oscillation_window")
+    assert isinstance(bad_str, MCPToolError)
+    assert "oscillation_window" in str(bad_str)
+
+
+@pytest.mark.asyncio
+async def test_ralph_handler_rejects_fractional_grade_regression_window() -> None:
+    """Mirror of the oscillation fractional check on the grade-regression input."""
+    handler = RalphHandler(evolve_handler=_ImmediateEvolveHandler())  # type: ignore[arg-type]
+
+    result = await handler.handle(
+        {
+            "lineage_id": "lin_grade_frac",
+            "grade_regression_window": 2.5,
+        }
+    )
+
+    assert result.is_err
+    assert "grade_regression_window" in str(result.error)
+    assert "integer" in str(result.error)
+
+
+@pytest.mark.asyncio
 async def test_ralph_handler_rejects_grade_regression_window_below_floor() -> None:
     """grade_regression_window < 2 must be rejected; strict-decrease needs two grades.
 
