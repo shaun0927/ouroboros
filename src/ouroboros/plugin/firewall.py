@@ -207,6 +207,30 @@ def _argv_sha256(argv: list[str]) -> str:
     return h.hexdigest()
 
 
+def _argv_summary(argv: list[str]) -> dict:
+    """Compute a bounded fingerprint of argv for the audit envelope.
+
+    Returns ``{argc, byte_length, sha256}``. Hashing uses NUL as the
+    element separator so two different argv lists with the same
+    concatenation cannot collide (``["ab", "cd"]`` vs ``["abcd"]``).
+    ``byte_length`` excludes the separators so the number reflects the
+    operator-visible payload size.
+
+    Computed over the *redacted* argv so the summary cannot be used as a
+    side-channel to recover original secret bytes. Forensic recovery of
+    the un-redacted form goes through ``provenance.argv_sha256`` when
+    redaction actually fired (keyed against an out-of-band store), per
+    the RFC's bounded-payload contract.
+    """
+    parts = [s.encode("utf-8", errors="replace") for s in argv]
+    digest = hashlib.sha256(b"\x00".join(parts)).hexdigest()
+    return {
+        "argc": len(argv),
+        "byte_length": sum(len(p) for p in parts),
+        "sha256": digest,
+    }
+
+
 def _event_envelope(
     *,
     event_type: str,
@@ -233,6 +257,7 @@ def _event_envelope(
     if argv is not None:
         redacted, redaction_fired = _redact_argv(list(argv))
         cmd["argv"] = redacted
+        cmd["argv_summary"] = _argv_summary(redacted)
         if redaction_fired:
             argv_hash = _argv_sha256(list(argv))
     event: dict = {

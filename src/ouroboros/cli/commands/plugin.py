@@ -969,9 +969,12 @@ def list_command(
         manifest_path = Path(entry.plugin_home).expanduser() / "ouroboros.plugin.json"
         try:
             manifest = load_manifest(manifest_path)
-        except PluginManifestError:
-            # Manifest unreadable post-install (e.g. external mutation):
-            # show conservatively as "installed", no granted scopes.
+        except (PluginManifestError, OSError):
+            # Manifest unreadable post-install (e.g. external mutation
+            # or filesystem error): show conservatively as "installed",
+            # no granted scopes. Catching OSError matches the rest of
+            # the listing's degradation policy — one bad row must not
+            # abort the entire list.
             rows.append(
                 {
                     "name": entry.name,
