@@ -523,6 +523,51 @@ def test_safe_default_still_blocks_when_negation_does_not_cover_unsafe_term() ->
     assert any("unsafe default context" in gap for gap in result.unsafe_gaps)
 
 
+@pytest.mark.parametrize(
+    ("answer", "expected_reason_substring"),
+    [
+        # Comma + imperative verb breaks the negation scope, leaving the
+        # second clause visible to the unsafe regex bank.
+        (
+            "No production deploys, use customer credentials from Vault.",
+            "credentials",
+        ),
+        (
+            "Without billing integration, send email notifications to customers.",
+            "external side effect",
+        ),
+        # Semicolon also breaks the scope.
+        (
+            "No external API; deploy to production for the first launch.",
+            "external side effect",
+        ),
+    ],
+)
+def test_safe_default_blocks_when_negation_does_not_cover_subsequent_clause(
+    answer: str, expected_reason_substring: str
+) -> None:
+    goal = "Build a small local CLI"
+    ledger = SeedDraftLedger.from_goal(goal)
+    ledger.record_qa("How should this work?", answer)
+
+    result = finalize_safe_defaultable_gaps(
+        ledger,
+        goal=goal,
+        provenance="unit test",
+    )
+
+    assert not result.completed, (
+        f"answer {answer!r} contains a positively asserted clause; "
+        "finalization must not auto-default"
+    )
+    joined = "\n".join(result.unsafe_gaps).lower()
+    assert expected_reason_substring.lower() in joined, (
+        f"expected unsafe reason matching {expected_reason_substring!r} for {answer!r}, "
+        f"got {result.unsafe_gaps!r}"
+    )
+    assert not ledger.is_seed_ready()
+
+
 def test_safe_default_treats_confirmed_non_goals_as_exclusions_not_unsafe_scope() -> None:
     goal = "Build a small local CLI"
     ledger = SeedDraftLedger.from_goal(goal)

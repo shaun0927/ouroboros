@@ -263,15 +263,161 @@ def _unsafe_context_reason(
     return None
 
 
+# Imperative verbs that mark a *new* action clause when they follow a comma.
+# Used to break the negation scope on ``,\s*<verb>`` so that mixed clauses
+# like ``No production deploys, use customer credentials`` only blank the
+# negated half — the second half stays visible to the unsafe regex bank.
+_IMPERATIVE_VERBS_AFTER_COMMA = (
+    "use",
+    "uses",
+    "using",
+    "send",
+    "sends",
+    "sending",
+    "log",
+    "logs",
+    "logging",
+    "logged",
+    "deploy",
+    "deploys",
+    "deploying",
+    "deployed",
+    "write",
+    "writes",
+    "writing",
+    "wrote",
+    "call",
+    "calls",
+    "calling",
+    "called",
+    "push",
+    "pushes",
+    "pushing",
+    "pushed",
+    "pull",
+    "pulls",
+    "pulling",
+    "pulled",
+    "store",
+    "stores",
+    "storing",
+    "stored",
+    "configure",
+    "configures",
+    "configuring",
+    "configured",
+    "connect",
+    "connects",
+    "connecting",
+    "connected",
+    "publish",
+    "publishes",
+    "publishing",
+    "published",
+    "run",
+    "runs",
+    "running",
+    "expose",
+    "exposes",
+    "exposing",
+    "exposed",
+    "read",
+    "reads",
+    "reading",
+    "fetch",
+    "fetches",
+    "fetching",
+    "create",
+    "creates",
+    "creating",
+    "created",
+    "delete",
+    "deletes",
+    "deleting",
+    "deleted",
+    "update",
+    "updates",
+    "updating",
+    "updated",
+    "sync",
+    "syncs",
+    "syncing",
+    "synced",
+    "forward",
+    "forwards",
+    "forwarding",
+    "forwarded",
+    "invoke",
+    "invokes",
+    "invoking",
+    "invoked",
+    "provision",
+    "provisions",
+    "provisioning",
+    "provisioned",
+    "grant",
+    "grants",
+    "granting",
+    "granted",
+    "access",
+    "accesses",
+    "accessing",
+    "accessed",
+    "trigger",
+    "triggers",
+    "triggering",
+    "triggered",
+    "load",
+    "loads",
+    "loading",
+    "loaded",
+    "save",
+    "saves",
+    "saving",
+    "saved",
+    "transfer",
+    "transfers",
+    "transferring",
+    "transferred",
+    "charge",
+    "charges",
+    "charging",
+    "charged",
+    "notify",
+    "notifies",
+    "notifying",
+    "notified",
+    "encrypt",
+    "encrypts",
+    "encrypting",
+    "encrypted",
+    "authenticate",
+    "authenticates",
+    "authenticating",
+    "authenticated",
+    "authorize",
+    "authorizes",
+    "authorizing",
+    "authorized",
+)
+
+_IMPERATIVE_VERBS_ALT = "|".join(_IMPERATIVE_VERBS_AFTER_COMMA)
+
 _NEGATION_CLAUSE_PATTERN = re.compile(
     # Negation cue at a word boundary, then the rest of the clause it scopes
-    # up to the next sentence break or contrastive conjunction. This lets
-    # ``No production deployment`` and ``Do not use customer credentials`` be
-    # stripped before the unsafe regex bank runs, while keeping a positively
-    # asserted clause that follows ``but``/``however``/``although`` visible.
+    # up to the next sentence break, contrastive conjunction, or comma that
+    # introduces a fresh imperative clause. This lets ``No production
+    # deployment`` and ``Do not use customer credentials`` be stripped before
+    # the unsafe regex bank runs, while keeping mixed clauses like
+    # ``No production deploys, use customer credentials from Vault`` visible
+    # past the comma so the second clause still flags.
     r"\b(?:no|not|never|don[’']t|do not|do n[’']t|without|none(?:\s+of)?|neither|nor|"
     r"skip|skips|skipped|avoid|avoids|avoided|exclude|excludes|excluded|forbid|forbids|forbidden)\b"
-    r"(?:(?!\b(?:but|however|although|except)\b)[^.;?!\n])*",
+    r"(?:"
+    r"(?!\b(?:but|however|although|except)\b)"
+    rf"(?!,\s*\b(?:{_IMPERATIVE_VERBS_ALT})\b)"
+    r"[^.;?!\n]"
+    r")*",
     re.IGNORECASE,
 )
 
@@ -282,13 +428,19 @@ def _strip_negated_clauses(text: str) -> str:
     The unsafe-context gate must not trip on phrases like ``No production
     deployment`` or ``Do not use customer credentials``: those are explicit
     *exclusions*, not authorizations. We replace the negation cue plus the
-    rest of the clause it scopes (up to the next sentence-break punctuation
-    or contrastive conjunction) with whitespace so the regex bank only sees
-    positively asserted scope. The implementation is deliberately a coarse
-    lexical heuristic — it stops at ``.``, ``;``, ``?``, ``!``, newlines, and
-    contrastive conjunctions (``but``, ``however``, ``although``, ``except``)
-    so a clause like ``no prod deploys, but log credentials`` keeps the
-    second half visible to the unsafe gate.
+    rest of the clause it scopes with whitespace so the regex bank only sees
+    positively asserted scope.
+
+    Scope ends at sentence-break punctuation (``.``, ``;``, ``?``, ``!``,
+    newlines), contrastive conjunctions (``but``, ``however``, ``although``,
+    ``except``), or a comma that is followed by a fresh imperative verb
+    (``use``, ``send``, ``log``, ``deploy``, etc.). The comma + imperative
+    boundary lets mixed clauses such as ``No production deploys, use
+    customer credentials from Vault`` keep the second half visible — the
+    ``credentials`` token is still flagged by the unsafe regex bank — while
+    plain list-style negations such as ``No auth, credentials, and
+    production deployment`` (no imperative verb after the comma) remain
+    fully scoped under the negation.
     """
     return _NEGATION_CLAUSE_PATTERN.sub(" ", text)
 
