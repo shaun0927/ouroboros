@@ -404,8 +404,27 @@ class TrustStore:
         without `artifact_digest`, and survive every digest change").
         Use `clear_disable` for that, or call `wipe_subject` to remove
         both at once.
+
+        Bracketed by the same per-plugin lock as ``grant()`` and
+        ``reset_for_subject_change()`` so a concurrent ``grant()`` cannot
+        race with revocation: without the lock, ``ooo plugin disable``
+        can write ``disabled.json``, another process can successfully
+        ``grant()`` a fresh scope under the per-plugin lock, and then
+        the unlocked ``remove()`` would race outside the critical
+        section — leaving a surviving or re-created ``trust.json``
+        after ``disable`` reported success and undermining the
+        re-grant-after-disable contract.
         """
         _validate_plugin_name(plugin)
+        with self._grant_lock(plugin):
+            return self._remove_locked(plugin)
+
+    def _remove_locked(self, plugin: str) -> bool:
+        """Lock-free body of ``remove`` for callers that already hold the
+        per-plugin lock (e.g. ``wipe_subject``). ``flock`` from the same
+        process via a separate FD is treated as a separate lock by
+        Linux/macOS, so re-entering ``_grant_lock`` would deadlock.
+        """
         path = self._path(plugin)
         if not path.is_file():
             return False
@@ -516,6 +535,10 @@ class TrustStore:
         subject-stable portion of the trust subject) so a future
         ``remove + add`` cycle that lands the same source still inherits
         the disable signal — exactly what the RFC asks for.
+
+        Bracketed by the same per-plugin lock as ``grant()`` /
+        ``remove()`` so concurrent disable/grant/remove sequences
+        serialize on a single critical section per plugin name.
         """
         _validate_plugin_name(plugin)
         when = when or datetime.now(tz=UTC)
@@ -527,25 +550,37 @@ class TrustStore:
             "disabled_at": when.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "disabled_by": disabled_by,
         }
-        path = self._disable_path(plugin)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(prefix=".disabled.", dir=str(path.parent))
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, indent=2)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(tmp, path)
-        except Exception:
+        with self._grant_lock(plugin):
+            path = self._disable_path(plugin)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(prefix=".disabled.", dir=str(path.parent))
             try:
-                os.unlink(tmp)
-            except FileNotFoundError:
-                pass
-            raise
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    json.dump(payload, handle, indent=2)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(tmp, path)
+            except Exception:
+                try:
+                    os.unlink(tmp)
+                except FileNotFoundError:
+                    pass
+                raise
 
     def clear_disable(self, plugin: str) -> bool:
-        """Remove the disable record for `plugin`. Returns True if removed."""
+        """Remove the disable record for `plugin`. Returns True if removed.
+
+        Bracketed by the same per-plugin lock as the rest of the
+        revocation surface so concurrent disable/grant/clear cycles
+        can't observe a half-applied transition.
+        """
         _validate_plugin_name(plugin)
+        with self._grant_lock(plugin):
+            return self._clear_disable_locked(plugin)
+
+    def _clear_disable_locked(self, plugin: str) -> bool:
+        """Lock-free body of ``clear_disable`` for callers that already
+        hold the per-plugin lock (see ``_remove_locked`` rationale)."""
         path = self._disable_path(plugin)
         if not path.is_file():
             return False
@@ -563,9 +598,20 @@ class TrustStore:
         any disable record for the plugin's install subject — once the
         user has uninstalled it, the disable signal no longer applies and
         a future fresh install starts un-trusted-but-enabled".
+
+        Both deletions happen inside a single ``_grant_lock`` critical
+        section so a concurrent ``grant()`` cannot land between them.
+        Calling ``remove()`` and ``clear_disable()`` separately would
+        leave a window after the trust file is gone where a racing
+        grant could create a new ``trust.json`` before the disable
+        record is wiped — producing a "trusted, enabled" final state
+        instead of the contracted "fresh-install starts
+        un-trusted-but-enabled".
         """
-        self.remove(plugin)
-        self.clear_disable(plugin)
+        _validate_plugin_name(plugin)
+        with self._grant_lock(plugin):
+            self._remove_locked(plugin)
+            self._clear_disable_locked(plugin)
 
 
 def _subject_matches(

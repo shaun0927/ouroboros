@@ -103,6 +103,89 @@ def test_grant_resets_legacy_unbound_record_on_subject_bound_grant(tmp_path: Pat
     assert not record.has_scope("github:read")
 
 
+def test_revocation_serializes_with_grant(tmp_path: Path) -> None:
+    """Regression for the bot's BLOCKING finding on trust_store.py:398
+    (revocation paths outside the per-plugin lock).
+
+    Without the lock on ``remove`` / ``write_disable`` / ``clear_disable``,
+    a concurrent ``grant()`` can land between the disable write and the
+    trust unlink, producing a final ``trusted, enabled`` state after
+    ``ooo plugin disable`` reported success — undermining the
+    re-grant-after-disable contract. With proper serialization, the
+    final state for any interleaving of disable + grant + remove cycles
+    is deterministic per the per-plugin critical section.
+    """
+    import threading
+
+    store = TrustStore(root=tmp_path)
+    plugin = "concurrent-revoke"
+    # Seed a plugin-home record so revocation has something to act on.
+    store.grant(
+        plugin=plugin,
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+        source_type="local_path",
+        source_identity="/tmp/installs/concurrent-revoke",
+        artifact_digest="sha256:" + "0" * 64,
+    )
+
+    def _disable_then_remove() -> None:
+        store.write_disable(
+            plugin,
+            source_type="local_path",
+            source_identity="/tmp/installs/concurrent-revoke",
+            disabled_by="user:test",
+        )
+        store.remove(plugin)
+
+    def _re_grant() -> None:
+        # Concurrent grant for the same subject. Without the new lock
+        # coverage on `remove` / `write_disable`, this can interleave
+        # with the disable+remove pair and produce inconsistent state.
+        store.grant(
+            plugin=plugin,
+            version="0.1.0",
+            scope="github:repo:read",
+            granted_by="user:test",
+            source_type="local_path",
+            source_identity="/tmp/installs/concurrent-revoke",
+            artifact_digest="sha256:" + "0" * 64,
+        )
+
+    barrier = threading.Barrier(2)
+
+    def _runner(fn) -> None:  # noqa: ANN001
+        barrier.wait()
+        fn()
+
+    t1 = threading.Thread(target=_runner, args=(_disable_then_remove,))
+    t2 = threading.Thread(target=_runner, args=(_re_grant,))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    # Final state is deterministic per critical section: either
+    # (a) disable+remove ran first → grant ran after → trust.json present
+    #     with `github:repo:read`, no disabled.json (since remove ran
+    #     before grant; disable was wiped... actually disable persists
+    #     because we did NOT call `wipe_subject`, only `remove`).
+    # (b) grant ran first → disable+remove ran after → no trust.json,
+    #     disabled.json present.
+    # The invariant we assert is: there is NO interleaving that leaves
+    # trust.json present at version 0.1.0 with stale legacy scopes
+    # (i.e. ``github:read`` cannot survive when the only re-grant in
+    # the test was for ``github:repo:read``). That is precisely the
+    # data-loss / inheritance the lock prevents.
+    record = store.read(plugin)
+    if record is not None:
+        scopes = {g.scope for g in record.granted_scopes}
+        assert scopes <= {"github:repo:read"}, (
+            f"unexpected scope inheritance through revocation race: {scopes}"
+        )
+
+
 def test_version_bump_invalidates_trust(tmp_path: Path) -> None:
     """Test 4: granting against a new version drops the previous grants
     (Q00/ouroboros-plugins#9 Q4 lock)."""

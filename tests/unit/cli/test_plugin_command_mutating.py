@@ -476,12 +476,17 @@ def test_remove_retry_cleans_stale_state_after_trust_wipe_failure(
         disabled_by="user:test",
     )
 
-    original_clear_disable = TrustStore.clear_disable
+    # ``wipe_subject`` calls into the lock-free internal
+    # ``_clear_disable_locked`` directly so that ``ooo plugin remove``
+    # serializes the trust + disable wipe inside a single per-plugin
+    # critical section (see TrustStore concurrency comments). Patch the
+    # internal method to simulate the unlink failure.
+    original_clear_disable = TrustStore._clear_disable_locked
 
     def _fail_clear_disable(self, plugin):  # noqa: ANN001
         raise OSError("simulated disabled.json unlink failure")
 
-    monkeypatch.setattr(TrustStore, "clear_disable", _fail_clear_disable)
+    monkeypatch.setattr(TrustStore, "_clear_disable_locked", _fail_clear_disable)
     first = runner.invoke(
         plugin_app,
         [
@@ -501,7 +506,7 @@ def test_remove_retry_cleans_stale_state_after_trust_wipe_failure(
     assert trust.is_disabled("github-pr-ops")
     assert (paths["plugin_home_root"] / "github-pr-ops" / "marker.txt").is_file()
 
-    monkeypatch.setattr(TrustStore, "clear_disable", original_clear_disable)
+    monkeypatch.setattr(TrustStore, "_clear_disable_locked", original_clear_disable)
     retry = runner.invoke(
         plugin_app,
         [
