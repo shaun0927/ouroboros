@@ -79,6 +79,14 @@ _MIN_RALPH_MAX_TOTAL_SECONDS = 1.0
 # the top-level pipeline deadline contract pinned by Q00/ouroboros#779.
 _MIN_RALPH_PER_ITERATION_SECONDS = 30.0
 _DEFAULT_RALPH_PER_ITERATION_SECONDS = 1800.0
+# Q00/ouroboros#773 (review-after-rebase): when a RALPH_HANDOFF session is
+# resumed after the top-level pipeline deadline already expired, the persisted
+# Ralph job may have reached a terminal snapshot server-side. Give the resume
+# poll a small bounded grace window to surface that terminal state instead of
+# stranding the session forever. Bounded so the deadline contract is not
+# silently extended; if the job is still non-terminal after the grace, the
+# session is re-marked BLOCKED with the original ``pipeline_deadline`` cause.
+_RALPH_POST_DEADLINE_POLL_GRACE_SECONDS = 5.0
 
 
 _RETRY_GUIDANCE_PHRASE = "retried once with idempotency key"
@@ -266,7 +274,7 @@ class AutoPipeline:
         if state.phase == AutoPhase.COMPLETE:
             return self._result(state, ledger, blocker=state.last_error)
         if state.phase in {AutoPhase.BLOCKED, AutoPhase.FAILED}:
-            resume_phase = _recoverable_phase_for_tool(state.last_tool_name)
+            resume_phase = _recoverable_phase_for_tool(state.last_tool_name, state=state)
             if resume_phase is None:
                 return self._result(state, ledger, blocker=state.last_error)
             previous_phase = state.phase
@@ -285,7 +293,22 @@ class AutoPipeline:
             self._save(state)
 
         review: SeedReview | None = None
-        if self._enforce_deadline(state):
+        # Q00/ouroboros#773 (review-after-rebase): defer ``_enforce_deadline``
+        # for a recovered RALPH_HANDOFF that already has a persisted Ralph
+        # job, so we reach the resume-handoff poller below. The
+        # deadline-expired case is then handled in ``_poll_ralph_job`` via
+        # ``_RALPH_POST_DEADLINE_POLL_GRACE_SECONDS``, which gives the
+        # persisted job a bounded window to surface a terminal snapshot it
+        # may have reached server-side after the deadline tripped. Without
+        # this defer, the inline ``_enforce_deadline`` checks below re-block
+        # immediately and we never reach the resume-handoff polling, leaving
+        # the session stranded forever.
+        defer_deadline_for_ralph_resume = (
+            state.phase == AutoPhase.RALPH_HANDOFF
+            and bool(state.ralph_job_id)
+            and self.ralph_resumer is not None
+        )
+        if not defer_deadline_for_ralph_resume and self._enforce_deadline(state):
             return self._result(state, ledger, blocker=state.last_error)
         if state.phase in {AutoPhase.CREATED, AutoPhase.INTERVIEW}:
             # Arm the top-level pipeline deadline (#779) on the first
@@ -359,7 +382,7 @@ class AutoPipeline:
             self._save(state)
             return self._result(state, ledger, blocker=state.last_error)
 
-        if self._enforce_deadline(state):
+        if not defer_deadline_for_ralph_resume and self._enforce_deadline(state):
             return self._result(state, ledger, blocker=state.last_error)
         if state.phase == AutoPhase.SEED_GENERATION:
             if state.seed_artifact:
@@ -1075,14 +1098,42 @@ class AutoPipeline:
         """
         assert self.ralph_resumer is not None  # noqa: S101 - guarded by caller
         assert state.ralph_job_id is not None  # noqa: S101 - guarded by caller
+        # Q00/ouroboros#773 (review-after-rebase): when this resume entered
+        # RALPH_HANDOFF after a ``pipeline_deadline`` block (the deadline
+        # already expired), poll for a small bounded grace window instead of
+        # ``timeout=0.0`` (which would never give the persisted job a chance
+        # to surface its terminal snapshot). The grace is bounded so the
+        # pipeline deadline contract is not silently extended; if the job is
+        # still non-terminal after the grace, the session is re-marked
+        # BLOCKED with the original ``pipeline_deadline`` cause.
+        deadline_expired_on_entry = (
+            state.deadline_at is not None and time.monotonic() >= state.deadline_at
+        )
         try:
             poll_call = self.ralph_resumer(job_id=state.ralph_job_id)
             if state.deadline_at is None:
                 ralph_meta = await poll_call
+            elif deadline_expired_on_entry:
+                ralph_meta = await asyncio.wait_for(
+                    poll_call,
+                    timeout=_RALPH_POST_DEADLINE_POLL_GRACE_SECONDS,
+                )
             else:
                 poll_timeout = max(0.0, state.deadline_at - time.monotonic())
                 ralph_meta = await asyncio.wait_for(poll_call, timeout=poll_timeout)
         except TimeoutError:
+            if deadline_expired_on_entry:
+                # Job did not surface a terminal snapshot during the grace
+                # window. Re-mark as the original pipeline timeout so the
+                # cause stays explicit (and so subsequent resumes still take
+                # the same code path through ``_recoverable_phase_for_tool``).
+                state.mark_blocked(
+                    f"pipeline_timeout: ralph job {state.ralph_job_id} did not "
+                    "reach terminal within post-deadline grace window",
+                    tool_name=PIPELINE_DEADLINE_TOOL_NAME,
+                )
+                self._save(state)
+                return self._result(state, ledger, review=review, blocker=state.last_error)
             if self._enforce_deadline(state):
                 return self._result(state, ledger, review=review, blocker=state.last_error)
             state.mark_blocked(
@@ -1464,7 +1515,11 @@ def _accepts_keyword(func: Callable[..., Any], name: str) -> bool:
     return False
 
 
-def _recoverable_phase_for_tool(tool_name: str | None) -> AutoPhase | None:
+def _recoverable_phase_for_tool(
+    tool_name: str | None,
+    *,
+    state: AutoPipelineState | None = None,
+) -> AutoPhase | None:
     if tool_name in {
         "interview.start",
         "interview.resume",
@@ -1485,6 +1540,15 @@ def _recoverable_phase_for_tool(tool_name: str | None) -> AutoPhase | None:
     if tool_name == "run_starter":
         return AutoPhase.RUN
     if tool_name == "ralph_starter":
+        return AutoPhase.RALPH_HANDOFF
+    # Q00/ouroboros#773 (review-after-rebase): a pipeline-deadline block that
+    # tripped while RALPH_HANDOFF held a checkpointed Ralph job must resume
+    # back into RALPH_HANDOFF so the persisted job is polled. The Ralph loop
+    # may have reached a terminal snapshot server-side after the deadline
+    # tripped (job_manager keeps running), and without this mapping the
+    # session strands at BLOCKED/pipeline_deadline forever even though
+    # COMPLETE/BLOCKED/FAILED is reachable through the existing poller.
+    if tool_name == PIPELINE_DEADLINE_TOOL_NAME and state is not None and state.ralph_job_id:
         return AutoPhase.RALPH_HANDOFF
     return None
 

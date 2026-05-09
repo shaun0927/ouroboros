@@ -1014,3 +1014,125 @@ async def test_handoff_to_ralph_does_not_retry_type_error_after_dispatch(tmp_pat
     assert state.phase is AutoPhase.FAILED
     assert state.ralph_job_id == "job_ralph_dispatched_once"
     assert state.last_error == "ralph handoff failed: starter failed after dispatch"
+
+
+# ---------------------------------------------------------------------------
+# Resume from BLOCKED/pipeline_deadline with persisted ralph_job_id —
+# review-after-rebase finding.
+#
+# When the top-level pipeline deadline trips during a RALPH_HANDOFF wait, the
+# state is marked BLOCKED with ``last_tool_name=pipeline_deadline``. Without
+# the state-aware mapping in ``_recoverable_phase_for_tool``, ``--resume``
+# never re-enters RALPH_HANDOFF and the persisted Ralph job is never polled —
+# even though the loop may have completed server-side after the deadline
+# tripped. These tests pin the recovery contract.
+# ---------------------------------------------------------------------------
+
+
+def test_recoverable_phase_maps_pipeline_deadline_to_ralph_handoff_with_job() -> None:
+    """``pipeline_deadline`` block on a session with a checkpointed Ralph job
+    must resume back into RALPH_HANDOFF so the persisted job is polled."""
+    state = AutoPipelineState(goal="test", cwd="/tmp")
+    state.ralph_job_id = "job_ralph_existing"
+    assert (
+        _recoverable_phase_for_tool(PIPELINE_DEADLINE_TOOL_NAME, state=state)
+        is AutoPhase.RALPH_HANDOFF
+    )
+
+
+def test_recoverable_phase_does_not_map_pipeline_deadline_without_job() -> None:
+    """Without a persisted Ralph job, ``pipeline_deadline`` is non-recoverable
+    — preserving the existing contract for non-Ralph deadline blocks."""
+    state = AutoPipelineState(goal="test", cwd="/tmp")
+    assert _recoverable_phase_for_tool(PIPELINE_DEADLINE_TOOL_NAME, state=state) is None
+
+
+@pytest.mark.asyncio
+async def test_pipeline_deadline_blocked_with_ralph_job_resumes_to_complete(
+    tmp_path,
+) -> None:
+    """End-to-end resume: a session BLOCKED by ``pipeline_deadline`` with a
+    persisted Ralph job re-enters RALPH_HANDOFF on resume and the poller maps
+    the now-terminal Ralph job to COMPLETE."""
+    state = _state_in_ralph_handoff(tmp_path)
+    state.deadline_at = time.monotonic() - 1.0  # deadline already past
+    # Mark blocked exactly as ``_enforce_deadline`` would when the deadline
+    # trips during ``_handoff_to_ralph``'s wait_for.
+    state.mark_blocked(
+        "pipeline_timeout: deadline expired during RALPH_HANDOFF",
+        tool_name=PIPELINE_DEADLINE_TOOL_NAME,
+    )
+
+    polled_job: dict[str, Any] = {}
+
+    async def ralph_resumer(*, job_id: str) -> dict[str, Any]:
+        polled_job["job_id"] = job_id
+        # Simulate a Ralph loop that completed server-side after the
+        # deadline tripped; first snapshot read returns terminal.
+        return {
+            "job_id": job_id,
+            "lineage_id": state.ralph_lineage_id,
+            "dispatch_mode": "job",
+            "terminal_status": "completed",
+            "stop_reason": "qa passed",
+        }
+
+    async def ralph_starter(*_args: Any, **_kwargs: Any) -> dict[str, Any]:  # pragma: no cover
+        raise AssertionError("resume must not start a duplicate Ralph handoff")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        ralph_resumer=ralph_resumer,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert polled_job["job_id"] == "job_ralph_existing"
+    assert result.status == "complete"
+    assert state.phase is AutoPhase.COMPLETE
+
+
+@pytest.mark.asyncio
+async def test_pipeline_deadline_blocked_grace_window_remarks_pipeline_timeout(
+    tmp_path, monkeypatch
+) -> None:
+    """When the post-deadline grace window expires without a terminal Ralph
+    snapshot, the session is re-marked BLOCKED with the original
+    ``pipeline_deadline`` cause so the resume contract stays consistent on
+    subsequent retries."""
+    import ouroboros.auto.pipeline as pipeline_mod
+
+    monkeypatch.setattr(pipeline_mod, "_RALPH_POST_DEADLINE_POLL_GRACE_SECONDS", 0.05)
+
+    state = _state_in_ralph_handoff(tmp_path)
+    state.deadline_at = time.monotonic() - 1.0
+    state.mark_blocked(
+        "pipeline_timeout: deadline expired during RALPH_HANDOFF",
+        tool_name=PIPELINE_DEADLINE_TOOL_NAME,
+    )
+
+    async def ralph_resumer(*, job_id: str) -> dict[str, Any]:  # noqa: ARG001
+        import asyncio as _asyncio
+
+        await _asyncio.sleep(5.0)
+        raise AssertionError("should have been cancelled by the grace timeout")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_resumer=ralph_resumer,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "blocked"
+    assert state.last_tool_name == PIPELINE_DEADLINE_TOOL_NAME
+    assert "pipeline_timeout" in (state.last_error or "")
