@@ -1557,3 +1557,53 @@ class TestJobManager:
             )
         finally:
             await store.close()
+
+    async def test_find_active_job_by_lineage_recovers_in_flight_job(self, tmp_path) -> None:
+        """A non-terminal Ralph job is rediscoverable by lineage_id.
+
+        Pins the auto-pipeline RALPH_HANDOFF resume contract: when
+        ``ralph_lineage_id`` is persisted but ``ralph_job_id`` is not yet
+        saved (gap window between ``start_job`` returning and the auto
+        pipeline persisting the job_id), the resume path must re-attach
+        to the in-flight job rather than dispatch a duplicate.
+        """
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+        await store.initialize()
+        gate: asyncio.Event = asyncio.Event()
+
+        try:
+
+            async def _slow_runner() -> MCPToolResult:
+                await gate.wait()
+                return MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="ralph done"),),
+                    is_error=False,
+                )
+
+            assert (await manager.find_active_job_by_lineage("lin_recovery")) is None
+
+            started = await manager.start_job(
+                job_type="ralph",
+                initial_message="queued",
+                runner=_slow_runner(),
+                links=JobLinks(lineage_id="lin_recovery"),
+            )
+
+            recovered = await manager.find_active_job_by_lineage("lin_recovery", job_type="ralph")
+            assert recovered is not None
+            assert recovered.job_id == started.job_id
+            assert recovered.links.lineage_id == "lin_recovery"
+
+            assert (
+                await manager.find_active_job_by_lineage("lin_recovery", job_type="evolve")
+            ) is None
+
+            gate.set()
+            await asyncio.sleep(0.05)
+
+            assert (await manager.find_active_job_by_lineage("lin_recovery")) is None
+        finally:
+            gate.set()
+            await _cancel_manager_tasks(manager)
+            await store.close()

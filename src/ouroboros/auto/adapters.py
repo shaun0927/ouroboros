@@ -189,8 +189,19 @@ class HandlerRalphStarter:
         existing_job_id: str | None = None,
         on_started: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
+        job_manager = self.handler._job_manager  # noqa: SLF001
+        # Cross-restart safety: if the caller did not supply an existing
+        # job_id but a non-terminal Ralph job is already running for this
+        # lineage, reattach instead of dispatching a duplicate. The auto
+        # pipeline persists ``ralph_lineage_id`` before ``ralph_job_id``,
+        # so a crash in that gap window can leave the lineage set while
+        # job_id is still ``None``; without this lookup, resume would
+        # enqueue a second Ralph loop for the same lineage.
+        if not existing_job_id and lineage_id:
+            recovered = await job_manager.find_active_job_by_lineage(lineage_id, job_type="ralph")
+            if recovered is not None:
+                existing_job_id = recovered.job_id
         if existing_job_id:
-            job_manager = self.handler._job_manager  # noqa: SLF001
             if on_started is not None:
                 on_started(
                     {

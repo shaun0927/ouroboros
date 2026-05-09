@@ -549,6 +549,41 @@ class JobManager:
 
         return await self.get_snapshot(job_id)
 
+    async def find_active_job_by_lineage(
+        self,
+        lineage_id: str,
+        *,
+        job_type: str | None = None,
+    ) -> JobSnapshot | None:
+        """Return the most recently updated non-terminal job for ``lineage_id``.
+
+        Used by the auto pipeline RALPH_HANDOFF resume path to rediscover an
+        already-running Ralph job when the auto state recorded a lineage_id
+        but crashed (or returned to caller) before the job_id was persisted.
+        Without this lookup, resuming an in-flight handoff would dispatch a
+        second Ralph loop for the same lineage. Returns ``None`` when no
+        active match exists; terminal jobs are deliberately ignored because
+        their async runner has already completed and re-attaching offers no
+        value.
+        """
+        await self._ensure_initialized()
+        candidates: list[JobSnapshot] = []
+        for job_id in list(self._known_job_ids):
+            try:
+                snapshot = await self.get_snapshot(job_id)
+            except ValueError:
+                continue
+            if snapshot.is_terminal:
+                continue
+            if snapshot.links.lineage_id != lineage_id:
+                continue
+            if job_type is not None and snapshot.job_type != job_type:
+                continue
+            candidates.append(snapshot)
+        if not candidates:
+            return None
+        return max(candidates, key=lambda s: s.updated_at)
+
     async def cleanup_expired_jobs(self, ttl: timedelta | None = None) -> int:
         """Remove terminal jobs older than *ttl* from the in-memory registry.
 
