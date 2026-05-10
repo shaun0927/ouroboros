@@ -696,8 +696,7 @@ class AutoPipelineState:
                 msg = "ralph_last_event_at must include timezone information"
                 raise ValueError(msg)
         if self.ralph_current_generation is not None and (
-            type(self.ralph_current_generation) is not int
-            or self.ralph_current_generation < 0
+            type(self.ralph_current_generation) is not int or self.ralph_current_generation < 0
         ):
             msg = "ralph_current_generation must be a non-negative integer or null"
             raise ValueError(msg)

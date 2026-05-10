@@ -573,9 +573,7 @@ class AutoPipeline:
                             tool_name="ralph_starter",
                         )
                         self._save(state)
-                        return self._result(
-                            state, ledger, review=review, blocker=state.last_error
-                        )
+                        return self._result(state, ledger, review=review, blocker=state.last_error)
                     return await self._handoff_to_ralph(
                         state, ledger, seed, review, run_subagent=None
                     )
