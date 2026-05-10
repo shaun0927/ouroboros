@@ -289,3 +289,267 @@ def test_read_disable_raises_value_error_on_malformed_json(tmp_path):
     disabled.write_text("[]")
     with pytest.raises(ValueError, match="not a JSON object"):
         store.read_disable("broken-plugin")
+
+
+# ---------------------------------------------------------------------------
+# Concurrency / atomicity contract for the disable + revocation surface
+# ---------------------------------------------------------------------------
+
+
+def test_disable_apis_validate_plugin_name(tmp_path: Path) -> None:
+    """Defence-in-depth: every disable API derives ``disabled.json``
+    paths from the raw ``plugin`` string. Lockfile rows are
+    operator-editable and ``Lockfile.read()`` does not enforce the
+    name regex, so a malformed name like ``../../x`` could otherwise
+    escape ``DEFAULT_TRUST_ROOT`` and read/write arbitrary
+    ``disabled.json`` paths. The trust-file API has the same guard;
+    this test pins the disable surface to the same rule.
+    """
+    store = TrustStore(root=tmp_path)
+    bad = "../escape"
+    with pytest.raises(ValueError, match="invalid plugin name"):
+        store.is_disabled(bad)
+    with pytest.raises(ValueError, match="invalid plugin name"):
+        store.is_disabled_for_subject(bad, source_type="local_path", source_identity="x")
+    with pytest.raises(ValueError, match="invalid plugin name"):
+        store.read_disable(bad)
+    with pytest.raises(ValueError, match="invalid plugin name"):
+        store.write_disable(bad, source_type="local_path", source_identity="x")
+    with pytest.raises(ValueError, match="invalid plugin name"):
+        store.clear_disable(bad)
+    with pytest.raises(ValueError, match="invalid plugin name"):
+        store.apply_disable(bad, source_type="local_path", source_identity="x")
+
+
+def test_apply_disable_is_atomic(tmp_path: Path) -> None:
+    """``apply_disable`` writes the disable record AND removes the
+    trust file inside a single per-plugin critical section, so the
+    atomic post-condition (``trust.json`` gone, ``disabled.json``
+    present) is observable in one step. The naive
+    ``write_disable() + remove()`` shape would take/release the lock
+    twice and let a concurrent grant interleave.
+    """
+    store = TrustStore(root=tmp_path)
+    plugin = "atomic-target"
+    store.grant(
+        plugin=plugin,
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+        source_type="local_path",
+        source_identity="/tmp/installs/atomic-target",
+        artifact_digest="sha256:" + "0" * 64,
+    )
+    assert store.read(plugin) is not None
+    assert not store.is_disabled(plugin)
+
+    store.apply_disable(
+        plugin,
+        source_type="local_path",
+        source_identity="/tmp/installs/atomic-target",
+        disabled_by="user:test",
+    )
+
+    # Atomic post-condition.
+    assert store.read(plugin) is None
+    assert store.is_disabled(plugin)
+    record = store.read_disable(plugin)
+    assert record is not None
+    assert record["source_type"] == "local_path"
+    assert record["source_identity"] == "/tmp/installs/atomic-target"
+
+
+def test_grant_and_clear_disable_is_atomic(tmp_path: Path) -> None:
+    """``grant_and_clear_disable`` writes the trust grant AND clears
+    the disable record inside a single critical section, so the
+    atomic post-condition (trust present with the new scope, disable
+    record gone) is observable in one step.
+    """
+    store = TrustStore(root=tmp_path)
+    plugin = "atomic-trust-target"
+    store.write_disable(
+        plugin,
+        source_type="local_path",
+        source_identity="/tmp/installs/atomic-trust-target",
+        disabled_by="user:test",
+    )
+    assert store.is_disabled(plugin)
+
+    record = store.grant_and_clear_disable(
+        plugin=plugin,
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+        source_type="local_path",
+        source_identity="/tmp/installs/atomic-trust-target",
+        artifact_digest="sha256:" + "0" * 64,
+    )
+    assert record.has_scope("github:read")
+    assert not store.is_disabled(plugin)
+
+
+def test_grant_resets_legacy_unbound_record_on_subject_bound_grant(tmp_path: Path) -> None:
+    """A pre-RFC ``trust.json`` has blank ``source_type`` /
+    ``source_identity`` / ``artifact_digest`` columns. Without
+    treating those blanks as a hard subject mismatch on a fresh
+    subject-bound grant, the legacy record would be silently
+    "upgraded" — every previously stored scope would carry over to
+    the new subject without re-consent, defeating the trust-subject
+    binding contract. The grant write path resets the record and
+    then appends only the explicitly granted scope.
+    """
+    store = TrustStore(root=tmp_path)
+    # Pre-RFC grant: only `version` + `scope`, no subject columns.
+    store.grant(plugin="test-plugin", version="0.1.0", scope="github:read", granted_by="u")
+    legacy = store.read("test-plugin")
+    assert legacy is not None
+    assert legacy.has_scope("github:read")
+    assert legacy.source_type == ""
+
+    record = store.grant(
+        plugin="test-plugin",
+        version="0.1.0",
+        scope="github:repo:read",
+        granted_by="u",
+        source_type="local_path",
+        source_identity="/tmp/installs/test-plugin",
+        artifact_digest="sha256:" + "0" * 64,
+    )
+    assert record.source_type == "local_path"
+    assert record.source_identity == "/tmp/installs/test-plugin"
+    assert record.artifact_digest == "sha256:" + "0" * 64
+    assert [g.scope for g in record.granted_scopes] == ["github:repo:read"]
+    assert not record.has_scope("github:read")
+
+
+def test_revocation_serializes_with_grant(tmp_path: Path) -> None:
+    """Without per-plugin lock coverage on ``remove`` /
+    ``write_disable`` / ``clear_disable``, a concurrent ``grant()``
+    can interleave with the revocation pair and leave the trust
+    state in an inconsistent ``trust + scope`` mix. With proper
+    serialization, every interleaving observed at the end of the
+    race honors the per-plugin critical section.
+    """
+    import threading
+
+    store = TrustStore(root=tmp_path)
+    plugin = "concurrent-revoke"
+    store.grant(
+        plugin=plugin,
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+        source_type="local_path",
+        source_identity="/tmp/installs/concurrent-revoke",
+        artifact_digest="sha256:" + "0" * 64,
+    )
+
+    def _disable_then_remove() -> None:
+        store.write_disable(
+            plugin,
+            source_type="local_path",
+            source_identity="/tmp/installs/concurrent-revoke",
+            disabled_by="user:test",
+        )
+        store.remove(plugin)
+
+    def _re_grant() -> None:
+        store.grant(
+            plugin=plugin,
+            version="0.1.0",
+            scope="github:repo:read",
+            granted_by="user:test",
+            source_type="local_path",
+            source_identity="/tmp/installs/concurrent-revoke",
+            artifact_digest="sha256:" + "0" * 64,
+        )
+
+    barrier = threading.Barrier(2)
+
+    def _runner(fn) -> None:  # noqa: ANN001
+        barrier.wait()
+        fn()
+
+    t1 = threading.Thread(target=_runner, args=(_disable_then_remove,))
+    t2 = threading.Thread(target=_runner, args=(_re_grant,))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    # Whichever interleaving occurs, no scope from the original grant
+    # (``github:read``) may survive: the only re-grant in the test was
+    # for ``github:repo:read``, so any scope outside that set indicates
+    # racy data inheritance through the revocation surface.
+    record = store.read(plugin)
+    if record is not None:
+        scopes = {g.scope for g in record.granted_scopes}
+        assert scopes <= {"github:repo:read"}, (
+            f"unexpected scope inheritance through revocation race: {scopes}"
+        )
+
+
+def test_wipe_subject_atomic_against_concurrent_grant(tmp_path: Path) -> None:
+    """``wipe_subject`` runs ``remove`` + ``clear_disable`` inside a
+    single per-plugin critical section. Calling them separately
+    would leave a window after the trust file is gone where a racing
+    grant could create a fresh ``trust.json`` before the disable
+    record is wiped — producing the forbidden "trusted, enabled"
+    state instead of the contracted "fresh-install starts
+    un-trusted-but-enabled".
+    """
+    import threading
+
+    store = TrustStore(root=tmp_path)
+    plugin = "concurrent-wipe"
+    store.grant(
+        plugin=plugin,
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+        source_type="local_path",
+        source_identity="/tmp/installs/concurrent-wipe",
+        artifact_digest="sha256:" + "0" * 64,
+    )
+    store.write_disable(
+        plugin,
+        source_type="local_path",
+        source_identity="/tmp/installs/concurrent-wipe",
+        disabled_by="user:test",
+    )
+
+    def _wipe() -> None:
+        store.wipe_subject(plugin)
+
+    def _re_grant() -> None:
+        store.grant(
+            plugin=plugin,
+            version="0.1.0",
+            scope="github:repo:read",
+            granted_by="user:test",
+            source_type="local_path",
+            source_identity="/tmp/installs/concurrent-wipe",
+            artifact_digest="sha256:" + "0" * 64,
+        )
+
+    barrier = threading.Barrier(2)
+
+    def _runner(fn) -> None:  # noqa: ANN001
+        barrier.wait()
+        fn()
+
+    t1 = threading.Thread(target=_runner, args=(_wipe,))
+    t2 = threading.Thread(target=_runner, args=(_re_grant,))
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+
+    # Forbidden state: trust present AND disabled record present at
+    # the same time — that's the "trusted but disabled" inconsistency
+    # the single critical section in `wipe_subject` prevents.
+    record = store.read(plugin)
+    disabled = store.is_disabled(plugin)
+    assert not (record is not None and disabled), (
+        f"wipe + grant race produced trusted+disabled state: record={record} disabled={disabled}"
+    )

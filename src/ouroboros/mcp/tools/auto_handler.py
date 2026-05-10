@@ -10,14 +10,18 @@ from typing import Any
 
 from ouroboros.auto.adapters import (
     HandlerInterviewBackend,
+    HandlerRalphPoller,
     HandlerRalphStarter,
     HandlerRunStarter,
     HandlerSeedGenerator,
     load_seed,
     save_seed,
 )
+from ouroboros.auto.answerer import AutoAnswerContext
 from ouroboros.auto.interview_driver import AutoInterviewDriver
+from ouroboros.auto.ledger import REQUIRED_SECTIONS
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
+from ouroboros.auto.repo_context import repo_auto_answer_context
 from ouroboros.auto.resume_render import render_resume_lines
 from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.state import (
@@ -147,6 +151,18 @@ class AutoHandler:
                     required=False,
                 ),
                 MCPToolParameter(
+                    "user_preferences",
+                    ToolInputType.OBJECT,
+                    (
+                        "Caller-supplied user preferences keyed by ledger section name "
+                        "(e.g. runtime_context, constraints, non_goals). The Driver "
+                        "tags matching answers with [from-auto][user_preference] in the "
+                        "ledger. Keys must be valid ledger section names; values must "
+                        "be non-empty strings."
+                    ),
+                    required=False,
+                ),
+                MCPToolParameter(
                     "complete_product",
                     ToolInputType.BOOLEAN,
                     (
@@ -203,6 +219,18 @@ class AutoHandler:
                 "pipeline_timeout_seconds cannot be changed on resume; the "
                 "original deadline is preserved across process restarts"
             )
+        # Distinguish "caller did not pass user_preferences" from "caller
+        # passed an empty mapping". Only validate/parse when the caller
+        # actually supplied the arg so a resume call can defer to persisted
+        # state without being forced to resupply.
+        user_preferences_supplied = (
+            "user_preferences" in arguments and arguments.get("user_preferences") is not None
+        )
+        supplied_user_preferences = (
+            _parse_user_preferences(arguments.get("user_preferences"))
+            if user_preferences_supplied
+            else {}
+        )
         if isinstance(resume, str) and resume:
             state = store.load(resume)
             cwd = state.cwd
@@ -216,7 +244,20 @@ class AutoHandler:
             max_interview_rounds = state.max_interview_rounds
             max_repair_rounds = state.max_repair_rounds
             skip_run = requested_skip_run or state.skip_run
-            complete_product = complete_product or state.complete_product
+            # Resume contract: caller-supplied preferences override persisted
+            # ones; otherwise the original session's preferences are reused so
+            # the same input converges to the same Seed.
+            if user_preferences_supplied:
+                state.user_preferences = dict(supplied_user_preferences)
+            # Q00/ouroboros#773 (review-3): ``complete_product`` is durable
+            # session intent, not a per-invocation flag. Honor the persisted
+            # value so MCP callers that omit ``complete_product`` on resume
+            # still chain RUN → RALPH_HANDOFF for sessions that originally
+            # opted in. Mirrors the CLI policy in ``cli/commands/auto.py``.
+            if state.complete_product and not complete_product:
+                complete_product = True
+            elif complete_product and not state.complete_product:
+                state.complete_product = True
         else:
             goal = arguments.get("goal")
             if not isinstance(goal, str) or not goal.strip():
@@ -228,15 +269,15 @@ class AutoHandler:
             max_repair_rounds = _positive_int_arg(arguments, "max_repair_rounds", 5)
             skip_run = requested_skip_run
             state = AutoPipelineState(goal=goal.strip(), cwd=cwd)
-            state.complete_product = complete_product
+            state.user_preferences = dict(supplied_user_preferences)
             state.max_interview_rounds = max_interview_rounds
             state.max_repair_rounds = max_repair_rounds
+            state.complete_product = complete_product
             if pipeline_timeout_seconds is not None:
                 state.pipeline_timeout_seconds = pipeline_timeout_seconds
         state.runtime_backend = runtime_backend
         state.opencode_mode = opencode_mode
         state.skip_run = skip_run
-        state.complete_product = complete_product
 
         authoring_opencode_mode = "subprocess" if opencode_mode == "plugin" else opencode_mode
         interview_handler = _authoring_interview_handler(
@@ -260,22 +301,31 @@ class AutoHandler:
             mcp_tool_prefix=self.mcp_tool_prefix,
         )
 
+        context_provider = _build_context_provider(dict(state.user_preferences))
         driver = AutoInterviewDriver(
             HandlerInterviewBackend(interview_handler, cwd=cwd),
             store=store,
             max_rounds=max_interview_rounds,
             timeout_seconds=state.phase_timeout_seconds(AutoPhase.INTERVIEW),
+            context_provider=context_provider,
         )
-        ralph_starter = (
-            HandlerRalphStarter(
-                RalphHandler(
-                    agent_runtime_backend=runtime_backend,
-                    opencode_mode=opencode_mode,
-                )
+        ralph_handler = (
+            RalphHandler(
+                agent_runtime_backend=runtime_backend,
+                opencode_mode=opencode_mode,
             )
             if complete_product
             else None
         )
+        ralph_starter = HandlerRalphStarter(ralph_handler) if ralph_handler is not None else None
+        # Q00/ouroboros#773 (review-5 finding 1): wire a poller backed by the
+        # same ``RalphHandler`` so MCP-side resumes of an interrupted
+        # ``RALPH_HANDOFF`` checkpoint actually reconcile the persisted job
+        # to a terminal auto phase. The same handler is reused so both the
+        # starter and the poller share a ``JobManager`` (and underlying
+        # ``EventStore``) — without that share the poller would query a
+        # fresh, empty job table.
+        ralph_resumer = HandlerRalphPoller(ralph_handler) if ralph_handler is not None else None
         pipeline = AutoPipeline(
             driver,
             HandlerSeedGenerator(generate_seed_handler),
@@ -292,6 +342,7 @@ class AutoHandler:
             reconcile_run=reconcile_run,
             reconcile_source=reconcile_source,
             ralph_starter=ralph_starter,
+            ralph_resumer=ralph_resumer,
             complete_product=complete_product,
         )
         return await pipeline.run(state)
@@ -339,6 +390,18 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
         meta["run_reconciliation_status"] = result.run_reconciliation_status
         meta["run_reconciliation_source"] = result.run_reconciliation_source
         meta["run_reconciled_at"] = result.run_reconciled_at
+    # Q00/ouroboros#773 (review-4): surface Ralph handoff tracking handles on
+    # the MCP result contract. Without these, plugin-mode dispatches and
+    # mid-loop checkpoints expose no structured handle for clients to monitor
+    # or correlate the Ralph work, forcing them to read local state files
+    # out-of-band. Each field is emitted only when populated so default-off
+    # ``complete_product=False`` runs keep the legacy meta shape byte-identical.
+    if result.ralph_job_id:
+        meta["ralph_job_id"] = result.ralph_job_id
+    if result.ralph_lineage_id:
+        meta["ralph_lineage_id"] = result.ralph_lineage_id
+    if result.ralph_dispatch_mode:
+        meta["ralph_dispatch_mode"] = result.ralph_dispatch_mode
     # Always emit the ledger-provenance surface so MCP clients can distinguish
     # "computed and empty" (no resolved sections yet, or no per-source split
     # available) from "field not provided at all".  Empty containers are part
@@ -387,6 +450,50 @@ def _optional_pipeline_timeout(arguments: dict[str, Any]) -> float | None:
         )
         raise ValueError(msg)
     return timeout
+
+
+def _parse_user_preferences(value: object) -> dict[str, str]:
+    """Validate and normalise the optional ``user_preferences`` MCP arg.
+
+    Returns a dict keyed by ledger section names. Empty input yields an empty
+    dict. Any unknown section name or empty/non-string value is rejected with
+    ``ValueError`` so callers see a clear contract failure rather than a
+    silently-ignored preference.
+    """
+    if value is None or value == "":
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("user_preferences must be an object keyed by ledger section names")
+    if not value:
+        return {}
+    valid_sections = frozenset(REQUIRED_SECTIONS)
+    cleaned: dict[str, str] = {}
+    for raw_key, raw_val in value.items():
+        if not isinstance(raw_key, str):
+            raise ValueError("user_preferences keys must be strings")
+        if raw_key not in valid_sections:
+            raise ValueError(
+                f"user_preferences key '{raw_key}' is not a valid ledger section "
+                f"(allowed: {', '.join(sorted(valid_sections))})"
+            )
+        if not isinstance(raw_val, str) or not raw_val.strip():
+            raise ValueError(f"user_preferences['{raw_key}'] must be a non-empty string")
+        cleaned[raw_key] = raw_val.strip()
+    return cleaned
+
+
+def _build_context_provider(user_preferences: dict[str, str]):
+    """Return a context_provider that augments repo context with user preferences."""
+
+    def provider(cwd: str) -> AutoAnswerContext:
+        base = repo_auto_answer_context(cwd)
+        return AutoAnswerContext(
+            repo_facts=base.repo_facts,
+            evidence=base.evidence,
+            user_preferences=user_preferences,
+        )
+
+    return provider
 
 
 def _positive_int_arg(arguments: dict[str, Any], name: str, default: int) -> int:
@@ -565,6 +672,14 @@ def _format_result(result: AutoPipelineResult) -> str:
         lines.append(f"Run reconciliation status: {result.run_reconciliation_status}")
         lines.append(f"Run reconciliation source: {result.run_reconciliation_source}")
         lines.append(f"Run reconciled at: {result.run_reconciled_at}")
+    if result.ralph_dispatch_mode or result.ralph_job_id or result.ralph_lineage_id:
+        lines.append("Ralph handoff:")
+        if result.ralph_dispatch_mode:
+            lines.append(f"  dispatch_mode: {result.ralph_dispatch_mode}")
+        if result.ralph_job_id:
+            lines.append(f"  job_id: {result.ralph_job_id}")
+        if result.ralph_lineage_id:
+            lines.append(f"  lineage_id: {result.ralph_lineage_id}")
     if result.assumptions:
         lines.append("Assumptions:")
         lines.extend(f"- {item}" for item in result.assumptions)

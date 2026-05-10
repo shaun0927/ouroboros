@@ -221,16 +221,16 @@ async def test_ralph_handler_rejects_non_finite_per_iteration_timeout(
 
 
 @pytest.mark.asyncio
-async def test_plugin_dispatch_forwards_iteration_and_total_timeouts(
+async def test_plugin_dispatch_forwards_timeout_seconds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Plugin-mode dispatch must forward iteration and total timeout budgets.
+    """Plugin-mode dispatch must forward per-iteration and total timeouts.
 
-    Wiring lock for #784/#777: when ``should_dispatch_via_plugin`` returns
-    True, the produced ``_subagent`` payload context must include both
-    ``per_iteration_timeout_seconds`` and ``max_total_seconds``. Otherwise the
-    public stop-reason contracts are silently dropped on the plugin path and
-    the child session can hang indefinitely.
+    Wiring lock for #784 review-1: when ``should_dispatch_via_plugin`` returns
+    True, the produced ``_subagent`` payload context must include
+    timeout fields. Otherwise the public stop-reason contracts are silently
+    dropped on the plugin path and the child session can exceed its parent
+    deadline indefinitely.
     """
     import json as _json
 
@@ -258,7 +258,7 @@ async def test_plugin_dispatch_forwards_iteration_and_total_timeouts(
             "seed_content": "goal: ship",
             "max_generations": 3,
             "per_iteration_timeout_seconds": 1234,
-            "max_total_seconds": 4321,
+            "max_total_seconds": 120,
         }
     )
 
@@ -268,10 +268,10 @@ async def test_plugin_dispatch_forwards_iteration_and_total_timeouts(
     sub = body["_subagent"]
     assert sub["tool_name"] == "ouroboros_ralph"
     assert sub["context"]["per_iteration_timeout_seconds"] == 1234
-    assert sub["context"]["max_total_seconds"] == 4321
+    assert sub["context"]["max_total_seconds"] == 120
     assert "per_iteration_timeout_seconds: 1234" in sub["prompt"]
-    assert "max_total_seconds: 4321" in sub["prompt"]
     assert "stop_reason=iteration_timeout" in sub["prompt"]
+    assert "max_total_seconds: 120" in sub["prompt"]
     assert "stop_reason=wall_clock_exhausted" in sub["prompt"]
 
 

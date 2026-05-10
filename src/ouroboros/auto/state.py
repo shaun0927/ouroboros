@@ -68,11 +68,6 @@ DEFAULT_TIMEOUT_SECONDS_BY_PHASE: dict[str, int] = {
 DEFAULT_PIPELINE_TIMEOUT_SECONDS: float = 7200.0
 MIN_PIPELINE_TIMEOUT_SECONDS: float = 60.0
 MAX_PIPELINE_TIMEOUT_SECONDS: float = 86400.0
-# TODO(#773): on RALPH_HANDOFF, pipeline computes
-# max_total_seconds = max(0.0, deadline_at - time.monotonic()) and forwards it
-# to ouroboros_ralph as the field added in #777. Hook lives in pipeline.py at
-# the run-handoff site once #773 introduces the RALPH_HANDOFF transition.
-
 # Allowed keys for the optional gateway-provenance metadata recorded on auto state.
 # Strict allowlist: anything not listed here is dropped during redaction so that
 # tokens, credentials, or raw user utterances cannot be persisted by accident.
@@ -250,7 +245,6 @@ class AutoPipelineState:
     runtime_backend: str | None = None
     opencode_mode: str | None = None
     skip_run: bool = False
-    complete_product: bool = False
     max_interview_rounds: int = 12
     max_repair_rounds: int = 5
     interview_session_id: str | None = None
@@ -280,17 +274,17 @@ class AutoPipelineState:
     ralph_job_id: str | None = None
     ralph_lineage_id: str | None = None
     ralph_dispatch_mode: str | None = None
-    # Q00/ouroboros#782: best-effort mirror of the linked ralph job's most
-    # recent observation. Populated by ``ouroboros.auto.listeners`` from the
-    # ``mcp.job.*`` event-store topics — never by polling — and persisted only
-    # when the auto pipeline next saves state for any other reason. All four
-    # default to ``None`` so legacy state files continue to load and the
-    # gap window (lineage_id set, job_id not yet set) renders as
-    # ``pending: "starting ralph"`` instead of fabricating stale status.
     ralph_job_status: str | None = None
-    ralph_last_event_at: float | None = None
+    ralph_last_event_at: str | None = None
     ralph_stop_reason: str | None = None
     ralph_current_generation: int | None = None
+    # Q00/ouroboros#773: persisted intent for ``--complete-product`` /
+    # ``complete_product=True``. The flag is durable session state — not a
+    # per-invocation argument — so a session originally started with
+    # ``--complete-product`` keeps chaining RUN → RALPH_HANDOFF on resume even
+    # when the operator forgets to re-pass the flag. Defaults to False so
+    # legacy state files load unchanged.
+    complete_product: bool = False
     ledger: dict[str, Any] = field(default_factory=dict)
     last_grade: str | None = None
     findings: list[dict[str, Any]] = field(default_factory=list)
@@ -322,6 +316,12 @@ class AutoPipelineState:
     # rewrote a natural-language request into ``ooo auto`` shell command. None
     # for direct CLI invocations so legacy state files load unchanged.
     provenance: dict[str, Any] | None = None
+    # Caller-supplied user preferences keyed by ledger section name. Persisted
+    # so resumed sessions converge to the same Seed as the original run when
+    # the caller does not resupply preferences. Validated against
+    # ``REQUIRED_SECTIONS`` at construction time by the MCP handler — only
+    # known section keys with non-empty string values land here.
+    user_preferences: dict[str, str] = field(default_factory=dict)
 
     def phase_timeout_seconds(self, phase: AutoPhase) -> float:
         """Return the configured timeout for ``phase`` in seconds.
@@ -537,8 +537,12 @@ class AutoPipelineState:
                 return AutoResumeCapability.PARTIAL_RESUME
             return AutoResumeCapability.NONE
 
+        # Ralph handoff phase. Persisted Ralph handles or plugin dispatch
+        # markers let the pipeline resume without starting duplicate run/Ralph
+        # work; otherwise a Seed is enough to return to the checkpoint and
+        # surface manual recovery guidance.
         if recoverable == AutoPhase.RALPH_HANDOFF:
-            if self.ralph_lineage_id or self.ralph_job_id:
+            if any((self.ralph_job_id, self.ralph_lineage_id, self.ralph_dispatch_mode)):
                 return AutoResumeCapability.RESUME
             if self.seed_artifact:
                 return AutoResumeCapability.RESUME
@@ -572,7 +576,6 @@ class AutoPipelineState:
         # persisting them with subsequent saves.
         payload.setdefault("max_interview_rounds", 12)
         payload.setdefault("max_repair_rounds", 5)
-        payload.setdefault("complete_product", False)
         payload.setdefault("run_handoff_status", None)
         payload.setdefault("run_handoff_guidance", None)
         payload.setdefault("attached_run_handle", None)
@@ -588,6 +591,7 @@ class AutoPipelineState:
         payload.setdefault("ralph_last_event_at", None)
         payload.setdefault("ralph_stop_reason", None)
         payload.setdefault("ralph_current_generation", None)
+        payload.setdefault("complete_product", False)
         payload.setdefault("provenance", None)
         payload.setdefault("auto_answer_log", [])
         payload.setdefault("seed_origin", SeedOrigin.NONE.value)
@@ -595,6 +599,7 @@ class AutoPipelineState:
         payload.setdefault("pipeline_timeout_seconds", DEFAULT_PIPELINE_TIMEOUT_SECONDS)
         payload.setdefault("deadline_at", None)
         payload.setdefault("deadline_at_epoch", None)
+        payload.setdefault("user_preferences", {})
         # Convert the persisted ``deadline_at_epoch`` (epoch seconds) back into
         # a monotonic-clock value usable from this process. If the companion
         # epoch field is present, derive ``deadline_at`` from the offset
@@ -678,24 +683,24 @@ class AutoPipelineState:
                 msg = f"{field_name} must be a number or null"
                 raise ValueError(msg)
 
-        # Q00/ouroboros#782 ralph mirror fields. ``ralph_last_event_at`` is a
-        # ``time.monotonic()``-domain reading set by the listener; persisted
-        # values from a prior process are still numerically valid for sorting
-        # but must not be reused as live monotonic deltas across processes.
         if self.ralph_last_event_at is not None:
-            if isinstance(self.ralph_last_event_at, bool) or not isinstance(
-                self.ralph_last_event_at, int | float
-            ):
-                msg = "ralph_last_event_at must be a number or null"
+            if not isinstance(self.ralph_last_event_at, str):
+                msg = "ralph_last_event_at must be an ISO timestamp string or null"
                 raise ValueError(msg)
-        if self.ralph_current_generation is not None:
-            if (
-                isinstance(self.ralph_current_generation, bool)
-                or not isinstance(self.ralph_current_generation, int)
-                or self.ralph_current_generation < 0
-            ):
-                msg = "ralph_current_generation must be a non-negative integer or null"
+            try:
+                parsed = datetime.fromisoformat(self.ralph_last_event_at)
+            except ValueError as exc:
+                msg = "ralph_last_event_at must be an ISO timestamp string or null"
+                raise ValueError(msg) from exc
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                msg = "ralph_last_event_at must include timezone information"
                 raise ValueError(msg)
+        if self.ralph_current_generation is not None and (
+            type(self.ralph_current_generation) is not int
+            or self.ralph_current_generation < 0
+        ):
+            msg = "ralph_current_generation must be a non-negative integer or null"
+            raise ValueError(msg)
 
         for field_name in (
             "phase_started_at",
@@ -747,6 +752,19 @@ class AutoPipelineState:
         if not isinstance(self.run_subagent, dict):
             msg = "run_subagent must be an object"
             raise ValueError(msg)
+        if not isinstance(self.user_preferences, dict):
+            msg = "user_preferences must be an object"
+            raise ValueError(msg)
+        for pref_key, pref_value in self.user_preferences.items():
+            if not isinstance(pref_key, str) or not pref_key.strip():
+                msg = "user_preferences keys must be non-empty strings"
+                raise ValueError(msg)
+            if not isinstance(pref_value, str) or not pref_value.strip():
+                msg = (
+                    "user_preferences values must be non-empty strings; persist via the "
+                    "MCP handler which validates against REQUIRED_SECTIONS"
+                )
+                raise ValueError(msg)
         if self.provenance is not None:
             if not isinstance(self.provenance, dict):
                 msg = "provenance must be an object or null"
@@ -803,8 +821,8 @@ class AutoPipelineState:
         for field_name in (
             "interview_completed",
             "skip_run",
-            "complete_product",
             "run_start_attempted",
+            "complete_product",
         ):
             if type(getattr(self, field_name)) is not bool:
                 msg = f"{field_name} must be a boolean"

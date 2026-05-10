@@ -16,6 +16,7 @@ class AutoAnswerSource(StrEnum):
     USER_GOAL = "user_goal"
     REPO_FACT = "repo_fact"
     EXISTING_CONVENTION = "existing_convention"
+    USER_PREFERENCE = "user_preference"
     CONSERVATIVE_DEFAULT = "conservative_default"
     ASSUMPTION = "assumption"
     NON_GOAL = "non_goal"
@@ -39,10 +40,18 @@ class AutoAnswerContext:
 
     The answerer remains deterministic and does not inspect the repository on its
     own; callers can pass already-collected facts with optional evidence labels.
+
+    ``user_preferences`` carries caller-supplied preferences keyed by ledger
+    section name (e.g. ``runtime_context``, ``constraints``, ``non_goals``).
+    Only the Driver/MCP layer is allowed to populate this — the deterministic
+    answerer just reads it. Matching answers are tagged
+    :attr:`AutoAnswerSource.USER_PREFERENCE` so provenance survives in the
+    ledger.
     """
 
     repo_facts: Mapping[str, str] = field(default_factory=dict)
     evidence: Mapping[str, Sequence[str]] = field(default_factory=dict)
+    user_preferences: Mapping[str, str] = field(default_factory=dict)
 
     def runtime_fact(self) -> tuple[str, Sequence[str]] | None:
         """Return a complete runtime/project fact when one was supplied.
@@ -127,6 +136,8 @@ class AutoAnswerer:
             )
 
         if QuestionIntent.NON_GOALS in intents:
+            # NON_GOAL source is grounded (explicit non-goal) and is NOT
+            # upgradable to USER_PREFERENCE — observed in priority order.
             return self._non_goal_answer(question, ledger)
         # When PRODUCT_BEHAVIOR is also inferred, prefer it over VERIFICATION
         # and ACCEPTANCE_CRITERIA so feature questions like
@@ -148,9 +159,21 @@ class AutoAnswerer:
             QuestionIntent.PRODUCT_BEHAVIOR in intents and _has_user_verify_feature_shape(lowered)
         )
         if QuestionIntent.VERIFICATION in intents and not demote_for_user_verify:
-            return self._verification_answer(question)
+            return _maybe_apply_user_preference(
+                self._verification_answer(question),
+                _INTENT_TO_SECTIONS[QuestionIntent.VERIFICATION],
+                context,
+                question=question,
+                lowered=lowered,
+            )
         if QuestionIntent.ACCEPTANCE_CRITERIA in intents and not demote_for_user_verify:
-            return self._feature_acceptance_answer(question)
+            return _maybe_apply_user_preference(
+                self._feature_acceptance_answer(question),
+                _INTENT_TO_SECTIONS[QuestionIntent.ACCEPTANCE_CRITERIA],
+                context,
+                question=question,
+                lowered=lowered,
+            )
         if QuestionIntent.RUNTIME_CONTEXT in intents and _should_preserve_runtime_route(lowered):
             answer = self._runtime_answer(question, context)
         elif QuestionIntent.PRODUCT_BEHAVIOR in intents:
@@ -161,6 +184,17 @@ class AutoAnswerer:
             answer = self._runtime_answer(question, context)
         else:
             answer = self._default_answer(question, ledger)
+
+        # Try a USER_PREFERENCE upgrade for upgradable answers (CONSERVATIVE_DEFAULT
+        # / ASSUMPTION sources only). Stronger sources (REPO_FACT,
+        # EXISTING_CONVENTION, NON_GOAL, USER_GOAL) are preserved as-is.
+        answer = _maybe_apply_user_preference(
+            answer,
+            _section_hints_for_intents(intents),
+            context,
+            question=question,
+            lowered=lowered,
+        )
 
         # When the chosen route produced a non-grounded fallback (ASSUMPTION,
         # EXISTING_CONVENTION, CONSERVATIVE_DEFAULT) for a question that the
@@ -212,23 +246,53 @@ class AutoAnswerer:
                 confidence=1.0,
                 blocker=blocker,
             )
+        # answer_gap replaces the user's actual question with a synthetic
+        # generic prompt, which would otherwise erase the original risky
+        # context from the safety gate. Pull the converged goal from the
+        # ledger and pass it to the helper so a regulated/destructive task
+        # cannot smuggle a USER_PREFERENCE past the gate via gap-filling.
+        goal_text = _latest_resolved_goal(ledger)
         if section in {"actors", "inputs", "outputs"}:
-            return self._io_actor_answer("Who are the actors, inputs, and outputs for this task?")
+            gap_question = "Who are the actors, inputs, and outputs for this task?"
+            return _maybe_apply_user_preference(
+                self._io_actor_answer(gap_question),
+                (section,),
+                context,
+                question=gap_question,
+                goal_text=goal_text,
+            )
         if section in {"constraints", "failure_modes"}:
-            return self._default_answer(
-                "What conservative constraints and failure modes should bound this MVP?", ledger
+            gap_question = "What conservative constraints and failure modes should bound this MVP?"
+            return _maybe_apply_user_preference(
+                self._default_answer(gap_question, ledger),
+                (section,),
+                context,
+                question=gap_question,
+                goal_text=goal_text,
             )
         if section == "non_goals":
+            # NON_GOAL source is not upgradable; preference will be ignored here
+            # by design (grounded sources beat caller preferences).
             return self._non_goal_answer(
                 "What non-goals should explicitly remain out of scope?", ledger
             )
         if section in {"acceptance_criteria", "verification_plan"}:
-            return self._verification_answer(
-                "Which command output verifies the acceptance criteria?"
+            gap_question = "Which command output verifies the acceptance criteria?"
+            return _maybe_apply_user_preference(
+                self._verification_answer(gap_question),
+                (section,),
+                context,
+                question=gap_question,
+                goal_text=goal_text,
             )
         if section == "runtime_context":
-            return self._runtime_answer(
-                "Which runtime stack, repo, and project patterns should be used?", context
+            gap_question = "Which runtime stack, repo, and project patterns should be used?"
+            return _maybe_apply_user_preference(
+                self._runtime_answer(gap_question, context),
+                ("runtime_context",),
+                context,
+                question=gap_question,
+                goal_text=goal_text,
             )
         blocker = AutoBlocker(
             reason=f"unsupported ledger gap section: {section}",
@@ -1510,8 +1574,180 @@ _RISKY_FALLBACK_SOURCES: frozenset[AutoAnswerSource] = frozenset(
         # topics it must be gated like any other fallback. A REPO_FACT-backed
         # runtime answer (full ``runtime_context`` supplied) is unaffected.
         AutoAnswerSource.EXISTING_CONVENTION,
+        # USER_PREFERENCE is intentionally NOT in this set:
+        # ``_maybe_apply_user_preference`` already runs the risky-fallback
+        # gate at upgrade time (against both the question text and the
+        # converged goal), so by the time an answer carries
+        # source=USER_PREFERENCE it has already passed the same policy a
+        # CONSERVATIVE_DEFAULT/ASSUMPTION/EXISTING_CONVENTION answer would
+        # face here. Including USER_PREFERENCE in this set was wrong because
+        # the safe-product re-route at the routing-block tail would drop the
+        # user's value for allowlisted regulated-product questions (e.g.
+        # "Should the app export PII reports?"), silently replacing the
+        # caller-supplied preference with the generic
+        # ``_product_behavior_answer`` template. See PR #811 review feedback.
     }
 )
+
+
+# Sources that may be replaced by a caller-supplied USER_PREFERENCE when one
+# matches the question's intent section. Grounded sources (USER_GOAL,
+# REPO_FACT, NON_GOAL) are intentionally NOT upgradable — explicit grounded
+# facts beat caller-supplied generic preferences.
+#
+# EXISTING_CONVENTION is included because the auto answerer's existing
+# fallback paths (notably ``_runtime_answer``) tag generic template responses
+# as EXISTING_CONVENTION even when no actual repo convention was observed —
+# the same labelling inflation called out in the comment block on
+# :data:`_RISKY_FALLBACK_SOURCES`. A caller-supplied preference is more
+# specific than a generic "use the existing repository runtime" template, so
+# the upgrade is allowed here. Phase 4 ledger-level conflict resolution will
+# distinguish evidence-grounded EXISTING_CONVENTION entries from the template
+# variant.
+_USER_PREFERENCE_UPGRADABLE_SOURCES: frozenset[AutoAnswerSource] = frozenset(
+    {
+        AutoAnswerSource.CONSERVATIVE_DEFAULT,
+        AutoAnswerSource.ASSUMPTION,
+        AutoAnswerSource.EXISTING_CONVENTION,
+    }
+)
+
+
+# Mapping from question intent to candidate ledger sections that a
+# user_preference key may target. Order within each tuple is the search order
+# when multiple sections match the same intent.
+_INTENT_TO_SECTIONS: dict[QuestionIntent, tuple[str, ...]] = {
+    QuestionIntent.NON_GOALS: ("non_goals",),
+    QuestionIntent.VERIFICATION: ("verification_plan",),
+    QuestionIntent.ACCEPTANCE_CRITERIA: ("acceptance_criteria",),
+    QuestionIntent.ACTOR_IO: ("actors", "inputs", "outputs"),
+    QuestionIntent.RUNTIME_CONTEXT: ("runtime_context",),
+    QuestionIntent.PRODUCT_BEHAVIOR: ("constraints",),
+}
+
+
+def _section_hints_for_intents(intents: frozenset[QuestionIntent]) -> tuple[str, ...]:
+    """Return ordered, deduplicated ledger sections to consult for ``intents``.
+
+    Iterates ``_INTENT_TO_SECTIONS`` in dict-insertion order (Python 3.7+
+    guarantee) rather than the input ``frozenset`` — set iteration is
+    hash-randomized across processes, which would let the "first matching
+    section" vary between runs and break the answerer's determinism contract.
+    """
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for intent, sections in _INTENT_TO_SECTIONS.items():
+        if intent not in intents:
+            continue
+        for section in sections:
+            if section not in seen:
+                seen.add(section)
+                ordered.append(section)
+    return tuple(ordered)
+
+
+def _maybe_apply_user_preference(
+    answer: AutoAnswer,
+    section_hints: tuple[str, ...],
+    context: AutoAnswerContext,
+    *,
+    question: str = "",
+    lowered: str = "",
+    goal_text: str = "",
+) -> AutoAnswer:
+    """Replace an upgradable answer with a USER_PREFERENCE-tagged answer.
+
+    The answer is only replaced when:
+
+    - ``answer.source`` is in :data:`_USER_PREFERENCE_UPGRADABLE_SOURCES`
+      (REPO_FACT, EXISTING_CONVENTION, NON_GOAL etc. are stronger than
+      caller-supplied preferences and are preserved as-is)
+    - ``context.user_preferences`` has a non-empty value for one of the
+      provided ``section_hints``
+    - ``answer.blocker`` is None
+    - **neither** the question **nor** ``goal_text`` is flagged as a
+      risky-fallback topic (regulated personal data, destructive bulk
+      operations, etc.). On early-return answer paths
+      (``VERIFICATION`` / ``ACCEPTANCE_CRITERIA``) and on ``answer_gap``,
+      the routing-block safety gate never runs, so a caller-supplied
+      preference could otherwise smuggle a regulated answer into the ledger
+      as a confirmed ``USER_PREFERENCE`` entry. ``answer_gap`` additionally
+      replaces the user's actual question with a generic synthetic prompt,
+      so the helper also inspects ``goal_text`` (the converged interview
+      goal) — preserving the risky-topic signal that a synthetic prompt
+      would otherwise erase. When either text matches a risky pattern the
+      helper short-circuits to a BLOCKER answer.
+
+    The first matching section wins. The new answer carries the user's value
+    verbatim and tags the corresponding ledger entry with
+    :attr:`LedgerSource.USER_PREFERENCE`. Updates for sections OTHER than the
+    upgraded one are preserved so multi-section answers (e.g. verification +
+    acceptance pair) still seed their other sections.
+    """
+    if answer.blocker is not None:
+        return answer
+    if answer.source not in _USER_PREFERENCE_UPGRADABLE_SOURCES:
+        return answer
+    if not context.user_preferences:
+        return answer
+    # Compute the lowered form lazily — most call sites pass it; ``answer_gap``
+    # and any future caller can rely on the inline normalisation here.
+    lowered_q = lowered or (_normalize_question(question) if question else "")
+    lowered_goal = _normalize_question(goal_text) if goal_text else ""
+    for section in section_hints:
+        raw_value = context.user_preferences.get(section)
+        if not isinstance(raw_value, str):
+            continue
+        value = raw_value.strip()
+        if not value:
+            continue
+        # Safety gate: a caller-supplied preference must not bypass the
+        # risky-fallback policy. Inspect BOTH the current question and the
+        # converged goal text so synthetic gap-fill prompts (which erase the
+        # original risky context) cannot smuggle a confirmed USER_PREFERENCE
+        # past the gate.
+        risky_blocker: AutoBlocker | None = None
+        if lowered_q and question:
+            risky_blocker = _risky_fallback_blocker_for(question, lowered_q)
+        if risky_blocker is None and lowered_goal and goal_text:
+            risky_blocker = _risky_fallback_blocker_for(goal_text, lowered_goal)
+        if risky_blocker is not None:
+            return AutoAnswer(
+                text=(
+                    "Cannot safely decide automatically with a generic default: "
+                    f"{risky_blocker.reason}"
+                ),
+                source=AutoAnswerSource.BLOCKER,
+                confidence=1.0,
+                blocker=risky_blocker,
+            )
+        preserved = [
+            (other_section, other_entry)
+            for other_section, other_entry in answer.ledger_updates
+            if other_section != section
+        ]
+        new_entry = LedgerEntry(
+            key=f"{section}.user_preference",
+            value=value,
+            source=LedgerSource.USER_PREFERENCE,
+            confidence=0.83,
+            status=LedgerStatus.CONFIRMED,
+            rationale="Caller supplied an explicit user preference for this section.",
+        )
+        preserved.append((section, new_entry))
+        non_goals = list(answer.non_goals)
+        if section == "non_goals" and value not in non_goals:
+            non_goals.append(value)
+        return AutoAnswer(
+            text=value,
+            source=AutoAnswerSource.USER_PREFERENCE,
+            confidence=0.83,
+            ledger_updates=preserved,
+            assumptions=list(answer.assumptions),
+            non_goals=non_goals,
+            generic_default=False,
+        )
+    return answer
 
 
 _DESTRUCTIVE_BULK_VERBS = (

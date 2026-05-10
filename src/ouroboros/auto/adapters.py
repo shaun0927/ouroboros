@@ -187,23 +187,30 @@ class HandlerRalphStarter:
         max_total_seconds: float | None = None,
         per_iteration_timeout_seconds: float | None = None,
         existing_job_id: str | None = None,
+        on_dispatched: Callable[[dict[str, Any]], None] | None = None,
         on_started: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
+        """Dispatch the Ralph loop and wait for terminal completion.
+
+        ``on_dispatched`` is invoked with the dispatch envelope *before*
+        the wait-for-terminal poll begins, so callers (notably
+        :meth:`AutoPipeline._handoff_to_ralph`) can checkpoint
+        ``ralph_job_id`` / ``ralph_dispatch_mode`` immediately after the
+        background job has been created. Without this hook, a process
+        restart, deadline trip, or client disconnect *after* dispatch but
+        *before* terminal completion would leave the persisted state with
+        only ``ralph_lineage_id`` — and resume could not poll the
+        still-running job (Q00/ouroboros#773 review-6).
+        """
+        dispatch_callback = on_dispatched or on_started
         job_manager = self.handler._job_manager  # noqa: SLF001
-        # Cross-restart safety: if the caller did not supply an existing
-        # job_id but a non-terminal Ralph job is already running for this
-        # lineage, reattach instead of dispatching a duplicate. The auto
-        # pipeline persists ``ralph_lineage_id`` before ``ralph_job_id``,
-        # so a crash in that gap window can leave the lineage set while
-        # job_id is still ``None``; without this lookup, resume would
-        # enqueue a second Ralph loop for the same lineage.
         if not existing_job_id and lineage_id:
             recovered = await job_manager.find_active_job_by_lineage(lineage_id, job_type="ralph")
             if recovered is not None:
                 existing_job_id = recovered.job_id
         if existing_job_id:
-            if on_started is not None:
-                on_started(
+            if dispatch_callback is not None:
+                dispatch_callback(
                     {
                         "job_id": existing_job_id,
                         "lineage_id": lineage_id,
@@ -248,38 +255,34 @@ class HandlerRalphStarter:
         # ``delegated_to_plugin`` status. The auto pipeline records this and
         # transitions straight to COMPLETE — there is nothing to wait for.
         if status == "delegated_to_plugin" or dispatch_mode == "plugin":
-            if on_started is not None:
-                on_started(
-                    {
-                        "job_id": None,
-                        "lineage_id": _optional_str(meta.get("lineage_id")) or lineage_id,
-                        "dispatch_mode": "plugin",
-                        "status": status,
-                    }
-                )
-            return {
+            envelope = {
                 "job_id": None,
                 "lineage_id": _optional_str(meta.get("lineage_id")) or lineage_id,
                 "dispatch_mode": "plugin",
                 "terminal_status": "delegated_to_plugin",
                 "stop_reason": None,
             }
+            if dispatch_callback is not None:
+                dispatch_callback(envelope)
+            return envelope
         # Job mode: wait for the background job to terminate, then map the
         # final job snapshot back into the structured terminal status the
         # pipeline maps onto an auto phase.
         job_id = _optional_str(meta.get("job_id"))
         if not job_id:
             raise HandlerError("ouroboros_ralph did not return a job_id")
-        if on_started is not None:
-            on_started(
+        if dispatch_callback is not None:
+            # Fire BEFORE we block on the terminal poll so callers can
+            # persist ``ralph_job_id`` immediately. The terminal_status /
+            # stop_reason are intentionally omitted here — they are not
+            # known until the poll returns.
+            dispatch_callback(
                 {
                     "job_id": job_id,
                     "lineage_id": _optional_str(meta.get("lineage_id")) or lineage_id,
                     "dispatch_mode": "job",
-                    "status": status,
                 }
             )
-        job_manager = self.handler._job_manager  # noqa: SLF001
         terminal_meta = await _wait_for_job_terminal(
             job_manager,
             job_id,
@@ -290,6 +293,44 @@ class HandlerRalphStarter:
         return {
             "job_id": job_id,
             "lineage_id": _optional_str(meta.get("lineage_id")) or lineage_id,
+            "dispatch_mode": "job",
+            "terminal_status": terminal_status,
+            "stop_reason": stop_reason,
+        }
+
+
+class HandlerRalphPoller:
+    """Callable Ralph job poller backed by the same ``RalphHandler`` ``JobManager``.
+
+    Used by :class:`AutoPipeline` on resume from a persisted ``RALPH_HANDOFF``
+    checkpoint (Q00/ouroboros#773 review-5 finding 1). Without this hook a
+    long-lived runtime such as MCP — where the Ralph background job keeps
+    running after the client disconnects — would leave any interrupted
+    ``--complete-product`` session stranded in the non-terminal handoff
+    state forever, since the legacy resume path only emitted guidance text.
+    The poller waits for the persisted ``ralph_job_id`` to reach a terminal
+    snapshot and returns the same ``terminal_status`` / ``stop_reason`` /
+    ``dispatch_mode`` shape as :class:`HandlerRalphStarter` so the pipeline
+    can re-use a single COMPLETE / BLOCKED / FAILED mapping.
+    """
+
+    def __init__(self, handler: RalphHandler) -> None:
+        self.handler = handler
+
+    async def __call__(
+        self, *, job_id: str, max_total_seconds: float | None = None
+    ) -> dict[str, Any]:
+        job_manager = self.handler._job_manager  # noqa: SLF001
+        terminal_meta = await _wait_for_job_terminal(
+            job_manager,
+            job_id,
+            timeout_seconds=max_total_seconds,
+        )
+        terminal_status = _optional_str(terminal_meta.get("status")) or "failed"
+        stop_reason = _optional_str(terminal_meta.get("stop_reason"))
+        return {
+            "job_id": job_id,
+            "lineage_id": _optional_str(terminal_meta.get("lineage_id")),
             "dispatch_mode": "job",
             "terminal_status": terminal_status,
             "stop_reason": stop_reason,
@@ -312,7 +353,9 @@ async def _wait_for_job_terminal(
     inner ralph result did not provide one.
     """
     loop = asyncio.get_running_loop()
-    deadline = None if timeout_seconds is None else loop.time() + max(0.0, timeout_seconds)
+    deadline = None
+    if timeout_seconds is not None:
+        deadline = loop.time() + max(0.0, timeout_seconds)
     while True:
         snapshot = await job_manager.get_snapshot(job_id)
         if snapshot.is_terminal:
@@ -322,15 +365,17 @@ async def _wait_for_job_terminal(
                 "completed" if snapshot.status is JobStatus.COMPLETED else "failed",
             )
             return meta
-        now = loop.time()
-        if deadline is not None and now >= deadline:
-            return {
-                "status": "failed",
-                "stop_reason": "wall_clock_exhausted",
-                "job_id": job_id,
-            }
-        sleep_for = poll_interval if deadline is None else min(poll_interval, deadline - now)
-        await asyncio.sleep(max(0.0, sleep_for))
+        if deadline is not None:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return {
+                    "job_id": job_id,
+                    "status": "failed",
+                    "stop_reason": "wall_clock_exhausted",
+                }
+            await asyncio.sleep(min(poll_interval, remaining))
+            continue
+        await asyncio.sleep(poll_interval)
 
 
 def load_seed(path: str | Path) -> Seed:

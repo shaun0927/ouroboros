@@ -354,30 +354,23 @@ async def test_resume_after_deadline_expired_immediately_blocks(tmp_path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_resume_arms_missing_legacy_deadline_before_phase_work(tmp_path) -> None:
-    """Legacy non-terminal states without deadline fields must get a deadline on resume."""
-    store = AutoStore(tmp_path)
+async def test_legacy_non_created_resume_with_missing_deadline_gets_armed(tmp_path) -> None:
+    """Legacy states past CREATED must not bypass the top-level deadline forever."""
     state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
-    state.pipeline_timeout_seconds = 60.0
-    state.transition(AutoPhase.INTERVIEW, "legacy interview state")
-    state.deadline_at = None
-    state.deadline_at_epoch = None
-    # Force an early return after the resume entry path so the assertion locks
-    # deadline arming itself, not later phase execution behavior.
-    state.seed_artifact = {"invalid": "seed"}
+    state.transition(AutoPhase.INTERVIEW, "legacy interview checkpoint")
+    state.last_tool_name = "unknown_legacy_tool"
+    state.mark_blocked("legacy blocked checkpoint", tool_name="unknown_legacy_tool")
+    assert state.deadline_at is None
+    assert state.deadline_at_epoch is None
 
-    driver = _NeverInterviewDriver()
-    pipeline = AutoPipeline(driver, _unused_seed_generator, store=store)
+    pipeline = AutoPipeline(_NeverInterviewDriver(), _unused_seed_generator)
 
     result = await pipeline.run(state)
 
-    assert result.status == "failed"
+    assert result.status == "blocked"
+    assert state.last_error == "legacy blocked checkpoint"
     assert state.deadline_at is not None
     assert state.deadline_at_epoch is not None
-    assert driver.invocations == 0
-    loaded = store.load(state.auto_session_id)
-    assert loaded.deadline_at is not None
-    assert loaded.deadline_at_epoch is not None
 
 
 def test_arm_deadline_is_idempotent() -> None:
