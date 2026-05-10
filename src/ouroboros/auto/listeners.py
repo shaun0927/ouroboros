@@ -7,7 +7,7 @@ This module exists so the unified status surface (Q00/ouroboros#782) can answer
 incremental query API and updates four mirror fields on ``AutoPipelineState``:
 
 - ``ralph_job_status`` — last-seen ``JobStatus`` value
-- ``ralph_last_event_at`` — ``time.monotonic()`` seconds of the last event
+- ``ralph_last_event_at`` — ISO timestamp of the last event
 - ``ralph_stop_reason`` — populated when the ralph job reaches a terminal status
 - ``ralph_current_generation`` — last reported lineage generation index
 
@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-import time
+from datetime import UTC, datetime
 from typing import Any
 
 from ouroboros.auto.state import (
@@ -74,6 +74,37 @@ class _RalphEventReading:
     error: str | None
     lineage_id: str | None
     is_terminal: bool
+
+
+def _coerce_event_timestamp(event: BaseEvent, payload: dict[str, Any]) -> str:
+    """Return a timezone-aware ISO timestamp for the mirrored event.
+
+    Prefer the JobManager payload timestamp because persisted event rows may be
+    rehydrated from SQLite as naive datetimes. Fall back to the BaseEvent
+    timestamp and attach UTC when older rows lack tzinfo.
+    """
+    raw_payload_timestamp = payload.get("timestamp")
+    if isinstance(raw_payload_timestamp, str) and raw_payload_timestamp:
+        try:
+            parsed = datetime.fromisoformat(raw_payload_timestamp)
+        except ValueError:
+            parsed = None
+        if parsed is not None:
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                parsed = parsed.replace(tzinfo=UTC)
+            return parsed.isoformat()
+
+    timestamp = event.timestamp
+    if isinstance(timestamp, str):
+        try:
+            parsed = datetime.fromisoformat(timestamp)
+        except ValueError:
+            parsed = datetime.now(UTC)
+    else:
+        parsed = timestamp
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.isoformat()
 
 
 def _coerce_lineage_id(payload: dict[str, Any]) -> str | None:
@@ -202,7 +233,8 @@ def apply_event(state: AutoPipelineState, event: BaseEvent) -> bool:
     if not (matches_lineage or matches_job_id):
         return False
 
-    state.ralph_last_event_at = time.monotonic()
+    payload = event.data if isinstance(event.data, dict) else {}
+    state.ralph_last_event_at = _coerce_event_timestamp(event, payload)
     if reading.status is not None:
         state.ralph_job_status = reading.status
     if reading.is_terminal:
@@ -210,7 +242,6 @@ def apply_event(state: AutoPipelineState, event: BaseEvent) -> bool:
         # ``mcp.job.failed`` so the unified status surface always has *some*
         # blocker text to render.
         state.ralph_stop_reason = reading.stop_reason or reading.error or reading.status
-    payload = event.data if isinstance(event.data, dict) else {}
     generation = _coerce_generation(payload)
     if generation is not None:
         state.ralph_current_generation = generation
