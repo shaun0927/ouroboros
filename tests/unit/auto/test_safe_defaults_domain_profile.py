@@ -248,8 +248,6 @@ def test_profile_str_value_is_coerced_to_defaultspec() -> None:
 
 def test_active_profile_threading_via_state() -> None:
     """AutoPipelineState.active_domain_profile_name persists and round-trips cleanly."""
-    import dataclasses
-
     state = AutoPipelineState(goal="Build a CLI", cwd="/tmp")
     assert state.active_domain_profile_name is None  # default is None
 
@@ -257,8 +255,19 @@ def test_active_profile_threading_via_state() -> None:
     assert state.active_domain_profile_name == "coding"
 
     # Serialises to dict without error (JSON round-trip check).
-    as_dict = dataclasses.asdict(state)
+    as_dict = state.to_dict()
     assert as_dict["active_domain_profile_name"] == "coding"
+    assert AutoPipelineState.from_dict(as_dict).active_domain_profile_name == "coding"
+
+
+def test_active_profile_legacy_state_defaults_to_none() -> None:
+    """Legacy persisted state without active_domain_profile_name still loads."""
+    payload = AutoPipelineState(goal="Build a CLI", cwd="/tmp").to_dict()
+    payload.pop("active_domain_profile_name")
+
+    restored = AutoPipelineState.from_dict(payload)
+
+    assert restored.active_domain_profile_name is None
 
 
 @pytest.mark.asyncio
