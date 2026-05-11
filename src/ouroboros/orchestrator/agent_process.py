@@ -54,7 +54,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 import logging
 from typing import Any, Final, Protocol
@@ -63,6 +63,7 @@ from uuid import uuid4
 from ouroboros.core.control_contract import ControlContract
 from ouroboros.core.directive import Directive
 from ouroboros.events.control import create_control_directive_emitted_event
+from ouroboros.persistence.checkpoint import CheckpointData, CheckpointStore
 
 logger = logging.getLogger(__name__)
 
@@ -269,28 +270,100 @@ class AgentProcessHandle:
     # External lifecycle verbs
     # ------------------------------------------------------------------
 
-    async def pause(self) -> None:
+    async def pause(
+        self,
+        *,
+        reason: str | None = None,
+        store: CheckpointStore | None = None,
+    ) -> None:
         """Request a cooperative pause.
 
         The work loop reaches a checkpoint, awaits :meth:`wait_unpaused`,
         and resumes only when :meth:`resume` is called. No-op when the
         process has already terminated.
+
+        Slice 2 (#518): also persists a checkpoint so the pause survives
+        a process restart. Callers can supply an optional *store*; if
+        omitted the default :class:`CheckpointStore` location is used.
+        Persistence failures are logged as warnings and never raised —
+        the in-memory flag is the authoritative source.
+
+        Note: ``process_id`` is UUID4 hex (32 hex chars, no separators)
+        which contains only ``[0-9a-f]`` — safe for :class:`CheckpointStore`
+        sanitization without truncation or collision.
         """
         if self._status in _TERMINAL_STATUSES or self.should_cancel():
             return
         self._paused_event.clear()
 
-    async def resume(self) -> None:
+        # Persist pause state so a restarted process can detect it.
+        _checkpoint_store = store if store is not None else CheckpointStore()
+        try:
+            _checkpoint_store.initialize()
+            checkpoint = CheckpointData.create(
+                seed_id=self.process_id,
+                phase="agent_process_paused",
+                state={
+                    "status": "paused",
+                    "reason": reason,
+                    "paused_at": datetime.now(UTC).isoformat(),
+                },
+            )
+            result = _checkpoint_store.save(checkpoint)
+            if result.is_err:
+                logger.warning(
+                    "agent_process.pause_checkpoint_save_failed",
+                    extra={"process_id": self.process_id, "error": str(result.error)},
+                )
+        except Exception:  # noqa: BLE001 — fault-tolerant; in-memory flag is authoritative
+            logger.warning(
+                "agent_process.pause_checkpoint_save_failed",
+                extra={"process_id": self.process_id},
+            )
+
+    async def resume(
+        self,
+        *,
+        store: CheckpointStore | None = None,
+    ) -> None:
         """Release a paused work loop.
 
         No-op when the process is not currently paused. Returns it to
         :attr:`AgentProcessStatus.RUNNING`.
+
+        Slice 2 (#518): overwrites the persisted pause checkpoint with a
+        ``running`` row so ``load_persisted_pause`` returns False after
+        resume. Failures are logged and never raised.
         """
         if self._status in _TERMINAL_STATUSES or not self.should_pause():
             return
         self._paused_event.set()
         if self._status is AgentProcessStatus.PAUSED:
             await self._set_status(AgentProcessStatus.RUNNING, reason="resume requested")
+
+        # Overwrite the paused checkpoint so load_persisted_pause returns False.
+        _checkpoint_store = store if store is not None else CheckpointStore()
+        try:
+            _checkpoint_store.initialize()
+            checkpoint = CheckpointData.create(
+                seed_id=self.process_id,
+                phase="agent_process_running",
+                state={
+                    "status": "running",
+                    "resumed_at": datetime.now(UTC).isoformat(),
+                },
+            )
+            result = _checkpoint_store.save(checkpoint)
+            if result.is_err:
+                logger.warning(
+                    "agent_process.resume_checkpoint_save_failed",
+                    extra={"process_id": self.process_id, "error": str(result.error)},
+                )
+        except Exception:  # noqa: BLE001 — fault-tolerant
+            logger.warning(
+                "agent_process.resume_checkpoint_save_failed",
+                extra={"process_id": self.process_id},
+            )
 
     async def cancel(self, reason: str = "cancel requested") -> None:
         """Request a cooperative cancel.
@@ -318,6 +391,48 @@ class AgentProcessHandle:
     def status(self) -> AgentProcessStatus:
         """Return the current lifecycle status."""
         return self._status
+
+    @classmethod
+    def load_persisted_pause(
+        cls,
+        process_id: str,
+        *,
+        store: CheckpointStore | None = None,
+    ) -> bool:
+        """Return True iff the latest persisted checkpoint marks this process as paused.
+
+        This is the restart-recovery primitive for slice 2 (#518). A caller
+        restarting the process calls this to ask "was I paused before the
+        restart?" and, if True, calls :meth:`pause` again to restore the
+        in-memory flag.
+
+        Args:
+            process_id: The process identifier to look up. UUID4 hex is
+                used by default (:func:`_new_process_id`); the hex alphabet
+                ``[0-9a-f]`` is safe through :meth:`CheckpointStore._sanitize_seed_id`
+                without truncation or collision.
+            store: Optional :class:`CheckpointStore` override. When omitted,
+                the default store location (``~/.ouroboros/data/checkpoints/``)
+                is used.
+
+        Returns:
+            ``True`` when the latest checkpoint phase is
+            ``"agent_process_paused"``, ``False`` for any other phase or
+            when no checkpoint exists.
+        """
+        _store = store if store is not None else CheckpointStore()
+        try:
+            _store.initialize()
+            result = _store.load(process_id)
+            if result.is_err:
+                return False
+            return result.value.phase == "agent_process_paused"
+        except Exception:  # noqa: BLE001 — fault-tolerant; absence of checkpoint == not paused
+            logger.warning(
+                "agent_process.load_persisted_pause_failed",
+                extra={"process_id": process_id},
+            )
+            return False
 
     # ------------------------------------------------------------------
     # Internal cooperative signals (consumed by the work loop)

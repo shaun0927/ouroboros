@@ -9,15 +9,20 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
+from ouroboros.core.errors import PersistenceError
+from ouroboros.core.types import Result
 from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.agent_process import (
     AgentProcess,
+    AgentProcessHandle,
     AgentProcessStatus,
     project_agent_process_snapshot,
 )
+from ouroboros.persistence.checkpoint import CheckpointStore
 from ouroboros.persistence.event_store import EventStore
 
 
@@ -563,3 +568,100 @@ async def test_lifecycle_reasons_are_prefixed_once() -> None:
     assert "ralph: spawned" in reasons
     assert "ralph: work returned" in reasons
     assert all("ralph: ralph:" not in reason for reason in reasons)
+
+
+# ---------------------------------------------------------------------------
+# Slice 2 (#518): durable pause/resume via CheckpointStore
+# ---------------------------------------------------------------------------
+
+
+class _ErroringCheckpointStore(CheckpointStore):
+    """A CheckpointStore whose save() always returns an error, for fault-tolerance tests."""
+
+    def save(self, checkpoint):  # type: ignore[override]
+        return Result.err(PersistenceError("simulated save error", operation="write", details={}))
+
+
+@pytest.mark.asyncio
+async def test_pause_persists_state_via_checkpoint_store(tmp_path: Path) -> None:
+    """pause() must write an agent_process_paused checkpoint so load_persisted_pause returns True."""
+    ck_store = CheckpointStore(base_path=tmp_path)
+    process = AgentProcess(event_store=None)
+    started = asyncio.Event()
+
+    async def work(handle):
+        started.set()
+        while not handle.should_cancel():
+            await handle.wait_unpaused()
+            await asyncio.sleep(0.005)
+
+    handle = await process.spawn(intent="ralph", work_fn=work)
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    await handle.pause(store=ck_store)
+
+    assert AgentProcessHandle.load_persisted_pause(handle.process_id, store=ck_store) is True
+
+    await handle.cancel(reason="end test")
+    await handle.wait_until_complete(timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_resume_clears_persisted_pause(tmp_path: Path) -> None:
+    """resume() must overwrite the checkpoint so load_persisted_pause returns False."""
+    ck_store = CheckpointStore(base_path=tmp_path)
+    process = AgentProcess(event_store=None)
+    started = asyncio.Event()
+
+    async def work(handle):
+        started.set()
+        while not handle.should_cancel():
+            await handle.wait_unpaused()
+            await asyncio.sleep(0.005)
+
+    handle = await process.spawn(intent="ralph", work_fn=work)
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    await handle.pause(store=ck_store)
+    await _wait_for_status(handle, AgentProcessStatus.PAUSED)
+    await handle.resume(store=ck_store)
+
+    assert AgentProcessHandle.load_persisted_pause(handle.process_id, store=ck_store) is False
+
+    await handle.cancel(reason="end test")
+    await handle.wait_until_complete(timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_pause_swallows_checkpoint_save_error() -> None:
+    """pause() must flip the in-memory flag and not raise even when CheckpointStore.save errors."""
+    erroring_store = _ErroringCheckpointStore()
+    process = AgentProcess(event_store=None)
+    started = asyncio.Event()
+
+    async def work(handle):
+        started.set()
+        while not handle.should_cancel():
+            await handle.wait_unpaused()
+            await asyncio.sleep(0.005)
+
+    handle = await process.spawn(intent="ralph", work_fn=work)
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    # Must not raise even though the store always errors.
+    await handle.pause(store=erroring_store)
+
+    # In-memory flag must still be set.
+    assert handle.should_pause() is True
+
+    await handle.cancel(reason="end test")
+    await handle.wait_until_complete(timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_load_persisted_pause_returns_false_when_no_checkpoint(tmp_path: Path) -> None:
+    """load_persisted_pause must return False for a process_id with no prior checkpoint."""
+    ck_store = CheckpointStore(base_path=tmp_path)
+    fresh_process_id = "deadbeefdeadbeefdeadbeefdeadbeef"
+
+    assert AgentProcessHandle.load_persisted_pause(fresh_process_id, store=ck_store) is False
