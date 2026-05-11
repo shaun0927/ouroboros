@@ -558,7 +558,7 @@ async def run_with_agent_process[T](
     handle = await process.spawn(intent=intent, work_fn=_work)
     try:
         final_status = await handle.wait_until_complete(timeout=timeout)
-    except asyncio.CancelledError:
+    except (asyncio.CancelledError, TimeoutError):
         await handle.cancel(reason="cancelled by job runner")
         work_task = handle._work_task
         if work_task is not None and not work_task.done():

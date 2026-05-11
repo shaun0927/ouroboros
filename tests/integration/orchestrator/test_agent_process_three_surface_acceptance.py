@@ -402,3 +402,34 @@ async def test_production_start_surfaces_do_not_converge_error_tool_results(
     assert directives[-1] == "cancel", surface
     assert "converge" not in directives, surface
     assert _directive_intents(store)[-1] == expected_intent
+
+
+@pytest.mark.asyncio
+async def test_run_with_agent_process_cleans_up_work_task_on_timeout() -> None:
+    store = _FakeEventStore()
+    started = asyncio.Event()
+    cancelled = False
+
+    async def _slow_work(_handle: Any) -> MCPToolResult:
+        nonlocal cancelled
+        started.set()
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        return MCPToolResult()
+
+    with pytest.raises(TimeoutError):
+        await run_with_agent_process(
+            event_store=store,
+            intent="timeout_surface",
+            work_fn=_slow_work,
+            timeout=0.01,
+        )
+
+    assert started.is_set()
+    assert cancelled is True
+    directives = _directives(store)
+    assert directives[0] == "continue"
+    assert directives[-1] == "cancel"
