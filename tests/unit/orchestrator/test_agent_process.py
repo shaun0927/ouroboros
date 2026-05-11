@@ -925,6 +925,23 @@ async def test_pause_acknowledgement_surfaces_checkpoint_save_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_spawned_process_fails_closed_when_pause_checkpoint_save_fails() -> None:
+    """A work-loop checkpoint failure must complete the handle as FAILED, not hang."""
+    process = AgentProcess(event_store=None)
+    erroring_store = _ErroringCheckpointStore()
+
+    async def work(handle):
+        await handle.pause(store=erroring_store)
+        await handle.wait_unpaused()
+
+    handle = await process.spawn(intent="ralph", work_fn=work)
+
+    final = await handle.wait_until_complete(timeout=1.0)
+
+    assert final is AgentProcessStatus.FAILED
+
+
+@pytest.mark.asyncio
 async def test_resume_surfaces_checkpoint_save_error(tmp_path: Path) -> None:
     """A failed running overwrite must be visible because stale paused recovery remains."""
     ck_store = _FailingSecondSaveCheckpointStore(base_path=tmp_path)

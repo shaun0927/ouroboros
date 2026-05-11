@@ -485,14 +485,20 @@ class AgentProcessHandle:
         if self._status in _TERMINAL_STATUSES and not force:
             return
         if self._pause_checkpoint_requested:
-            self._save_lifecycle_checkpoint(
-                phase="agent_process_failed",
-                status="failed",
-                event_key="failed_at",
-                log_key="terminal",
-                store=self._pause_checkpoint_store,
-                strict=True,
-            )
+            try:
+                self._save_lifecycle_checkpoint(
+                    phase="agent_process_failed",
+                    status="failed",
+                    event_key="failed_at",
+                    log_key="terminal",
+                    store=self._pause_checkpoint_store,
+                    strict=True,
+                )
+            except Exception:
+                logger.warning(
+                    "agent_process.failed_checkpoint_cleanup_failed",
+                    extra={"process_id": self.process_id},
+                )
         self._status = AgentProcessStatus.FAILED
         if self._emit_directive is not None:
             await self._emit_directive(Directive.CANCEL, reason, AgentProcessStatus.FAILED)
