@@ -12,54 +12,13 @@ from ouroboros.config.models import RuntimeControlsConfig
 from ouroboros.core.errors import OuroborosError
 from ouroboros.events.base import BaseEvent
 from ouroboros.events.lineage import lineage_generation_watchdog_decision
+from ouroboros.evolution.material_progress import (
+    EXECUTION_MATERIAL_EVENTS,
+    LINEAGE_MATERIAL_EVENTS,
+    SESSION_MATERIAL_EVENTS,
+    TERMINAL_AC_STATUSES,
+)
 from ouroboros.persistence.event_store import EventStore
-
-_LINEAGE_MATERIAL_EVENTS = frozenset(
-    {
-        "lineage.generation.started",
-        "lineage.generation.phase_changed",
-        "lineage.generation.completed",
-        "lineage.generation.interrupted",
-        "lineage.generation.failed",
-        "lineage.ontology.evolved",
-        "lineage.converged",
-        "lineage.stagnated",
-        "lineage.exhausted",
-    }
-)
-_EXECUTION_MATERIAL_EVENTS = frozenset(
-    {
-        "execution.ac.stall_detected",
-        "execution.coordinator.completed",
-        "execution.coordinator.failed",
-        "execution.decomposition.level_started",
-        "execution.decomposition.level_completed",
-        "execution.session.completed",
-        "execution.session.failed",
-        "execution.session.started",
-        "execution.terminal",
-    }
-)
-_SESSION_MATERIAL_EVENTS = frozenset(
-    {
-        "orchestrator.session.cancelled",
-        "orchestrator.session.completed",
-        "orchestrator.session.failed",
-        "orchestrator.session.started",
-        "orchestrator.task.completed",
-        "orchestrator.task.started",
-    }
-)
-_TERMINAL_AC_STATUSES = frozenset(
-    {
-        "completed",
-        "failed",
-        "skipped",
-        "blocked",
-        "invalid",
-        "satisfied",
-    }
-)
 
 
 class GenerationWatchdogTimeout(OuroborosError):
@@ -206,13 +165,13 @@ class GenerationProgressWatchdog:
             self._last_material_event_type = event.type
 
     def _is_material_progress(self, event: BaseEvent) -> bool:
-        if event.type in _LINEAGE_MATERIAL_EVENTS:
+        if event.type in LINEAGE_MATERIAL_EVENTS:
             return self._event_matches_generation(event)
 
-        if event.type in _EXECUTION_MATERIAL_EVENTS:
+        if event.type in EXECUTION_MATERIAL_EVENTS:
             return True
 
-        if event.type in _SESSION_MATERIAL_EVENTS:
+        if event.type in SESSION_MATERIAL_EVENTS:
             return True
 
         if event.type == "workflow.progress.updated":
@@ -369,7 +328,7 @@ class GenerationProgressWatchdog:
             if not isinstance(status, str):
                 continue
             normalized = status.strip().lower()
-            if normalized in _TERMINAL_AC_STATUSES:
+            if normalized in TERMINAL_AC_STATUSES:
                 terminal_count += 1
             statuses.append((criterion.get("index"), normalized))
 
