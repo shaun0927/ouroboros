@@ -445,6 +445,11 @@ async def test_events_handler_redacts_secret_shaped_resource_payloads(tmp_path: 
                 "tool_input_preview": "command: deploy --api-key sk-live-SECRET123",
                 "quoted_password_preview": 'command: login --password "correct horse battery staple"',
                 "quoted_secret_preview": "command: run --secret 'multi word value'",
+                "access_token": "opaque-access-token-value",
+                "refresh_token": "opaque-refresh-token-value",
+                "github_token": "opaque-github-token-value",
+                "db_password": "opaque-db-password-value",
+                "google_preview": "key=AIzaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
                 "safe_count": 3,
             },
         )
@@ -459,6 +464,11 @@ async def test_events_handler_redacts_secret_shaped_resource_payloads(tmp_path: 
     assert "correct horse battery staple" not in text
     assert "sk-live-SECRET123" not in text
     assert "multi word value" not in text
+    assert "opaque-access-token-value" not in text
+    assert "opaque-refresh-token-value" not in text
+    assert "opaque-github-token-value" not in text
+    assert "opaque-db-password-value" not in text
+    assert "AIzaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" not in text
 
     payload = json.loads(text)
     data = payload["events"][0]["data"]
@@ -467,6 +477,11 @@ async def test_events_handler_redacts_secret_shaped_resource_payloads(tmp_path: 
     assert data["tool_input_preview"] == "command: deploy --api-key [redacted]"
     assert data["quoted_password_preview"] == "command: login --password [redacted]"
     assert data["quoted_secret_preview"] == "command: run --secret [redacted]"
+    assert data["access_token"] == "[redacted]"
+    assert data["refresh_token"] == "[redacted]"
+    assert data["github_token"] == "[redacted]"
+    assert data["db_password"] == "[redacted]"
+    assert data["google_preview"] == "key=[redacted]"
     assert data["safe_count"] == 3
 
     await store.close()

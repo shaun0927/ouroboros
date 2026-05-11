@@ -48,7 +48,13 @@ _SECRET_FLAG_PATTERN = re.compile(
 )
 _BEARER_PATTERN = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
 _HIGH_CONFIDENCE_SECRET_PATTERN = re.compile(
-    r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9][A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{16})\b"
+    r"\b(?:"
+    r"gh[pousr]_[A-Za-z0-9_]{20,}"
+    r"|sk-[A-Za-z0-9][A-Za-z0-9_-]{8,}"
+    r"|AIza[A-Za-z0-9_-]{35}"
+    r"|AKIA[0-9A-Z]{16}"
+    r"|[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
+    r")\b"
 )
 
 
@@ -518,7 +524,18 @@ def _is_secret_field_name(key: str | None) -> bool:
     if key is None:
         return False
     normalized = key.strip().lower().replace("-", "_")
-    return normalized in _SECRET_FIELD_NAMES or normalized.endswith(("_api_key", "_secret"))
+    field_parts = tuple(filter(None, normalized.split("_")))
+    secret_terminal_parts = {
+        "credential",
+        "credentials",
+        "key",
+        "password",
+        "secret",
+        "token",
+    }
+    return normalized in _SECRET_FIELD_NAMES or (
+        bool(field_parts) and field_parts[-1] in secret_terminal_parts
+    )
 
 
 def _redact_secret_shaped_text(value: str) -> str:
