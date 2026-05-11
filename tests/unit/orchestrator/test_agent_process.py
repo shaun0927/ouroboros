@@ -592,10 +592,26 @@ async def test_lifecycle_reasons_are_prefixed_once() -> None:
 
 
 class _ErroringCheckpointStore(CheckpointStore):
-    """A CheckpointStore whose save() always returns an error, for fault-tolerance tests."""
+    """A CheckpointStore whose save() always returns an error."""
 
     def save(self, checkpoint):  # type: ignore[override]
         return Result.err(PersistenceError("simulated save error", operation="write", details={}))
+
+
+class _FailingSecondSaveCheckpointStore(CheckpointStore):
+    """A CheckpointStore that succeeds once, then fails subsequent saves."""
+
+    def __init__(self, *, base_path: Path) -> None:
+        super().__init__(base_path=base_path)
+        self.save_count = 0
+
+    def save(self, checkpoint):  # type: ignore[override]
+        self.save_count += 1
+        if self.save_count >= 2:
+            return Result.err(
+                PersistenceError("simulated save error", operation="write", details={})
+            )
+        return super().save(checkpoint)
 
 
 @pytest.mark.asyncio
@@ -894,31 +910,36 @@ def test_pause_checkpoint_key_avoids_sanitizer_collisions(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_pause_swallows_checkpoint_save_error() -> None:
-    """pause() must flip the in-memory flag and not raise even when CheckpointStore.save errors."""
+async def test_pause_acknowledgement_surfaces_checkpoint_save_error() -> None:
+    """Acknowledged durable pause must not silently hide CheckpointStore.save errors."""
     erroring_store = _ErroringCheckpointStore()
-    process = AgentProcess(event_store=None)
-    started = asyncio.Event()
+    handle = AgentProcessHandle(process_id="erroring-pause")
 
-    async def work(handle):
-        started.set()
-        while not handle.should_cancel():
-            await handle.wait_unpaused()
-            await asyncio.sleep(0.005)
-
-    handle = await process.spawn(intent="ralph", work_fn=work)
-    await asyncio.wait_for(started.wait(), timeout=1.0)
-
-    # Must not raise even though the store always errors once the loop
-    # acknowledges the pause and attempts to persist it.
     await handle.pause(store=erroring_store)
-    await _wait_for_status(handle, AgentProcessStatus.PAUSED)
 
-    # In-memory flag must still be set.
+    with pytest.raises(PersistenceError):
+        await handle.wait_unpaused()
+
+    assert handle.status() is AgentProcessStatus.PAUSED
     assert handle.should_pause() is True
 
-    await handle.cancel(reason="end test")
-    await handle.wait_until_complete(timeout=1.0)
+
+@pytest.mark.asyncio
+async def test_resume_surfaces_checkpoint_save_error(tmp_path: Path) -> None:
+    """A failed running overwrite must be visible because stale paused recovery remains."""
+    ck_store = _FailingSecondSaveCheckpointStore(base_path=tmp_path)
+    handle = AgentProcessHandle(process_id="erroring-resume")
+
+    await handle.pause(store=ck_store)
+    waiter = asyncio.create_task(handle.wait_unpaused())
+    await _wait_for_status(handle, AgentProcessStatus.PAUSED)
+
+    with pytest.raises(PersistenceError):
+        await handle.resume()
+
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
 
 
 @pytest.mark.asyncio

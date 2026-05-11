@@ -333,6 +333,7 @@ class AgentProcessHandle:
             event_key="resumed_at",
             log_key="resume",
             store=self._pause_checkpoint_store,
+            strict=True,
         )
         self._pause_checkpoint_reason = None
         self._pause_checkpoint_requested = False
@@ -440,6 +441,7 @@ class AgentProcessHandle:
                     log_key="pause",
                     reason=self._pause_checkpoint_reason,
                     store=self._pause_checkpoint_store,
+                    strict=True,
                 )
         await self._paused_event.wait()
         if self._status is AgentProcessStatus.PAUSED and not self.should_cancel():
@@ -485,6 +487,7 @@ class AgentProcessHandle:
                 event_key="failed_at",
                 log_key="terminal",
                 store=self._pause_checkpoint_store,
+                strict=True,
             )
         self._completed_event.set()
 
@@ -526,8 +529,9 @@ class AgentProcessHandle:
         log_key: str,
         reason: str | None = None,
         store: CheckpointStore | None = None,
+        strict: bool = False,
     ) -> None:
-        """Best-effort durable lifecycle checkpoint for restart recovery."""
+        """Persist a durable lifecycle checkpoint for restart recovery."""
         checkpoint_store = store if store is not None else CheckpointStore()
         try:
             checkpoint_store.initialize()
@@ -548,11 +552,17 @@ class AgentProcessHandle:
                     f"agent_process.{log_key}_checkpoint_save_failed",
                     extra={"process_id": self.process_id, "error": str(result.error)},
                 )
-        except Exception:  # noqa: BLE001 — fault-tolerant; in-memory state is authoritative
+                if strict:
+                    raise result.error
+        except Exception:
             logger.warning(
                 f"agent_process.{log_key}_checkpoint_save_failed",
                 extra={"process_id": self.process_id},
             )
+            if strict:
+                raise
+            if strict:
+                raise
 
 
 @dataclass(frozen=True, slots=True)
