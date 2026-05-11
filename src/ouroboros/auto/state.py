@@ -817,6 +817,7 @@ class AutoPipelineState:
             "ralph_job_id",
             "ralph_lineage_id",
             "ralph_dispatch_mode",
+            "ralph_opencode_mode",
             "ralph_job_status",
             "ralph_stop_reason",
             "last_grade",
