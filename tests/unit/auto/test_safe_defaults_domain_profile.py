@@ -10,10 +10,21 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ouroboros.auto.domain_profile import DomainProfile
+import pytest
+
+from ouroboros.auto.domain_profile import DEFAULT_REGISTRY, DomainProfile
+from ouroboros.auto.interview_driver import (
+    AutoInterviewDriver,
+    FunctionInterviewBackend,
+    InterviewTurn,
+)
 from ouroboros.auto.ledger import LedgerSource, LedgerStatus, SeedDraftLedger
-from ouroboros.auto.safe_defaults import _DefaultSpec, finalize_safe_defaultable_gaps
-from ouroboros.auto.state import AutoPipelineState
+from ouroboros.auto.safe_defaults import (
+    _DefaultSpec,
+    build_safe_default_synthesis,
+    finalize_safe_defaultable_gaps,
+)
+from ouroboros.auto.state import AutoPipelineState, AutoStore
 
 # ---------------------------------------------------------------------------
 # Minimal stubs
@@ -84,6 +95,33 @@ def test_profile_default_overrides_hardcoded() -> None:
     assert actors_entry.value == "Domain-specific actor override"
     assert actors_entry.source == LedgerSource.ASSUMPTION
     assert actors_entry.status == LedgerStatus.DEFAULTED
+
+
+def test_synthesis_uses_profile_resolved_default_not_hardcoded() -> None:
+    """Transcript synthesis must match the profile-aware ledger default."""
+    profile = _make_profile(
+        name="story-profile",
+        safe_defaults={
+            "actors": _DefaultSpec(
+                value="Assume the protagonist and narrator are the only story actors.",
+                rationale="Narrative domain actor policy",
+            )
+        },
+    )
+
+    ledger = _ledger_with_goal_only("Draft a local short story outline")
+    finalization = finalize_safe_defaultable_gaps(
+        ledger,
+        goal="Draft a local short story outline",
+        provenance="test",
+        active_profile=profile,
+    )
+
+    synthesis = build_safe_default_synthesis(finalization)
+
+    assert "Assume the protagonist and narrator are the only story actors." in synthesis
+    assert "Narrative domain actor policy" in synthesis
+    assert "Assume the primary actor is the user or automation agent" not in synthesis
 
 
 def test_missing_key_falls_back_to_hardcoded() -> None:
@@ -188,3 +226,50 @@ def test_active_profile_threading_via_state() -> None:
     # Serialises to dict without error (JSON round-trip check).
     as_dict = dataclasses.asdict(state)
     assert as_dict["active_domain_profile_name"] == "coding"
+
+
+@pytest.mark.asyncio
+async def test_interview_driver_persists_profile_resolved_synthesis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Driver transcript persistence should use the profile-resolved spec."""
+    profile = _make_profile(
+        name="story-profile",
+        safe_defaults={
+            "actors": _DefaultSpec(
+                value="Assume the protagonist and narrator are the only story actors.",
+                rationale="Narrative domain actor policy",
+            )
+        },
+    )
+    monkeypatch.setattr(DEFAULT_REGISTRY, "_profiles", [profile])
+    answer_calls: list[str] = []
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What should we verify?", "interview_1")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:
+        answer_calls.append(text)
+        if "mark the interview complete" in text.lower():
+            return InterviewTurn("", session_id, seed_ready=True, completed=True)
+        return InterviewTurn("What else?", session_id, seed_ready=False)
+
+    state = AutoPipelineState(goal="Draft a local short story outline", cwd=str(tmp_path))
+    state.active_domain_profile_name = "story-profile"
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+        timeout_seconds=1,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "seed_ready"
+    synthesis = next(text for text in answer_calls if "safe-default synthesis" in text.lower())
+    assert "Assume the protagonist and narrator are the only story actors." in synthesis
+    assert "Assume the primary actor is the user or automation agent" not in synthesis
+    assert any(
+        "protagonist and narrator" in item.get("answer", "") for item in ledger.question_history
+    )

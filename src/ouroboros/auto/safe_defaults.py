@@ -21,22 +21,30 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True, slots=True)
+class _DefaultSpec:
+    value: str
+    rationale: str
+
+
+@dataclass(frozen=True, slots=True)
 class SafeDefaultFinalization:
     """Outcome of trying to close required ledger gaps with safe defaults."""
 
     defaulted_sections: tuple[str, ...]
     unsafe_gaps: tuple[str, ...]
+    defaulted_specs: tuple[tuple[str, _DefaultSpec], ...] = ()
 
     @property
     def completed(self) -> bool:
         """Return True when all remaining gaps were safely defaulted."""
         return bool(self.defaulted_sections) and not self.unsafe_gaps
 
-
-@dataclass(frozen=True, slots=True)
-class _DefaultSpec:
-    value: str
-    rationale: str
+    def default_spec_for(self, section: str) -> _DefaultSpec | None:
+        """Return the resolved default spec written for *section*, if tracked."""
+        for spec_section, spec in self.defaulted_specs:
+            if spec_section == section:
+                return spec
+        return None
 
 
 _SAFE_DEFAULTS: dict[str, _DefaultSpec] = {
@@ -199,7 +207,7 @@ def build_safe_default_synthesis(finalization: SafeDefaultFinalization) -> str:
         "if a stricter answer is required.",
     ]
     for section in finalization.defaulted_sections:
-        spec = _SAFE_DEFAULTS.get(section)
+        spec = finalization.default_spec_for(section) or _SAFE_DEFAULTS.get(section)
         if spec is None:
             continue
         lines.append(f"- {section}: {spec.value} ({spec.rationale})")
@@ -234,6 +242,7 @@ def finalize_safe_defaultable_gaps(
     unsafe_reason = _unsafe_context_reason(ledger, goal=goal, pending_question=pending_question)
     statuses = ledger.section_statuses()
     defaulted: list[str] = []
+    defaulted_specs: list[tuple[str, _DefaultSpec]] = []
     unsafe: list[str] = []
 
     for section in gaps:
@@ -268,6 +277,7 @@ def finalize_safe_defaultable_gaps(
             ),
         )
         defaulted.append(section)
+        defaulted_specs.append((section, spec))
 
     if not unsafe and ledger.open_gaps():
         unsafe.extend(
@@ -275,7 +285,7 @@ def finalize_safe_defaultable_gaps(
             for section in ledger.open_gaps()
         )
 
-    return SafeDefaultFinalization(tuple(defaulted), tuple(unsafe))
+    return SafeDefaultFinalization(tuple(defaulted), tuple(unsafe), tuple(defaulted_specs))
 
 
 def _unsafe_context_reason(
