@@ -14,6 +14,7 @@ and autonomously evolves through Wonder → Reflect cycles for Gen 2+.
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -63,6 +64,7 @@ from ouroboros.evolution.watchdog import (
 )
 from ouroboros.evolution.wonder import WonderEngine, WonderOutput
 from ouroboros.observability.drift import DriftMeasuredEvent, DriftMeasurement
+from ouroboros.orchestrator.agent_process import AgentProcess, AgentProcessHandle
 from ouroboros.persistence.event_store import EventStore
 
 logger = logging.getLogger(__name__)
@@ -199,6 +201,7 @@ class EvolutionaryLoop:
         executor: Any | None = None,
         evaluator: Any | None = None,
         validator: Any | None = None,
+        agent_process: AgentProcess | None = None,
     ) -> None:
         self.event_store = event_store
         self.config = config or EvolutionaryLoopConfig()
@@ -208,11 +211,13 @@ class EvolutionaryLoop:
         self.executor = executor
         self.evaluator = evaluator
         self.validator = validator
+        self._agent_process = agent_process or AgentProcess(event_store=event_store)
         self._project_dir_context: ContextVar[str | None] = ContextVar(
             "evolutionary_loop_project_dir",
             default=None,
         )
         self._shutdown_requested = False
+        self._shutdown_event = asyncio.Event()
         self._original_sigint_handler: signal.Handlers | None = None
         self._sigint_installed = False
         self._convergence = ConvergenceCriteria(
@@ -230,6 +235,7 @@ class EvolutionaryLoop:
         if self._sigint_installed:
             return
         self._shutdown_requested = False
+        self._shutdown_event = asyncio.Event()
 
         def _handle_sigint(signum: int, frame: Any) -> None:  # noqa: ARG001
             if self._shutdown_requested:
@@ -238,6 +244,7 @@ class EvolutionaryLoop:
                 raise KeyboardInterrupt
             logger.info("evolution.graceful_shutdown_requested")
             self._shutdown_requested = True
+            self._shutdown_event.set()
 
         try:
             self._original_sigint_handler = signal.getsignal(signal.SIGINT)
@@ -801,32 +808,47 @@ class EvolutionaryLoop:
         container = _StepResultContainer()
 
         async def _generation_work(handle: AgentProcessHandle) -> None:
-            # Cooperative checkpoint: before generation phases begin.
-            await handle.wait_unpaused()
-            if handle.should_cancel():
-                container.result = Result.ok(
-                    StepResult(
-                        generation_result=GenerationResult(
-                            generation_number=generation_number,
-                            seed=current_seed,
-                            phase=GenerationPhase.INTERRUPTED,
-                            success=False,
-                        ),
-                        convergence_signal=ConvergenceSignal(
-                            converged=False,
-                            reason="AgentProcess cancel requested before generation start",
-                            ontology_similarity=0.0,
-                            generation=generation_number,
-                        ),
-                        lineage=lineage,
-                        action=StepAction.INTERRUPTED,
-                        next_generation=generation_number,
-                    )
-                )
-                return
-
             self._install_sigint_handler()
             try:
+                # Cooperative checkpoint before generation phases begin. Route
+                # through the normal shutdown checkpoint so pause, cancel, and
+                # SIGINT all persist a lineage interruption consistently.
+                interrupted_before_start = await self._check_shutdown(
+                    lineage.lineage_id,
+                    generation_number,
+                    resume_after_phase,
+                    current_seed,
+                    agent_process_handle=handle,
+                )
+                if interrupted_before_start is not None:
+                    conv_signal = ConvergenceSignal(
+                        converged=False,
+                        reason=(
+                            "AgentProcess cancel requested before generation start"
+                            if handle.should_cancel()
+                            else "Generation interrupted by SIGINT"
+                        ),
+                        ontology_similarity=0.0,
+                        generation=generation_number,
+                    )
+                    await self._emit_step_directive(
+                        StepAction.INTERRUPTED,
+                        lineage_id=lineage.lineage_id,
+                        generation_number=generation_number,
+                        phase="interrupted",
+                        reason=conv_signal.reason,
+                    )
+                    container.result = Result.ok(
+                        StepResult(
+                            generation_result=interrupted_before_start,
+                            convergence_signal=conv_signal,
+                            lineage=lineage,
+                            action=StepAction.INTERRUPTED,
+                            next_generation=generation_number,
+                        )
+                    )
+                    return
+
                 gen_result = await self._run_generation_with_watchdog(
                     lineage=lineage,
                     generation_number=generation_number,
@@ -834,6 +856,7 @@ class EvolutionaryLoop:
                     execute=execute,
                     parallel=parallel,
                     resume_after_phase=resume_after_phase,
+                    agent_process_handle=handle,
                 )
             finally:
                 self._uninstall_sigint_handler()
@@ -911,35 +934,22 @@ class EvolutionaryLoop:
 
             result = gen_result.value
 
-            # Cooperative checkpoint: before post-processing / convergence check.
-            await handle.wait_unpaused()
-            if handle.should_cancel():
-                container.result = Result.ok(
-                    StepResult(
-                        generation_result=GenerationResult(
-                            generation_number=generation_number,
-                            seed=result.seed,
-                            phase=GenerationPhase.INTERRUPTED,
-                            success=False,
-                        ),
-                        convergence_signal=ConvergenceSignal(
-                            converged=False,
-                            reason="AgentProcess cancel requested before post-processing",
-                            ontology_similarity=0.0,
-                            generation=generation_number,
-                        ),
-                        lineage=lineage,
-                        action=StepAction.INTERRUPTED,
-                        next_generation=generation_number,
-                    )
-                )
-                return
+            # After generation work has returned a completed result, finish
+            # durable lineage/post-processing writes without another
+            # cooperative cancellation checkpoint. Cancelling here would drop
+            # already-completed generation side effects before
+            # lineage.generation.completed is journaled, making replay rerun
+            # work that may have already happened.
 
             # Handle graceful interruption — return without emitting completed.
             if result.phase == GenerationPhase.INTERRUPTED:
                 conv_signal = ConvergenceSignal(
                     converged=False,
-                    reason="Generation interrupted by SIGINT",
+                    reason=(
+                        "AgentProcess cancel requested during generation"
+                        if handle.should_cancel()
+                        else "Generation interrupted by SIGINT"
+                    ),
                     ontology_similarity=0.0,
                     generation=generation_number,
                 )
@@ -960,6 +970,8 @@ class EvolutionaryLoop:
                     )
                 )
                 return
+
+            handle.complete_on_return_after_cancel()
 
             # Step 3: Emit generation completed event (with seed_json).
             nonlocal_lineage = lineage
@@ -1073,9 +1085,28 @@ class EvolutionaryLoop:
             intent=f"evolve_step generation={generation_number}",
             work_fn=_generation_work,
         )
-        await handle.wait_until_complete()
+        try:
+            await handle.wait_until_complete()
+        except asyncio.CancelledError:
+            if handle.should_complete_on_return_after_cancel():
+                await handle.cancel(
+                    reason="evolve_step caller cancelled after generation completed"
+                )
+            else:
+                await handle.abort(reason="evolve_step caller cancelled")
+            with suppress(asyncio.CancelledError):
+                await asyncio.shield(handle.wait_until_complete())
+            raise
 
         if container.result is None:
+            failure = handle.failure()
+            if failure is not None:
+                return Result.err(
+                    OuroborosError(
+                        "evolve_step: agent process failed during generation work: "
+                        f"{type(failure).__name__}: {failure!s}"
+                    )
+                )
             return Result.err(OuroborosError("evolve_step: agent process exited without result"))
         return container.result
 
@@ -1088,6 +1119,7 @@ class EvolutionaryLoop:
         parallel: bool = True,
         resume_after_phase: str | None = None,
         execution_id: str | None = None,
+        agent_process_handle: AgentProcessHandle | None = None,
     ) -> Result[GenerationResult, OuroborosError]:
         """Run a single generation within the loop.
 
@@ -1107,6 +1139,7 @@ class EvolutionaryLoop:
                 parallel=parallel,
                 resume_after_phase=resume_after_phase,
                 execution_id=execution_id,
+                agent_process_handle=agent_process_handle,
             )
         except asyncio.CancelledError:
             # MCP transport disconnect, timeout, or external task cancellation.
@@ -1140,6 +1173,7 @@ class EvolutionaryLoop:
         execute: bool = True,
         parallel: bool = True,
         resume_after_phase: str | None = None,
+        agent_process_handle: AgentProcessHandle | None = None,
     ) -> Result[GenerationResult, OuroborosError]:
         """Run one generation under progress-aware liveness controls."""
         execution_id = self._generation_execution_id(lineage.lineage_id, generation_number)
@@ -1160,6 +1194,7 @@ class EvolutionaryLoop:
                     parallel=parallel,
                     resume_after_phase=resume_after_phase,
                     execution_id=execution_id,
+                    agent_process_handle=agent_process_handle,
                 )
             )
         except GenerationWatchdogTimeout as exc:
@@ -1210,13 +1245,31 @@ class EvolutionaryLoop:
         execution_output: str | None = None,
         evaluation_summary: EvaluationSummary | None = None,
         validation_output: str | None = None,
+        agent_process_handle: AgentProcessHandle | None = None,
     ) -> GenerationResult | None:
         """Check if graceful shutdown was requested.
 
         Returns a GenerationResult with INTERRUPTED phase if shutdown was
         requested, or None to continue normally.
         """
-        if not self._shutdown_requested:
+        agent_process_cancel_requested = False
+        if agent_process_handle is not None and not self._shutdown_requested:
+            pause_task = asyncio.create_task(agent_process_handle.wait_unpaused())
+            shutdown_task = asyncio.create_task(self._shutdown_event.wait())
+            done, pending = await asyncio.wait(
+                {pause_task, shutdown_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            for task in pending:
+                with suppress(asyncio.CancelledError):
+                    await task
+            for task in done:
+                task.result()
+            agent_process_cancel_requested = agent_process_handle.should_cancel()
+
+        if not self._shutdown_requested and not agent_process_cancel_requested:
             return None
 
         logger.info(
@@ -1295,6 +1348,7 @@ class EvolutionaryLoop:
         parallel: bool = True,
         resume_after_phase: str | None = None,
         execution_id: str | None = None,
+        agent_process_handle: AgentProcessHandle | None = None,
     ) -> Result[GenerationResult, OuroborosError]:
         """Inner implementation of _run_generation with all phase logic.
 
@@ -1438,6 +1492,7 @@ class EvolutionaryLoop:
                 post_wonder_phase,
                 current_seed,
                 wonder_output=wonder_output,
+                agent_process_handle=agent_process_handle,
             )
             if interrupted:
                 return Result.ok(interrupted)
@@ -1516,6 +1571,7 @@ class EvolutionaryLoop:
                     current_seed,
                     wonder_output=wonder_output,
                     reflect_output=reflect_output,
+                    agent_process_handle=agent_process_handle,
                 )
                 if interrupted:
                     return Result.ok(interrupted)
@@ -1607,6 +1663,7 @@ class EvolutionaryLoop:
             current_seed,
             wonder_output=wonder_output,
             reflect_output=reflect_output,
+            agent_process_handle=agent_process_handle,
         )
         if interrupted:
             return Result.ok(interrupted)
@@ -1725,6 +1782,7 @@ class EvolutionaryLoop:
             wonder_output=wonder_output,
             reflect_output=reflect_output,
             execution_output=execution_output,
+            agent_process_handle=agent_process_handle,
         )
         if interrupted:
             return Result.ok(interrupted)
@@ -1793,6 +1851,7 @@ class EvolutionaryLoop:
             execution_output=execution_output,
             evaluation_summary=evaluation_summary,
             validation_output=validation_output,
+            agent_process_handle=agent_process_handle,
         )
         if interrupted:
             return Result.ok(interrupted)

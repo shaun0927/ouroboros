@@ -259,6 +259,8 @@ class AgentProcessHandle:
     _paused_event: asyncio.Event = field(default_factory=asyncio.Event)
     _completed_event: asyncio.Event = field(default_factory=asyncio.Event)
     _cancel_reason: str = "cancel requested"
+    _failure: BaseException | None = None
+    _complete_on_return_after_cancel: bool = False
     _emit_directive: Callable[[Directive, str, AgentProcessStatus], Awaitable[None]] | None = None
     _work_task: asyncio.Task[None] | None = None
     _pause_checkpoint_store: CheckpointStore | None = field(default=None, repr=False)
@@ -354,12 +356,15 @@ class AgentProcessHandle:
         """
         if self._status in _TERMINAL_STATUSES:
             return
-        self._cancel_reason = reason
-        self._cancel_event.set()
-        # Clearing the paused-flag releases a paused loop so it can
-        # observe the cancel flag immediately. The CANCELLED transition
-        # itself is emitted only when the work task actually exits.
-        self._paused_event.set()
+        self._request_cancel(reason)
+
+    async def abort(self, reason: str = "abort requested") -> None:
+        """Cancel the underlying work task for caller-abort propagation."""
+        if self._status in _TERMINAL_STATUSES:
+            return
+        self._request_cancel(reason)
+        if self._work_task is not None and not self._work_task.done():
+            self._work_task.cancel()
 
     async def replay(self) -> Any:
         """Replay the process timeline (slice 3 of #518; not yet implemented)."""
@@ -419,6 +424,32 @@ class AgentProcessHandle:
                 extra={"process_id": process_id},
             )
             return False
+
+    def failure(self) -> BaseException | None:
+        """Return the exception captured from the work task, if it failed."""
+        return self._failure
+
+    def complete_on_return_after_cancel(self) -> None:
+        """Treat a late cooperative cancel as completed once work returns.
+
+        Workflows call this after crossing their own durability point of no
+        return. Hard task cancellation still raises ``CancelledError`` and
+        failures still mark ``FAILED``; this only prevents a sticky cooperative
+        cancel flag from contradicting already-committed successful work.
+        """
+        self._complete_on_return_after_cancel = True
+
+    def should_complete_on_return_after_cancel(self) -> bool:
+        """Return True once the workflow crossed its cancel point of no return."""
+        return self._complete_on_return_after_cancel
+
+    def _request_cancel(self, reason: str) -> None:
+        self._cancel_reason = reason
+        self._cancel_event.set()
+        # Clearing the paused-flag releases a paused loop so it can
+        # observe the cancel flag immediately. The CANCELLED transition
+        # itself is emitted only when the work task actually exits.
+        self._paused_event.set()
 
     # ------------------------------------------------------------------
     # Internal cooperative signals (consumed by the work loop)
@@ -501,9 +532,20 @@ class AgentProcessHandle:
                 )
                 self._delete_lifecycle_checkpoint(store=self._pause_checkpoint_store)
         self._status = AgentProcessStatus.FAILED
-        if self._emit_directive is not None:
-            await self._emit_directive(Directive.CANCEL, reason, AgentProcessStatus.FAILED)
-        self._completed_event.set()
+        try:
+            if self._emit_directive is not None:
+                await self._emit_directive(Directive.CANCEL, reason, AgentProcessStatus.FAILED)
+        except Exception:  # noqa: BLE001 — failed work must still unblock waiters
+            logger.warning(
+                "agent_process.directive_emit_failed",
+                extra={
+                    "process_id": self.process_id,
+                    "directive": Directive.CANCEL.value,
+                },
+                exc_info=True,
+            )
+        finally:
+            self._completed_event.set()
 
     async def _mark_cancelled(self) -> None:
         """Mark the process as cancelled after the work task has exited."""
@@ -530,10 +572,21 @@ class AgentProcessHandle:
             )
         self._status = new_status
         directive = _TRANSITION_DIRECTIVE.get(new_status)
-        if directive is not None and self._emit_directive is not None:
-            await self._emit_directive(directive, reason, new_status)
-        if new_status in _TERMINAL_STATUSES:
-            self._completed_event.set()
+        try:
+            if directive is not None and self._emit_directive is not None:
+                await self._emit_directive(directive, reason, new_status)
+        except Exception:  # noqa: BLE001 — lifecycle completion must not hang on emit failure
+            logger.warning(
+                "agent_process.directive_emit_failed",
+                extra={
+                    "process_id": self.process_id,
+                    "directive": directive.value if directive else None,
+                },
+                exc_info=True,
+            )
+        finally:
+            if new_status in _TERMINAL_STATUSES:
+                self._completed_event.set()
 
     def _save_lifecycle_checkpoint(
         self,
@@ -656,7 +709,8 @@ class AgentProcess:
             try:
                 await work_fn(handle)
             except asyncio.CancelledError:
-                await handle.cancel(reason="cancelled by event loop")
+                if not handle.should_cancel():
+                    await handle.cancel(reason="cancelled by event loop")
                 try:
                     await handle._mark_cancelled()
                 except BaseException as exc:  # noqa: BLE001 — terminal durability failure
@@ -669,6 +723,7 @@ class AgentProcess:
                     )
                 raise
             except BaseException as exc:  # noqa: BLE001 — runtime must capture every failure
+                handle._failure = exc
                 if handle.status() in _TERMINAL_STATUSES:
                     await handle._mark_failed(
                         reason=f"work raised {type(exc).__name__}: {exc!s}", force=True
@@ -679,7 +734,7 @@ class AgentProcess:
                 return
             else:
                 try:
-                    if handle.should_cancel():
+                    if handle.should_cancel() and not handle._complete_on_return_after_cancel:
                         await handle._mark_cancelled()
                     else:
                         await handle._mark_completed(reason="work returned")

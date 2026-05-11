@@ -220,10 +220,117 @@ async def test_failed_work_marks_status_and_emits_cancel() -> None:
     final = await handle.wait_until_complete(timeout=1.0)
 
     assert final is AgentProcessStatus.FAILED
+    failure = handle.failure()
+    assert isinstance(failure, _SimulatedFailure)
+    assert str(failure) == "work blew up"
     assert _directives(store.appended)[-1] == "cancel"
     failed_event = store.appended[-1]
     assert "_SimulatedFailure" in failed_event.data["reason"]
     assert failed_event.data["extra"]["lifecycle_status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_complete_on_return_after_cancel_marks_completed() -> None:
+    store = _FakeEventStore()
+    process = AgentProcess(event_store=store)
+
+    async def work(handle):
+        await handle.cancel(reason="late cancel")
+        handle.complete_on_return_after_cancel()
+
+    handle = await process.spawn(intent="evolve_step", work_fn=work)
+    final = await handle.wait_until_complete(timeout=1.0)
+
+    assert final is AgentProcessStatus.COMPLETED
+    assert _directives(store.appended)[-1] == "converge"
+
+
+@pytest.mark.asyncio
+async def test_abort_cancels_underlying_work_task() -> None:
+    store = _FakeEventStore()
+    process = AgentProcess(event_store=store)
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def work(handle):  # noqa: ARG001 — exercised through task cancellation
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    handle = await process.spawn(intent="evolve_step", work_fn=work)
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    await handle.abort(reason="caller cancelled")
+    final = await handle.wait_until_complete(timeout=1.0)
+
+    assert final is AgentProcessStatus.CANCELLED
+    assert cancelled.is_set()
+    assert _directives(store.appended)[-1] == "cancel"
+
+
+@pytest.mark.asyncio
+async def test_terminal_emit_failure_still_completes_waiters() -> None:
+    async def _raise_on_emit(*args, **kwargs) -> None:
+        raise RuntimeError("emit failed")
+
+    handle = AgentProcessHandle(process_id="proc-emit-fails", _emit_directive=_raise_on_emit)
+
+    await handle._mark_completed()
+    final = await handle.wait_until_complete(timeout=1.0)
+
+    assert final is AgentProcessStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_abort_preserves_caller_reason_in_terminal_directive() -> None:
+    store = _FakeEventStore()
+    process = AgentProcess(event_store=store)
+    started = asyncio.Event()
+
+    async def work(handle):  # noqa: ARG001 — exercised through task cancellation
+        started.set()
+        await asyncio.Event().wait()
+
+    handle = await process.spawn(intent="evolve_step", work_fn=work)
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    await handle.abort(reason="caller cancelled")
+    final = await handle.wait_until_complete(timeout=1.0)
+
+    assert final is AgentProcessStatus.CANCELLED
+    assert "caller cancelled" in store.appended[-1].data["reason"]
+
+
+@pytest.mark.asyncio
+async def test_failed_work_unblocks_waiters_when_terminal_directive_emit_fails() -> None:
+    """A failing work task must not hang if FAILED directive persistence also fails."""
+
+    class _FailingEventStore(_FakeEventStore):
+        async def append(self, event: BaseEvent) -> None:
+            if (
+                event.type == "control.directive.emitted"
+                and event.data.get("extra", {}).get("lifecycle_status") == "failed"
+            ):
+                raise RuntimeError("failed directive write failed")
+            await super().append(event)
+
+    class _WorkFailure(RuntimeError):
+        pass
+
+    store = _FailingEventStore()
+    process = AgentProcess(event_store=store)
+
+    async def work(handle):  # noqa: ARG001 — failure path under test
+        raise _WorkFailure("work failed first")
+
+    handle = await process.spawn(intent="ralph", work_fn=work)
+    final = await handle.wait_until_complete(timeout=1.0)
+
+    assert final is AgentProcessStatus.FAILED
+    assert isinstance(handle.failure(), _WorkFailure)
 
 
 @pytest.mark.asyncio
