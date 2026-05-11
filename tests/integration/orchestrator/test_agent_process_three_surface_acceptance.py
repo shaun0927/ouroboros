@@ -165,9 +165,18 @@ class _FakeExecuteHandler:
     agent_runtime_backend: str | None = None
     llm_backend: str | None = None
 
-    def __init__(self, *, is_error: bool = False, action: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        is_error: bool = False,
+        action: str | None = None,
+        status: str | None = None,
+        include_action: bool = True,
+    ) -> None:
         self.is_error = is_error
         self.action = action or ("failed" if is_error else "completed")
+        self.status = status
+        self.include_action = include_action
 
     async def handle(
         self,
@@ -178,16 +187,19 @@ class _FakeExecuteHandler:
         synchronous: bool = False,
     ):
         assert synchronous is True
+        meta = {
+            "status": self.status or self.action,
+            "seed_content": arguments["seed_content"],
+            "execution_id": execution_id,
+            "session_id": session_id_override,
+        }
+        if self.include_action:
+            meta["action"] = self.action
         return Result.ok(
             MCPToolResult(
                 content=(MCPContentItem(type=ContentType.TEXT, text="execute ok"),),
                 is_error=self.is_error,
-                meta={
-                    "action": self.action,
-                    "seed_content": arguments["seed_content"],
-                    "execution_id": execution_id,
-                    "session_id": session_id_override,
-                },
+                meta=meta,
             )
         )
 
@@ -486,7 +498,9 @@ async def test_production_start_surfaces_classify_interrupted_results_as_cancell
         )
     else:
         handler = StartExecuteSeedHandler(
-            execute_handler=_FakeExecuteHandler(is_error=True, action="interrupted"),  # type: ignore[arg-type]
+            execute_handler=_FakeExecuteHandler(
+                is_error=True, status="cancelled", include_action=False
+            ),  # type: ignore[arg-type]
             event_store=store,  # type: ignore[arg-type]
             job_manager=job_manager,  # type: ignore[arg-type]
         )
