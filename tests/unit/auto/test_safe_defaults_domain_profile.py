@@ -194,6 +194,39 @@ def test_profile_dict_value_is_coerced_to_defaultspec() -> None:
     assert outputs_entry.value == "Smallest observable artifact from dict"
 
 
+def test_malformed_profile_dict_default_never_writes_blank_default() -> None:
+    """Malformed profile dict defaults are ignored instead of coercing blanks."""
+    profile = _make_profile(
+        name="test-malformed-dict",
+        safe_defaults={
+            "actors": {"rationale": "Missing value"},
+            "outputs": {"value": "", "rationale": ""},
+        },
+    )
+
+    ledger = _ledger_with_goal_only()
+    finalization = finalize_safe_defaultable_gaps(
+        ledger,
+        goal="Build a local CLI",
+        provenance="test",
+        active_profile=profile,
+    )
+
+    assert "actors" in finalization.defaulted_sections
+    assert "outputs" in finalization.defaulted_sections
+    defaulted_entries = [
+        entry
+        for section in ledger.sections.values()
+        for entry in section.entries
+        if entry.status == LedgerStatus.DEFAULTED
+    ]
+    assert defaulted_entries
+    assert all(entry.value.strip() for entry in defaulted_entries)
+    assert all(entry.rationale.strip() for entry in defaulted_entries)
+    actors_entry = ledger.sections["actors"].entries[-1]
+    assert "primary actor" in actors_entry.value.lower()
+
+
 def test_profile_str_value_is_coerced_to_defaultspec() -> None:
     """A plain string in active_profile.safe_defaults is coerced into _DefaultSpec."""
     profile = _make_profile(
@@ -273,3 +306,40 @@ async def test_interview_driver_persists_profile_resolved_synthesis(
     assert any(
         "protagonist and narrator" in item.get("answer", "") for item in ledger.question_history
     )
+
+
+@pytest.mark.asyncio
+async def test_interview_driver_missing_requested_profile_blocks_safe_defaulting(
+    tmp_path: Path,
+) -> None:
+    """A requested but unregistered profile must not fall back to coding defaults."""
+    answer_calls: list[str] = []
+
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        return InterviewTurn("What should we verify?", "interview_1")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:
+        answer_calls.append(text)
+        return InterviewTurn("What else?", session_id, seed_ready=False)
+
+    state = AutoPipelineState(goal="Draft a local short story outline", cwd=str(tmp_path))
+    state.active_domain_profile_name = "missing-story-profile"
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    driver = AutoInterviewDriver(
+        FunctionInterviewBackend(start, answer),
+        store=AutoStore(tmp_path),
+        max_rounds=1,
+        timeout_seconds=1,
+    )
+
+    result = await driver.run(state, ledger)
+
+    assert result.status == "blocked"
+    assert "missing-story-profile" in (result.blocker or "")
+    assert ledger.open_gaps()
+    assert not any(
+        entry.key.endswith(".safe_default_finalization")
+        for section in ledger.sections.values()
+        for entry in section.entries
+    )
+    assert not any("safe-default synthesis" in text.lower() for text in answer_calls)

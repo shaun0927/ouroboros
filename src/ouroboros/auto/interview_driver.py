@@ -262,18 +262,33 @@ class AutoInterviewDriver:
             self._save(state)
 
         if not ledger.is_seed_ready():
-            _active_profile = (
-                DEFAULT_REGISTRY.get(state.active_domain_profile_name)
-                if state.active_domain_profile_name
-                else None
-            )
-            finalization = finalize_safe_defaultable_gaps(
-                ledger,
-                goal=state.goal,
-                provenance=f"auto interview max rounds {self.max_rounds}",
-                pending_question=state.pending_question,
-                active_profile=_active_profile,
-            )
+            if state.active_domain_profile_name:
+                _active_profile = DEFAULT_REGISTRY.get(state.active_domain_profile_name)
+                if _active_profile is None:
+                    finalization = SafeDefaultFinalization(
+                        (),
+                        tuple(
+                            f"{section}: active domain profile "
+                            f"{state.active_domain_profile_name!r} is not registered"
+                            for section in ledger.open_gaps()
+                        ),
+                    )
+                else:
+                    finalization = finalize_safe_defaultable_gaps(
+                        ledger,
+                        goal=state.goal,
+                        provenance=f"auto interview max rounds {self.max_rounds}",
+                        pending_question=state.pending_question,
+                        active_profile=_active_profile,
+                    )
+            else:
+                finalization = finalize_safe_defaultable_gaps(
+                    ledger,
+                    goal=state.goal,
+                    provenance=f"auto interview max rounds {self.max_rounds}",
+                    pending_question=state.pending_question,
+                    active_profile=None,
+                )
             state.ledger = ledger.to_dict()
             if finalization.completed and ledger.is_seed_ready():
                 synthesis_blocker = await self._record_safe_default_synthesis(

@@ -47,6 +47,10 @@ class SafeDefaultFinalization:
         return None
 
 
+def _is_valid_default_spec(spec: _DefaultSpec) -> bool:
+    return bool(spec.value.strip() and spec.rationale.strip())
+
+
 _SAFE_DEFAULTS: dict[str, _DefaultSpec] = {
     "actors": _DefaultSpec(
         "Assume the primary actor is the user or automation agent described by the goal; "
@@ -169,13 +173,21 @@ def _resolve_spec(
     if active_profile is not None:
         profile_raw = active_profile.safe_defaults.get(section)
         if isinstance(profile_raw, _DefaultSpec):
-            return profile_raw
+            if _is_valid_default_spec(profile_raw):
+                return profile_raw
         if isinstance(profile_raw, dict):
-            return _DefaultSpec(
-                value=profile_raw.get("value", ""),
-                rationale=profile_raw.get("rationale", ""),
-            )
-        if isinstance(profile_raw, str) and profile_raw:
+            value = profile_raw.get("value")
+            rationale = profile_raw.get("rationale")
+            if (
+                isinstance(value, str)
+                and value.strip()
+                and isinstance(rationale, str)
+                and rationale.strip()
+            ):
+                spec = _DefaultSpec(value=value, rationale=rationale)
+                if _is_valid_default_spec(spec):
+                    return spec
+        if isinstance(profile_raw, str) and profile_raw.strip():
             return _DefaultSpec(value=profile_raw, rationale=f"{section} domain default")
     return _SAFE_DEFAULTS.get(section)
 
