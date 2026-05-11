@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -20,7 +21,11 @@ from ouroboros.cli.main import app
 # ---------------------------------------------------------------------------
 
 
-def _make_fake_profile(name: str, detector_score: float = 0.0) -> DomainProfile:
+def _make_fake_profile(
+    name: str,
+    detector_score: float = 0.0,
+    detector: Callable[[Path], float] | None = None,
+) -> DomainProfile:
     """Build a minimal DomainProfile suitable for unit tests."""
 
     class _FakeRepoContextExtractor:
@@ -50,7 +55,7 @@ def _make_fake_profile(name: str, detector_score: float = 0.0) -> DomainProfile:
         intent_classifier=_FakeIntentClassifier(),
         vague_terms=frozenset(),
         safe_defaults={},
-        detector=lambda _cwd: detector_score,
+        detector=detector or (lambda _cwd: detector_score),
     )
 
 
@@ -190,6 +195,47 @@ def test_no_match_leaves_profile_none(tmp_path) -> None:
                         domain=None,
                     )
                 )
+
+    assert result.status == "complete"
+    assert captured["profile_name"] is None
+
+
+def test_detector_exception_leaves_profile_none(tmp_path) -> None:
+    """Detector failures during new-session startup are best-effort no-matches."""
+    captured: dict[str, Any] = {}
+
+    async def _fake_pipeline_run(state):
+        captured["profile_name"] = state.active_domain_profile_name
+        return _FAKE_RESULT
+
+    def _raise_detector(_cwd: Path) -> float:
+        raise OSError("unreadable")
+
+    from ouroboros.cli.commands.auto import _run_auto
+
+    profile = _make_fake_profile("broken-detector", detector=_raise_detector)
+    DEFAULT_REGISTRY.register(profile)
+    try:
+        with patch(
+            "ouroboros.auto.pipeline.AutoPipeline.run",
+            side_effect=_fake_pipeline_run,
+        ):
+            with patch("ouroboros.cli.commands.auto._safe_default_cwd", return_value=tmp_path):
+                result = asyncio.run(
+                    _run_auto(
+                        goal="build something",
+                        resume=None,
+                        runtime=None,
+                        max_interview_rounds=None,
+                        max_repair_rounds=None,
+                        skip_run=True,
+                        domain=None,
+                    )
+                )
+    finally:
+        DEFAULT_REGISTRY._profiles[:] = [
+            p for p in DEFAULT_REGISTRY._profiles if p.name != "broken-detector"
+        ]
 
     assert result.status == "complete"
     assert captured["profile_name"] is None
