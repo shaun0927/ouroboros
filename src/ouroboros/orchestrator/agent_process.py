@@ -297,6 +297,8 @@ class AgentProcessHandle:
         """
         if self._status in _TERMINAL_STATUSES or self.should_cancel():
             return
+        if self.should_pause():
+            return
         self._paused_event.clear()
         self._pause_checkpoint_store = store
         self._pause_checkpoint_reason = reason
