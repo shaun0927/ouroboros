@@ -167,18 +167,28 @@ def _redact_argv(argv: list[str]) -> tuple[list[str], bool]:
     redacted: list[str] = []
     fired = False
     pending_value_redact = False
+    pending_bearer_tail_redact = False
     for token in argv:
+        if pending_bearer_tail_redact:
+            redacted.append(_REDACTED)
+            fired = True
+            pending_bearer_tail_redact = False
+            continue
         if pending_value_redact:
             redacted.append(_REDACTED)
             fired = True
             pending_value_redact = False
+            if token == "Bearer":
+                pending_bearer_tail_redact = True
             continue
         # `--flag=value` form: split on first `=`.
         if token.startswith("-") and "=" in token:
-            flag, _, _ = token.partition("=")
+            flag, _, value = token.partition("=")
             if flag in _SECRET_FLAG_NAMES:
                 redacted.append(f"{flag}={_REDACTED}")
                 fired = True
+                if value == "Bearer":
+                    pending_bearer_tail_redact = True
                 continue
         # Bare flag form: value is the next argv element.
         if token in _SECRET_FLAG_NAMES:
@@ -186,7 +196,10 @@ def _redact_argv(argv: list[str]) -> tuple[list[str], bool]:
             pending_value_redact = True
             continue
         # High-confidence value-shaped match (Bearer …, gh*_…, sk-…,
-        # AKIA…, JWT-shaped).
+        # AKIA…, JWT-shaped).  Split ``Bearer`` auth values are only
+        # treated as secret context when introduced by a known secret flag
+        # above; a standalone literal ``Bearer`` may be ordinary user input
+        # and must not hide subsequent real flags from prompts/audit logs.
         if _is_secret_value(token):
             redacted.append(_REDACTED)
             fired = True
@@ -195,6 +208,10 @@ def _redact_argv(argv: list[str]) -> tuple[list[str], bool]:
     if pending_value_redact:
         # Trailing `--token` with no value: nothing to redact, but the
         # plugin will reject it at parse-time anyway. Emit it as-is.
+        pass
+    if pending_bearer_tail_redact:
+        # Trailing `Bearer` without a credential tail was already
+        # redacted above. Nothing else to consume.
         pass
     return redacted, fired
 
@@ -685,10 +702,11 @@ def invoke_plugin(
 
     # 2. Confirmation gate (locked Q2 — ONE prompt, command-level).
     if command.requires_confirmation:
+        redacted_prompt_argv, _ = _redact_argv(list(argv))
         prompt = (
             f"This command is destructive and requires confirmation.\n"
             f"Plugin: {manifest.name} {manifest.version}\n"
-            f"Action: {command_name} {' '.join(argv)}\n"
+            f"Action: {command_name} {' '.join(redacted_prompt_argv)}\n"
             f"Continue?"
         )
         if not confirm(prompt):
