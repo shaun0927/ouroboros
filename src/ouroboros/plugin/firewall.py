@@ -50,6 +50,7 @@ from ouroboros.plugin.trust_store import TrustRecord
 from ouroboros.plugin.userlevel_registry import RegisteredProgram
 
 SCHEMA_VERSION = "0.1"
+DEFAULT_PLUGIN_INVOCATION_TIMEOUT_SECONDS = 300.0
 
 EventSink = Callable[[dict], None]
 ConfirmFn = Callable[[str], bool]
@@ -815,6 +816,7 @@ def invoke_plugin(
     run_kwargs: dict = {
         "capture_output": True,
         "check": False,
+        "timeout": DEFAULT_PLUGIN_INVOCATION_TIMEOUT_SECONDS,
     }
     if plugin_home is not None:
         run_kwargs["cwd"] = str(plugin_home)
@@ -839,6 +841,39 @@ def invoke_plugin(
         return InvocationResult(
             status="failed",
             exit_code=127,
+            message=message,
+            events=tuple(emitted),
+        )
+    except subprocess.TimeoutExpired as exc:
+        # A plugin command is an external process under the firewall's
+        # control boundary. Bound its lifetime the same way the Auto and
+        # Ralph runtimes bound their agent loops, and always close the
+        # audit sequence with a terminal ``plugin.failed`` event rather
+        # than leaving the caller hung indefinitely.
+        message = (
+            f"entrypoint timed out after "
+            f"{DEFAULT_PLUGIN_INVOCATION_TIMEOUT_SECONDS:g}s: {cmd_argv[0]!r}"
+        )
+        _emit(
+            _event_envelope(
+                event_type="plugin.failed",
+                manifest=manifest,
+                namespace=namespace,
+                command_name=command_name,
+                argv=argv,
+                trust_state=trust_state,
+                result={"status": "failed", "message": message},
+                provenance={
+                    "correlation_id": correlation_id,
+                    "reason": "timeout",
+                    "exception_type": type(exc).__name__,
+                    "timeout_seconds": f"{DEFAULT_PLUGIN_INVOCATION_TIMEOUT_SECONDS:g}",
+                },
+            )
+        )
+        return InvocationResult(
+            status="failed",
+            exit_code=124,
             message=message,
             events=tuple(emitted),
         )

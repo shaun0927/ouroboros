@@ -9,6 +9,7 @@ import subprocess
 import pytest
 
 from ouroboros.plugin.firewall import (
+    DEFAULT_PLUGIN_INVOCATION_TIMEOUT_SECONDS,
     invoke_plugin,
 )
 from ouroboros.plugin.manifest import load_manifest
@@ -1163,3 +1164,72 @@ def test_entrypoint_missing_emits_failed_127(tmp_path: Path) -> None:
     types = [e["event_type"] for e in events]
     assert types == ["plugin.invoked", "plugin.permission_used", "plugin.failed"]
     assert "not found" in result.message.lower()
+
+
+def test_subprocess_invocation_uses_default_timeout(tmp_path: Path) -> None:
+    """The firewall owns the external plugin process boundary, so the
+    subprocess launch must always carry a finite timeout."""
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    observed_kwargs: dict = {}
+
+    def _spy_runner(argv, *args, **kwargs) -> subprocess.CompletedProcess:  # noqa: ARG001
+        observed_kwargs.update(kwargs)
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="ok", stderr="")
+
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=lambda _event: None,
+        correlation_id="corr-timeout-kw",
+        subprocess_runner=_spy_runner,
+    )
+
+    assert result.status == "success"
+    assert observed_kwargs["timeout"] == DEFAULT_PLUGIN_INVOCATION_TIMEOUT_SECONDS
+
+
+def test_subprocess_timeout_emits_terminal_failed_event(tmp_path: Path) -> None:
+    """TimeoutExpired must not escape the firewall or leave the audit
+    sequence without a terminal plugin.failed event."""
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+
+    def _timeout_runner(argv, *args, **kwargs) -> subprocess.CompletedProcess:  # noqa: ARG001
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs["timeout"])
+
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-timeout",
+        subprocess_runner=_timeout_runner,
+    )
+
+    assert result.status == "failed"
+    assert result.exit_code == 124
+    assert "timed out" in result.message
+    assert [event["event_type"] for event in events] == [
+        "plugin.invoked",
+        "plugin.permission_used",
+        "plugin.failed",
+    ]
+    failed = events[-1]
+    assert failed["result"]["status"] == "failed"
+    assert failed["provenance"]["reason"] == "timeout"
+    assert failed["provenance"]["exception_type"] == "TimeoutExpired"
