@@ -742,6 +742,38 @@ async def test_resume_clears_persisted_pause(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_resume_clears_original_pause_store_when_called_with_different_store(
+    tmp_path: Path,
+) -> None:
+    """Resume must clear the store that owns the acknowledged paused marker."""
+    pause_store = CheckpointStore(base_path=tmp_path / "pause")
+    resume_store = CheckpointStore(base_path=tmp_path / "resume")
+    process = AgentProcess(event_store=None)
+    started = asyncio.Event()
+
+    async def work(handle):
+        started.set()
+        while not handle.should_cancel():
+            await handle.wait_unpaused()
+            await asyncio.sleep(0.005)
+
+    handle = await process.spawn(intent="ralph", work_fn=work)
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    await handle.pause(store=pause_store)
+    await _wait_for_status(handle, AgentProcessStatus.PAUSED)
+    assert AgentProcessHandle.load_persisted_pause(handle.process_id, store=pause_store) is True
+
+    await handle.resume(store=resume_store)
+
+    assert AgentProcessHandle.load_persisted_pause(handle.process_id, store=pause_store) is False
+    assert AgentProcessHandle.load_persisted_pause(handle.process_id, store=resume_store) is False
+
+    await handle.cancel(reason="end test")
+    await handle.wait_until_complete(timeout=1.0)
+
+
+@pytest.mark.asyncio
 async def test_repeated_pause_preserves_original_checkpoint_store(tmp_path: Path) -> None:
     """A duplicate pause must not strand the acknowledged pause marker in its first store."""
     first_store = CheckpointStore(base_path=tmp_path / "first")

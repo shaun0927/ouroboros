@@ -327,15 +327,13 @@ class AgentProcessHandle:
 
         # Overwrite any acknowledged paused checkpoint so restart recovery
         # no longer treats this process as paused.
-        checkpoint_store = store if store is not None else self._pause_checkpoint_store
         self._save_lifecycle_checkpoint(
             phase="agent_process_running",
             status="running",
             event_key="resumed_at",
             log_key="resume",
-            store=checkpoint_store,
+            store=self._pause_checkpoint_store,
         )
-        self._pause_checkpoint_store = checkpoint_store
         self._pause_checkpoint_reason = None
         self._pause_checkpoint_requested = False
 
