@@ -375,6 +375,12 @@ class AutoPipelineState:
     last_lateral_approach_summary: str | None = None
     last_lateral_text: str | None = None
     lateral_input_hash: str | None = None
+    # Active domain profile name for this session (#809 P3, PR 5/6).
+    # When set, ``finalize_safe_defaultable_gaps`` will look up this name in
+    # ``DEFAULT_REGISTRY`` and prefer the profile's ``safe_defaults`` over the
+    # hardcoded coding-domain fallback. Defaults to None so legacy state files
+    # load unchanged.
+    active_domain_profile_name: str | None = None
 
     def phase_timeout_seconds(self, phase: AutoPhase) -> float:
         """Return the configured timeout for ``phase`` in seconds.

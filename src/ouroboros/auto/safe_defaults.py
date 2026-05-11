@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
+from typing import TYPE_CHECKING
 import unicodedata
 
 from ouroboros.auto.ledger import (
@@ -12,6 +13,11 @@ from ouroboros.auto.ledger import (
     LedgerStatus,
     SeedDraftLedger,
 )
+
+# Forward reference only — imported lazily to avoid circular imports.
+# Callers that pass ``active_profile`` will have already imported DomainProfile.
+if TYPE_CHECKING:
+    from ouroboros.auto.domain_profile import DomainProfile
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +153,25 @@ _AUTO_ANSWER_PREFIX = AUTO_ANSWER_PREFIX
 _SAFE_DEFAULT_SYNTHESIS_TAG = SAFE_DEFAULT_SYNTHESIS_TAG
 
 
+def _resolve_spec(
+    section: str,
+    active_profile: DomainProfile | None,
+) -> _DefaultSpec | None:
+    """Return the _DefaultSpec for *section*, preferring *active_profile* over the hardcoded dict."""
+    if active_profile is not None:
+        profile_raw = active_profile.safe_defaults.get(section)
+        if isinstance(profile_raw, _DefaultSpec):
+            return profile_raw
+        if isinstance(profile_raw, dict):
+            return _DefaultSpec(
+                value=profile_raw.get("value", ""),
+                rationale=profile_raw.get("rationale", ""),
+            )
+        if isinstance(profile_raw, str) and profile_raw:
+            return _DefaultSpec(value=profile_raw, rationale=f"{section} domain default")
+    return _SAFE_DEFAULTS.get(section)
+
+
 def build_safe_default_synthesis(finalization: SafeDefaultFinalization) -> str:
     """Build a synthesis answer text describing every defaulted section.
 
@@ -187,6 +212,7 @@ def finalize_safe_defaultable_gaps(
     goal: str,
     provenance: str,
     pending_question: str | None = None,
+    active_profile: DomainProfile | None = None,
 ) -> SafeDefaultFinalization:
     """Fill safe-defaultable required gaps with auditable assumptions.
 
@@ -195,6 +221,11 @@ def finalize_safe_defaultable_gaps(
     include unsafe authority, irreversible production actions, payment/billing,
     legal/medical/security-sensitive decisions, or ambiguous external effects.
     Conflicting, blocked, or missing-goal gaps remain hard blockers.
+
+    When *active_profile* is supplied its ``safe_defaults`` dict is consulted
+    first for each section; missing keys fall through to the hardcoded
+    ``_SAFE_DEFAULTS`` dict so the coding-domain fallback always applies when
+    no domain-specific override exists.
     """
     gaps = ledger.open_gaps()
     if not gaps:
@@ -216,7 +247,8 @@ def finalize_safe_defaultable_gaps(
         if unsafe_reason is not None:
             unsafe.append(f"{section}: unsafe default context ({unsafe_reason})")
             continue
-        spec = _SAFE_DEFAULTS.get(section)
+        # Prefer domain-profile override; fall back to hardcoded coding defaults.
+        spec = _resolve_spec(section, active_profile)
         if spec is None:
             unsafe.append(f"{section}: no safe default policy")
             continue
