@@ -270,6 +270,22 @@ def _ambiguity_warning_for_failed_question(
     return ""
 
 
+def _format_interview_failure_event_error(error: Any) -> str:
+    """Return an event-safe error string for interview failure events.
+
+    Provider errors can carry rich machine diagnostics in ``details``.  Those
+    details are intentionally useful for structured callers, but ``str(error)``
+    renders the whole dict and can copy local auth paths (for example
+    ``CODEX_HOME`` / ``HOME``) into persisted interview lifecycle events.
+    Prefer the provider's compact formatter for event text while leaving the
+    original error object untouched for logs and structured callers.
+    """
+    formatter = getattr(error, "format_details", None)
+    if callable(formatter):
+        return formatter()
+    return str(error)
+
+
 def _load_state_ambiguity_score(state: InterviewState) -> AmbiguityScore | None:
     """Rebuild a stored ambiguity snapshot from interview state."""
     if state.ambiguity_score is None:
@@ -1330,12 +1346,13 @@ class InterviewHandler:
                 question_result = await engine.ask_next_question(state)
                 if question_result.is_err:
                     error_msg = str(question_result.error)
+                    event_error_msg = _format_interview_failure_event_error(question_result.error)
                     from ouroboros.events.interview import interview_failed
 
                     self._emit_event_bg(
                         interview_failed(
                             state.interview_id,
-                            error_msg,
+                            event_error_msg,
                             phase="question_generation",
                         )
                     )
@@ -1377,8 +1394,8 @@ class InterviewHandler:
                     # using the persisted ``session_id`` instead of losing
                     # the interview handle (Q00/ouroboros#687).  Truncate
                     # ``error_msg`` to avoid leaking provider internals into
-                    # the user-facing envelope; full details remain in the
-                    # ``interview_failed`` event emitted above.
+                    # the user-facing envelope.  The lifecycle event uses the
+                    # provider's compact formatter for the same boundary.
                     safe_error = error_msg[:200] if error_msg else "unknown error"
                     return Result.ok(
                         MCPToolResult(
@@ -1776,12 +1793,13 @@ class InterviewHandler:
                     question_result = await engine.ask_next_question(state)
                 if question_result.is_err:
                     error_msg = str(question_result.error)
+                    event_error_msg = _format_interview_failure_event_error(question_result.error)
                     from ouroboros.events.interview import interview_failed
 
                     self._emit_event_bg(
                         interview_failed(
                             session_id,
-                            error_msg,
+                            event_error_msg,
                             phase="question_generation",
                         )
                     )
@@ -1882,7 +1900,7 @@ class InterviewHandler:
                 self._emit_event_bg(
                     interview_failed(
                         _interview_id,
-                        str(e),
+                        _format_interview_failure_event_error(e),
                         phase="unexpected_error",
                     )
                 )
