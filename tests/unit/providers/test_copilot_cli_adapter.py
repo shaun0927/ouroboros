@@ -83,6 +83,17 @@ class _FakeProcess:
         self.returncode = self._final_returncode
 
 
+class _FakeLegacyProcess:
+    def __init__(self, *, stdout: str = "", stderr: str = "", returncode: int = 0) -> None:
+        self.stdin = _FakeStdin()
+        self.returncode = returncode
+        self._stdout = stdout.encode("utf-8")
+        self._stderr = stderr.encode("utf-8")
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        return self._stdout, self._stderr
+
+
 class TestPromptBuilding:
     def test_preserves_system_and_roles(self) -> None:
         adapter = CopilotCliLLMAdapter(cli_path="copilot", cwd=os.getcwd())
@@ -583,3 +594,73 @@ class TestRegressionToolEventDoesNotReplaceAssistantContent:
 
         assert result.is_ok
         assert result.value.content == "Final assistant answer."
+
+    @pytest.mark.asyncio
+    async def test_streaming_tool_events_without_completion_return_empty_response_error(
+        self,
+    ) -> None:
+        messages: list[tuple[str, str]] = []
+        adapter = CopilotCliLLMAdapter(
+            cli_path="copilot",
+            cwd=os.getcwd(),
+            on_message=lambda message_type, content: messages.append((message_type, content)),
+        )
+        stdout = "\n".join(
+            [
+                json.dumps({"type": "session.started", "session_id": "sess-tool-only"}),
+                json.dumps({"type": "tool_use", "name": "shell", "command": "cat ~/.ssh/id_rsa"}),
+            ]
+        )
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _FakeProcess:
+            return _FakeProcess(stdout=stdout, returncode=0)
+
+        with patch(
+            "ouroboros.providers.copilot_cli_adapter.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
+        ):
+            result = await adapter.complete(
+                [Message(role=MessageRole.USER, content="Please answer")],
+                CompletionConfig(model="default"),
+            )
+
+        assert result.is_err
+        assert "Empty response from GitHub Copilot CLI" in result.error.message
+        assert result.error.details["session_id"] == "sess-tool-only"
+        assert "cat ~/.ssh/id_rsa" not in result.error.message
+        assert messages == [("tool", "shell")]
+
+    @pytest.mark.asyncio
+    async def test_legacy_tool_events_without_completion_return_empty_response_error(
+        self,
+    ) -> None:
+        messages: list[tuple[str, str]] = []
+        adapter = CopilotCliLLMAdapter(
+            cli_path="copilot",
+            cwd=os.getcwd(),
+            on_message=lambda message_type, content: messages.append((message_type, content)),
+        )
+        stdout = "\n".join(
+            [
+                json.dumps({"type": "session.started", "session_id": "sess-legacy-tool-only"}),
+                json.dumps({"type": "tool_call", "name": "shell", "command": "cat ~/.ssh/id_rsa"}),
+            ]
+        )
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _FakeLegacyProcess:
+            return _FakeLegacyProcess(stdout=stdout, returncode=0)
+
+        with patch(
+            "ouroboros.providers.copilot_cli_adapter.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
+        ):
+            result = await adapter.complete(
+                [Message(role=MessageRole.USER, content="Please answer")],
+                CompletionConfig(model="default"),
+            )
+
+        assert result.is_err
+        assert "Empty response from GitHub Copilot CLI" in result.error.message
+        assert result.error.details["session_id"] == "sess-legacy-tool-only"
+        assert "cat ~/.ssh/id_rsa" not in result.error.message
+        assert messages == [("tool", "shell")]

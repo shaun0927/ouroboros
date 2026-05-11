@@ -416,6 +416,12 @@ class CopilotCliLLMAdapter:
         text = "\n".join(line for line in stdout_lines if line.strip())
         return text or stderr.strip()
 
+    def _plain_text_stdout_fallback(self, stdout_lines: list[str]) -> str:
+        """Use only non-JSON stdout as successful fallback completion content."""
+        return "\n".join(
+            line for line in stdout_lines if line.strip() and self._parse_json_event(line) is None
+        )
+
     # ------------------------------------------------------ stream/process io
 
     async def _iter_stream_lines(
@@ -597,7 +603,7 @@ class CopilotCliLLMAdapter:
             last_content,
         ) = await self._collect_legacy_process_output(process)
 
-        content = last_content or self._fallback_content(stdout_lines, "\n".join(stderr_lines))
+        content = last_content or self._plain_text_stdout_fallback(stdout_lines)
 
         if process.returncode != 0:
             return self._error_from_process(
@@ -715,7 +721,7 @@ class CopilotCliLLMAdapter:
             await self._cancel_tasks(stdout_task, stderr_task)
             raise
 
-        content = last_content or self._fallback_content(stdout_lines, "\n".join(stderr_lines))
+        content = last_content or self._plain_text_stdout_fallback(stdout_lines)
 
         if process.returncode != 0:
             return self._error_from_process(
