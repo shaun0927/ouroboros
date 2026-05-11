@@ -171,8 +171,12 @@ terminal tool error, such as the existing
 adapter envelope, but they still must not emit `Directive.RETRY` without a
 durable retry token. A future MCP retry directive is allowed only if the MCP
 surface first adds persisted retry-pending state that satisfies I4/I5. The
-event target is `target_type="execution"` with `execution_id` from the
-surrounding context.
+event target is either an execution/session/control target explicitly passed
+through the `MCPToolProvider.call_tool(...)` and `_call_with_retry(...)` call
+chain, or a different currently available aggregation target selected by the
+implementation and documented with its resume semantics. The current MCP
+provider path must not assume `execution_id` is already available at the
+terminal adapter decision site.
 
 ### Watchdog timeout mapping
 
@@ -219,13 +223,19 @@ Phase timeouts in `src/ouroboros/auto/pipeline.py` catch `asyncio.TimeoutError`
 and update mutable `AutoPipelineState`. Every auto-pipeline `except
 TimeoutError` branch that marks the state blocked, enforces the pipeline
 deadline, or returns early must emit exactly one source-specific
-`control.directive.emitted` event before the state mutation or immediately
-before the early return. The event target is always `target_type="session"`,
-`target_id=state.auto_session_id`; `extra` should include the current
-`state.phase.value`, the timeout seconds used by the bounded call when
-available, `state.last_tool_name` or the tool name being marked, and any
-phase-specific handle fields needed for resume (`run_handoff_status`,
-`ralph_job_id`, `ralph_lineage_id`, `ralph_dispatch_mode`).
+`control.directive.emitted` event at the timeout decision point. Terminal
+`Directive.CANCEL` branches may emit at the terminal decision before the state
+mutation or immediately before the early return. Non-terminal
+`Directive.RETRY` branches must first persist and commit, or atomically commit
+with the directive emission, the retry-pending state transition that makes the
+retry durable. A non-terminal `RETRY` event must never become durable without
+the corresponding durable retry marker. The event target is always
+`target_type="session"`, `target_id=state.auto_session_id`; `extra` should
+include the current `state.phase.value`, the timeout seconds used by the
+bounded call when available, `state.last_tool_name` or the tool name being
+marked, and any phase-specific handle fields needed for resume
+(`run_handoff_status`, `ralph_job_id`, `ralph_lineage_id`,
+`ralph_dispatch_mode`).
 
 Most auto-pipeline timeout branches are terminal for the current auto attempt:
 interview, seed generation, repair, review, Ralph handoff, Ralph poll,
@@ -234,7 +244,10 @@ or return early. The run-handoff branch is the only currently defined
 auto-pipeline timeout branch with a non-terminal retry directive: first
 `"unknown_timeout"` while no retry has been attempted emits `Directive.RETRY`;
 retried `"unknown_timeout"`, `"unknown_retry_failed"`, or a deadline
-enforcement path emits `Directive.CANCEL`.
+enforcement path emits `Directive.CANCEL`. For the first `auto.run_handoff`
+`RETRY`, the persisted `run_start_attempted`/`run_handoff_status` transition is
+the retry-pending marker and must be durable before, or atomically with,
+`control.directive.emitted`.
 
 ## Invariants
 
@@ -265,7 +278,10 @@ persisted local retry-pending state or token still indicates that the retry is
 pending; if the owning surface has since succeeded or transitioned state, that
 local state supersedes the stale trailing `RETRY` without requiring a success
 directive. The current MCP Phase 1 contract has no such persisted token, so MCP
-does not emit `Directive.RETRY`.
+does not emit `Directive.RETRY`. Producers must preserve the same ordering on
+write: a non-terminal `RETRY` may be appended only after, or in the same atomic
+commit as, the persisted retry-pending state transition that makes it
+actionable on resume.
 
 **I5 — Retry success clears actionability without success spam.** If a
 timed-out operation succeeds on a subsequent attempt, no additional
@@ -279,12 +295,19 @@ retry-pending state, including current MCP Phase 1, must keep internal retry
 attempts out of the directive journal. This keeps the directive journal as a
 decision log, not a full-trace log.
 
+**I6 — Non-terminal retry durability is atomic with its marker.** A
+non-terminal `RETRY` directive and its owning surface's retry-pending marker
+are a single durable resume contract. If the marker cannot be persisted, the
+directive must not be appended. If the directive append succeeds, resume must be
+able to find the corresponding marker and determine whether the retry remains
+pending.
+
 ## Migration plan
 
 Migration is phased to keep blast radius small. Each step is additive and
 independently deployable. No flag day required.
 
-### Phase 1 — MCP tool timeout (smallest blast radius)
+### Phase 1 — MCP tool timeout target plumbing and terminal emission
 
 `MCPTimeoutError` is produced by the manager and consumed within the
 orchestrator layer. No lineage state is touched on this path. Phase 1 emits
@@ -292,17 +315,25 @@ only terminal MCP timeout directives because `_call_with_retry(...)` and
 `Result.err(MCPTimeoutError)` do not persist retry-pending state. Emit one
 terminal `Directive.CANCEL` from the caller-visible terminal decision site when
 the `MAX_RETRIES`/adapter envelope is exhausted and a terminal tool error is
-returned. Requires passing `execution_id` into the emission context; this
-context is already available via the surrounding tool-invocation frame.
+returned. Phase 1 also requires an API/plumbing change for the emission target:
+either pass an execution/session/control target context through
+`MCPToolProvider.call_tool(...)` and `_call_with_retry(...)`, or select a
+different aggregation target that is already available at the terminal decision
+site and document its resume semantics. The current `MCPToolProvider` call path
+must not be treated as if `execution_id` or session context is already
+available at `_call_with_retry(...)`.
 
 ### Phase 2 — Auto handoff timeout
 
 Implement the run-handoff branch first because it already has a bounded retry
 state machine (`run_handoff_status`, `run_start_attempted`, and
 `run_handoff_guidance`) and is the narrowest auto-pipeline change. Add the
-`control.directive.emitted` emission immediately before the existing state
-mutation or early return. `state.auto_session_id` is available throughout the
-pipeline.
+`control.directive.emitted` emission at the existing timeout decision point.
+For the non-terminal first-time `RETRY`, commit the
+`run_start_attempted`/`run_handoff_status` retry-pending transition before, or
+atomically with, the directive append. Terminal `CANCEL` paths may emit at the
+terminal decision or immediately before the early return. `state.auto_session_id`
+is available throughout the pipeline.
 
 ### Phase 2b — Remaining auto-pipeline timeout branches
 
@@ -339,10 +370,11 @@ resilience budget, and record `timeout_kind` only in `extra`.
   pattern are all preserved. The directive emission is observational; it does
   not change how cancellation propagates.
 
-- **Not introducing a ControlBus or reactive consumer.** Reactive consumption
-  of `control.directive.emitted` is explicitly deferred per the
+- **Not adding new ControlBus wiring or a reactive consumer.** Reactive
+  consumption of `control.directive.emitted` is explicitly deferred per the
   "observational-first" stance documented in `src/ouroboros/events/control.py:43`.
-  This RFC adds emission sites only.
+  `control_bus.py` already exists; this RFC adds emission sites only and does
+  not expand ControlBus wiring.
 
 ## Open questions
 
