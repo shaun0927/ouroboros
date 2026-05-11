@@ -654,10 +654,19 @@ class AgentProcess:
                 logger.exception("agent_process.work_failed", extra={"process_id": pid})
                 return
             else:
-                if handle.should_cancel():
-                    await handle._mark_cancelled()
-                else:
-                    await handle._mark_completed(reason="work returned")
+                try:
+                    if handle.should_cancel():
+                        await handle._mark_cancelled()
+                    else:
+                        await handle._mark_completed(reason="work returned")
+                except BaseException as exc:  # noqa: BLE001 — terminal durability failure
+                    await handle._mark_failed(
+                        reason=f"terminal transition failed {type(exc).__name__}: {exc!s}"
+                    )
+                    logger.exception(
+                        "agent_process.terminal_transition_failed",
+                        extra={"process_id": pid},
+                    )
 
         # Spawn but do not await — the caller drives lifecycle through
         # the handle.

@@ -963,6 +963,23 @@ async def test_resume_surfaces_checkpoint_save_error(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_spawned_process_fails_closed_when_terminal_checkpoint_save_fails() -> None:
+    """A terminal durability failure in the runner must not leave waiters hanging."""
+    process = AgentProcess(event_store=None)
+    erroring_store = _ErroringCheckpointStore()
+
+    async def work(handle):
+        await handle.pause(store=erroring_store)
+        return None
+
+    handle = await process.spawn(intent="ralph", work_fn=work)
+
+    final = await handle.wait_until_complete(timeout=1.0)
+
+    assert final is AgentProcessStatus.FAILED
+
+
+@pytest.mark.asyncio
 async def test_terminal_transition_surfaces_checkpoint_save_error(tmp_path: Path) -> None:
     """Terminal cleanup must not silently leave durable pause truth stale."""
     ck_store = _FailingSecondSaveCheckpointStore(base_path=tmp_path)
