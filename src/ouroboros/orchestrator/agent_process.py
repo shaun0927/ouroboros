@@ -53,7 +53,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable
-from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -571,8 +570,12 @@ async def run_with_agent_process[T](
         work_task = handle._work_task
         if work_task is not None and not work_task.done():
             work_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await work_task
+            done, _pending = await asyncio.wait({work_task}, timeout=1.0)
+            for completed in done:
+                try:
+                    await completed
+                except asyncio.CancelledError:
+                    pass
         await handle._mark_cancelled()
         raise
 

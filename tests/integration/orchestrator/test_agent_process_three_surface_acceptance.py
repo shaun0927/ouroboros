@@ -543,3 +543,34 @@ async def test_job_manager_classifies_status_only_cancelled_result_as_cancelled(
         assert snapshot.result_meta["status"] == "cancelled"
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_run_with_agent_process_timeout_does_not_hang_on_stubborn_worker() -> None:
+    store = _FakeEventStore()
+    release = asyncio.Event()
+    swallowed_cancel = asyncio.Event()
+
+    async def _stubborn_work(_handle: Any) -> MCPToolResult:
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            swallowed_cancel.set()
+            await release.wait()
+        return MCPToolResult()
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(
+            run_with_agent_process(
+                event_store=store,
+                intent="stubborn_timeout_surface",
+                work_fn=_stubborn_work,
+                timeout=0.01,
+            ),
+            timeout=2.0,
+        )
+
+    assert swallowed_cancel.is_set()
+    assert _directives(store)[-1] == "cancel"
+    release.set()
+    await asyncio.sleep(0)
