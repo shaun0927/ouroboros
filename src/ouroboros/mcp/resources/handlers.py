@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 import structlog
@@ -23,6 +24,31 @@ from ouroboros.orchestrator.session import SessionRepository, SessionTracker
 from ouroboros.persistence.event_store import EventStore
 
 log = structlog.get_logger(__name__)
+
+_REDACTED = "[redacted]"
+_SECRET_FIELD_NAMES = frozenset(
+    {
+        "api_key",
+        "apikey",
+        "auth_token",
+        "authorization",
+        "bearer_token",
+        "client_secret",
+        "credential",
+        "credentials",
+        "password",
+        "private_key",
+        "secret",
+        "token",
+    }
+)
+_SECRET_FLAG_PATTERN = re.compile(
+    r"(?i)(--(?:api[-_]?key|token|password|secret|private[-_]?key)(?:=|\s+))([^\s,;]+)"
+)
+_BEARER_PATTERN = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
+_HIGH_CONFIDENCE_SECRET_PATTERN = re.compile(
+    r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9][A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{16})\b"
+)
 
 
 @dataclass
@@ -463,10 +489,41 @@ def _event_to_dict(event: Any) -> dict[str, Any]:
         "timestamp": event.timestamp.isoformat() if event.timestamp else None,
         "aggregate_type": event.aggregate_type,
         "aggregate_id": event.aggregate_id,
-        "data": event.data,
+        "data": _redact_event_resource_value(event.data),
         "consensus_id": event.consensus_id,
         "event_version": event.event_version,
     }
+
+
+def _redact_event_resource_value(value: Any, *, key: str | None = None) -> Any:
+    """Project event data through a conservative MCP-resource redaction layer."""
+    if _is_secret_field_name(key):
+        return _REDACTED
+    if isinstance(value, dict):
+        return {
+            item_key: _redact_event_resource_value(item, key=str(item_key))
+            for item_key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_event_resource_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_redact_event_resource_value(item) for item in value]
+    if isinstance(value, str):
+        return _redact_secret_shaped_text(value)
+    return value
+
+
+def _is_secret_field_name(key: str | None) -> bool:
+    if key is None:
+        return False
+    normalized = key.strip().lower().replace("-", "_")
+    return normalized in _SECRET_FIELD_NAMES or normalized.endswith(("_api_key", "_secret"))
+
+
+def _redact_secret_shaped_text(value: str) -> str:
+    redacted = _SECRET_FLAG_PATTERN.sub(lambda match: f"{match.group(1)}{_REDACTED}", value)
+    redacted = _BEARER_PATTERN.sub(f"Bearer {_REDACTED}", redacted)
+    return _HIGH_CONFIDENCE_SECRET_PATTERN.sub(_REDACTED, redacted)
 
 
 def _timestamp_to_string(value: object) -> str:
