@@ -8,10 +8,12 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+from typer.testing import CliRunner
 
 from ouroboros.auto.domain_profile import DEFAULT_REGISTRY, DomainProfile
 from ouroboros.auto.pipeline import AutoPipelineResult
-from ouroboros.auto.state import SeedOrigin
+from ouroboros.auto.state import AutoPipelineState, AutoStore, SeedOrigin
+from ouroboros.cli.main import app
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -60,6 +62,8 @@ _FAKE_RESULT = AutoPipelineResult(
     seed_path=None,
     seed_origin=SeedOrigin.NONE.value,
 )
+
+runner = CliRunner()
 
 
 # ---------------------------------------------------------------------------
@@ -213,3 +217,106 @@ def test_unknown_domain_value_errors(tmp_path) -> None:
                 )
 
     assert exc_info.value.exit_code == 1
+
+
+def test_resume_without_domain_preserves_persisted_profile(tmp_path) -> None:
+    """Resuming without --domain must not re-run detection or overwrite state."""
+    from ouroboros.cli.commands.auto import _run_auto
+
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="build something", cwd=str(tmp_path))
+    state.runtime_backend = "claude"
+    state.active_domain_profile_name = "persisted-domain"
+    store.save(state)
+
+    detectable = _make_fake_profile("detectable-on-resume", detector_score=0.9)
+    captured: dict[str, Any] = {}
+
+    async def _fake_pipeline_run(run_state):
+        captured["profile_name"] = run_state.active_domain_profile_name
+        store.save(run_state)
+        return _FAKE_RESULT
+
+    with (
+        patch("ouroboros.cli.commands.auto.AutoStore", return_value=store),
+        patch.object(DEFAULT_REGISTRY, "detect_best", return_value=detectable) as detect_best,
+        patch(
+            "ouroboros.auto.pipeline.AutoPipeline.run",
+            side_effect=_fake_pipeline_run,
+        ),
+    ):
+        result = asyncio.run(
+            _run_auto(
+                goal=None,
+                resume=state.auto_session_id,
+                runtime=None,
+                max_interview_rounds=None,
+                max_repair_rounds=None,
+                skip_run=True,
+                domain=None,
+            )
+        )
+
+    assert result.status == "complete"
+    assert captured["profile_name"] == "persisted-domain"
+    assert store.load(state.auto_session_id).active_domain_profile_name == "persisted-domain"
+    detect_best.assert_not_called()
+
+
+def test_resume_with_explicit_domain_overrides_persisted_profile(tmp_path) -> None:
+    """Explicit --domain on resume intentionally updates active_domain_profile_name."""
+    from ouroboros.cli.commands.auto import _run_auto
+
+    store = AutoStore(tmp_path)
+    state = AutoPipelineState(goal="build something", cwd=str(tmp_path))
+    state.runtime_backend = "claude"
+    state.active_domain_profile_name = "persisted-domain"
+    store.save(state)
+
+    override = _make_fake_profile("override-domain", detector_score=0.0)
+    captured: dict[str, Any] = {}
+
+    async def _fake_pipeline_run(run_state):
+        captured["profile_name"] = run_state.active_domain_profile_name
+        store.save(run_state)
+        return _FAKE_RESULT
+
+    with (
+        patch("ouroboros.cli.commands.auto.AutoStore", return_value=store),
+        patch.object(DEFAULT_REGISTRY, "get", return_value=override) as get_profile,
+        patch.object(DEFAULT_REGISTRY, "detect_best") as detect_best,
+        patch(
+            "ouroboros.auto.pipeline.AutoPipeline.run",
+            side_effect=_fake_pipeline_run,
+        ),
+    ):
+        result = asyncio.run(
+            _run_auto(
+                goal=None,
+                resume=state.auto_session_id,
+                runtime=None,
+                max_interview_rounds=None,
+                max_repair_rounds=None,
+                skip_run=True,
+                domain="override-domain",
+            )
+        )
+
+    assert result.status == "complete"
+    assert captured["profile_name"] == "override-domain"
+    assert store.load(state.auto_session_id).active_domain_profile_name == "override-domain"
+    get_profile.assert_called_once_with("override-domain")
+    detect_best.assert_not_called()
+
+
+def test_unknown_domain_cli_error_is_not_wrapped(tmp_path) -> None:
+    """typer.Exit from unknown --domain should keep the clean domain error."""
+    with (
+        patch.object(DEFAULT_REGISTRY, "get", return_value=None),
+        patch("ouroboros.cli.commands.auto._safe_default_cwd", return_value=tmp_path),
+    ):
+        result = runner.invoke(app, ["auto", "build something", "--domain", "banana"])
+
+    assert result.exit_code == 1
+    assert "Unknown domain profile: 'banana'" in result.output
+    assert "Auto pipeline failed" not in result.output

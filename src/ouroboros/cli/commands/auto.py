@@ -236,6 +236,8 @@ def auto_command(
                 progress_callback=_make_progress_renderer(quiet=quiet),
             )
         )
+    except typer.Exit:
+        raise
     except Exception as exc:
         print_error(f"Auto pipeline failed: {exc}")
         raise typer.Exit(1) from exc
@@ -372,9 +374,14 @@ async def _run_auto(
                 f"Unknown domain profile: {domain!r}. Register it with DEFAULT_REGISTRY before use."
             )
             raise typer.Exit(1)
-    else:
+        state.active_domain_profile_name = active_profile.name
+    elif not resume:
         active_profile = DEFAULT_REGISTRY.detect_best(Path(state.cwd))
-    state.active_domain_profile_name = active_profile.name if active_profile else None
+        state.active_domain_profile_name = active_profile.name if active_profile else None
+    else:
+        # Resume preserves the session-start profile unless the operator
+        # explicitly passes --domain to intentionally retarget it.
+        pass
 
     if runtime == "opencode":
         opencode_mode = state.opencode_mode or get_opencode_mode()
