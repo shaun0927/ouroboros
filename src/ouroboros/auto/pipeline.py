@@ -890,7 +890,7 @@ class AutoPipeline:
         widget guidance to the operator.
         """
         assert self.ralph_starter is not None  # noqa: S101 - guarded by caller
-        lineage_id = f"ralph-{seed.metadata.seed_id}-{state.auto_session_id[:8]}"
+        lineage_id = state.ralph_lineage_id or f"ralph-{seed.metadata.seed_id}-{state.auto_session_id[:8]}"
         state.ralph_lineage_id = lineage_id
         if state.phase is AutoPhase.RALPH_HANDOFF:
             state.mark_progress(
@@ -1106,6 +1106,17 @@ class AutoPipeline:
 
         if self.ralph_resumer is not None and state.ralph_job_id:
             return await self._poll_ralph_job(state, ledger, review=review)
+
+        if not state.ralph_job_id and state.ralph_lineage_id and self.ralph_starter is not None:
+            seed = Seed.from_dict(state.seed_artifact)
+            return await self._handoff_to_ralph(
+                state,
+                ledger,
+                seed,
+                review,
+                run_subagent=None,
+                reattach_terminal=True,
+            )
 
         handle = state.ralph_job_id or state.ralph_lineage_id
         if handle:

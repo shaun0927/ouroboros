@@ -248,6 +248,45 @@ async def test_resume_ralph_blocker_retries_fresh_handoff_without_terminal_reatt
     assert captured["kwargs"]["reattach_terminal"] is False
 
 
+@pytest.mark.asyncio
+async def test_resume_ralph_lineage_gap_reattaches_via_starter(tmp_path) -> None:
+    state = _state_at_run_phase(tmp_path)
+    state.complete_product = True
+    state.transition(AutoPhase.RALPH_HANDOFF, "checkpointed lineage before job id")
+    state.ralph_lineage_id = "ralph-seed_test_001-gap"
+    state.ralph_job_id = None
+    state.ralph_dispatch_mode = "job"
+
+    captured: dict[str, Any] = {}
+
+    async def ralph_starter(_seed: Seed, **kwargs: Any) -> dict[str, Any]:
+        captured["kwargs"] = kwargs
+        return {
+            "job_id": "job_ralph_gap_existing",
+            "lineage_id": kwargs["lineage_id"],
+            "dispatch_mode": "job",
+            "terminal_status": "completed",
+            "stop_reason": "qa passed",
+        }
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert state.phase is AutoPhase.COMPLETE
+    assert state.ralph_job_id == "job_ralph_gap_existing"
+    assert captured["kwargs"]["lineage_id"] == "ralph-seed_test_001-gap"
+    assert captured["kwargs"]["reattach_terminal"] is True
+
+
 # ---------------------------------------------------------------------------
 # Happy path — ralph completes ⇒ auto state COMPLETE
 # ---------------------------------------------------------------------------
