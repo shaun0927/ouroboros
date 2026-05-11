@@ -25,6 +25,7 @@ from ouroboros.persistence.event_store import EventStore
 #: hardcoding the string.
 WATCHDOG_CANCELLATION_MODE: Final[str] = "cooperative_direct_one_stage"
 
+
 class GenerationWatchdogTimeout(OuroborosError):
     """Raised when a generation watchdog threshold is exceeded."""
 
