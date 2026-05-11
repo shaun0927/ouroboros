@@ -16,7 +16,7 @@ second built-in profile.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -107,7 +107,7 @@ class RepoContextExtractor(Protocol):
         ...
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class DomainProfile:
     """An immutable profile that describes how a domain verifies AC.
 
@@ -147,8 +147,24 @@ class DomainProfile:
     safe_defaults: Mapping[str, Any]
     detector: Callable[[Path], float]
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "safe_defaults", _freeze_safe_defaults(self.safe_defaults))
+    def __init__(
+        self,
+        *,
+        name: str,
+        repo_context_extractor: RepoContextExtractor,
+        verifiable_predicates: Iterable[VerifiablePredicate],
+        intent_classifier: IntentClassifier,
+        vague_terms: Iterable[str],
+        safe_defaults: Mapping[str, Any],
+        detector: Callable[[Path], float],
+    ) -> None:
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "repo_context_extractor", repo_context_extractor)
+        object.__setattr__(self, "verifiable_predicates", tuple(verifiable_predicates))
+        object.__setattr__(self, "intent_classifier", intent_classifier)
+        object.__setattr__(self, "vague_terms", frozenset(vague_terms))
+        object.__setattr__(self, "safe_defaults", _freeze_safe_defaults(safe_defaults))
+        object.__setattr__(self, "detector", detector)
 
     def find_verifiable_predicate(self, criterion: str) -> VerifiablePredicate | None:
         """Return the first predicate whose ``matches`` returns True, or None."""

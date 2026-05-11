@@ -7,7 +7,7 @@ imported; every fixture is a minimal inline stub.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from typing import Any
@@ -66,7 +66,7 @@ class _SimpleExtractor:
 def _make_profile(
     name: str = "coding",
     confidence: float = 0.8,
-    predicates: tuple[VerifiablePredicate, ...] = (),
+    predicates: Iterable[VerifiablePredicate] = (),
     safe_defaults: Mapping[str, Any] | None = None,
 ) -> DomainProfile:
     return DomainProfile(
@@ -151,6 +151,47 @@ def test_domain_profile_safe_defaults_are_deeply_frozen() -> None:
     source_defaults["runtime_context"]["commands"].append("ruff")
     assert runtime_context["summary"] == "existing project"
     assert runtime_context["commands"] == ("pytest",)
+
+
+def test_domain_profile_coerces_predicate_inputs_to_immutable_tuple() -> None:
+    registry = DomainProfileRegistry()
+    exit_pred = _ExitCodePredicate()
+    contrast_pred = _ContrastPredicate()
+    source_predicates: list[VerifiablePredicate] = [exit_pred]
+    profile = _make_profile(predicates=source_predicates)
+    registry.register(profile)
+
+    source_predicates.clear()
+    source_predicates.append(contrast_pred)
+
+    registered = registry.get("coding")
+    assert registered is profile
+    assert registered.verifiable_predicates == (exit_pred,)
+    assert registered.find_verifiable_predicate("command exits 0") is exit_pred
+    assert registered.find_verifiable_predicate("color contrast check") is None
+
+
+def test_domain_profile_coerces_vague_terms_to_immutable_frozenset() -> None:
+    registry = DomainProfileRegistry()
+    source_vague_terms = {"easy", "clean"}
+    profile = DomainProfile(
+        name="coding",
+        repo_context_extractor=_SimpleExtractor(),
+        verifiable_predicates=(),
+        intent_classifier=_SimpleClassifier(),
+        vague_terms=source_vague_terms,
+        safe_defaults={},
+        detector=lambda _cwd: 0.8,
+    )
+    registry.register(profile)
+
+    source_vague_terms.clear()
+    source_vague_terms.add("later")
+
+    registered = registry.get("coding")
+    assert registered is profile
+    assert registered.vague_terms == frozenset({"easy", "clean"})
+    assert "later" not in registered.vague_terms
 
 
 def test_find_verifiable_predicate_returns_first_match() -> None:
