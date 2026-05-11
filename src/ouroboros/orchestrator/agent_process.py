@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -258,6 +259,7 @@ class AgentProcessHandle:
     _completed_event: asyncio.Event = field(default_factory=asyncio.Event)
     _cancel_reason: str = "cancel requested"
     _emit_directive: Callable[[Directive, str, AgentProcessStatus], Awaitable[None]] | None = None
+    _work_task: asyncio.Task[None] | None = None
 
     def __post_init__(self) -> None:
         # The paused-event is "set" when the loop is *not* paused so a
@@ -482,7 +484,7 @@ class AgentProcess:
 
         # Spawn but do not await — the caller drives lifecycle through
         # the handle.
-        asyncio.create_task(_runner(), name=f"agent_process:{pid}")
+        handle._work_task = asyncio.create_task(_runner(), name=f"agent_process:{pid}")
         return handle
 
     def _make_emitter(
@@ -554,6 +556,11 @@ async def run_with_agent_process[T](
         final_status = await handle.wait_until_complete(timeout=timeout)
     except asyncio.CancelledError:
         await handle.cancel(reason="cancelled by job runner")
+        work_task = handle._work_task
+        if work_task is not None and not work_task.done():
+            work_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await work_task
         await handle._mark_cancelled()
         raise
 
@@ -561,7 +568,10 @@ async def run_with_agent_process[T](
         raise asyncio.CancelledError(f"{intent} cancelled")
     if final_status is AgentProcessStatus.FAILED:
         if error_box:
-            raise RuntimeError(f"{intent} failed") from error_box[0]
+            exc = error_box[0]
+            if isinstance(exc, Exception):
+                raise exc
+            raise RuntimeError(f"{intent} failed") from exc
         raise RuntimeError(f"{intent} failed")
     if not result_box:
         raise RuntimeError(f"{intent} completed without a result")

@@ -27,6 +27,7 @@ from ouroboros.mcp.tools.evolution_handlers import StartEvolveStepHandler
 from ouroboros.mcp.tools.execution_handlers import StartExecuteSeedHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
+from ouroboros.orchestrator.agent_process import run_with_agent_process
 
 
 class _FakeEventStore:
@@ -136,10 +137,15 @@ class _FakeEvolveHandler:
 class _BlockingEvolveHandler:
     def __init__(self) -> None:
         self.started = asyncio.Event()
+        self.cancelled = False
 
     async def handle(self, arguments: dict[str, Any]):  # noqa: ARG002 - protocol fixture
         self.started.set()
-        await asyncio.sleep(60)
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
         return Result.ok(MCPToolResult())
 
 
@@ -175,6 +181,7 @@ class _BlockingExecuteHandler:
 
     def __init__(self) -> None:
         self.started = asyncio.Event()
+        self.cancelled = False
 
     async def handle(
         self,
@@ -185,7 +192,11 @@ class _BlockingExecuteHandler:
         synchronous: bool = False,  # noqa: ARG002 - protocol fixture
     ):
         self.started.set()
-        await asyncio.sleep(60)
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
         return Result.ok(MCPToolResult())
 
 
@@ -271,6 +282,7 @@ async def test_production_start_surfaces_emit_cancel_when_job_runner_is_cancelle
         )
         result = await handler.handle({"lineage_id": "lin_cancel", "seed_content": "goal: test"})
         await asyncio.wait_for(blocking.started.wait(), timeout=2.0)
+        blocking_handler = blocking
     elif surface == "ralph":
         blocking = _BlockingEvolveHandler()
         handler = RalphHandler(
@@ -288,6 +300,7 @@ async def test_production_start_surfaces_emit_cancel_when_job_runner_is_cancelle
             }
         )
         await asyncio.wait_for(blocking.started.wait(), timeout=2.0)
+        blocking_handler = blocking
     else:
         blocking = _BlockingExecuteHandler()
         handler = StartExecuteSeedHandler(
@@ -297,6 +310,7 @@ async def test_production_start_surfaces_emit_cancel_when_job_runner_is_cancelle
         )
         result = await handler.handle({"seed_content": "goal: test"})
         await asyncio.wait_for(blocking.started.wait(), timeout=2.0)
+        blocking_handler = blocking
 
     assert result.is_ok, surface
     await job_manager.cancel_runner()
@@ -305,3 +319,23 @@ async def test_production_start_surfaces_emit_cancel_when_job_runner_is_cancelle
     assert directives[0] == "continue", surface
     assert directives[-1] == "cancel", surface
     assert _directive_intents(store)[-1] == expected_intent
+    assert blocking_handler.cancelled is True
+
+
+@pytest.mark.asyncio
+async def test_run_with_agent_process_preserves_original_failure_message() -> None:
+    store = _FakeEventStore()
+
+    async def _failing_work(_handle: Any) -> MCPToolResult:
+        raise RuntimeError("evolve_step exploded with actionable detail")
+
+    with pytest.raises(RuntimeError, match="actionable detail"):
+        await run_with_agent_process(
+            event_store=store,
+            intent="evolve_step",
+            work_fn=_failing_work,
+        )
+
+    directives = _directives(store)
+    assert directives[0] == "continue"
+    assert directives[-1] == "cancel"
