@@ -224,6 +224,19 @@ def _milestone_for_score(score: AmbiguityScore | None) -> str | None:
     return milestone.value
 
 
+def _compute_transcript_chars(state: InterviewState) -> int:
+    """Sum question + user_response length over every round in ``state``.
+
+    Used by the response-shape diagnostic event (Q00/ouroboros#831) so we
+    can correlate hang reports with cumulative interview context size.
+    """
+    total = 0
+    for round_data in state.rounds:
+        total += len(round_data.question or "")
+        total += len(round_data.user_response or "")
+    return total
+
+
 def _format_question_with_ambiguity(question: str, score: AmbiguityScore | None) -> str:
     """Attach the current ambiguity score to a question for display.
 
@@ -1478,24 +1491,40 @@ class InterviewHandler:
                     ),
                 }
                 if is_length_guard:
-                    # Q00/ouroboros#831: surface the length-guard meta-directive
-                    # via structured meta keys so clients can branch on
-                    # ``meta.reason`` instead of mis-routing the text body to a
-                    # human via AskUserQuestion.  ``is_error`` is intentionally
-                    # left ``False`` -- the wire success/failure axis must not
-                    # flip or ``HandlerInterviewBackend.start`` (auto driver)
-                    # would raise on every oversized ``initial_context`` where
-                    # it previously delivered the summarize question.
+                    # Q00/ouroboros#831 (Direction A): surface the length-guard
+                    # meta-directive via structured meta keys so clients can
+                    # branch on ``meta.reason`` instead of mis-routing the text
+                    # body to a human via AskUserQuestion.  ``is_error`` is
+                    # intentionally left ``False`` -- the wire success/failure
+                    # axis must not flip or ``HandlerInterviewBackend.start``
+                    # would raise on every oversized ``initial_context``.
                     start_meta.update(_length_guard_meta_fields())
+
+                start_response_text = (
+                    f"Interview started. Session ID: {state.interview_id}\n\n{display_question}"
+                )
+                # Q00/ouroboros#831 (diagnostics): capture the shape of every
+                # MCP question-bearing response so future hang reports can be
+                # correlated with response size / transcript pressure.
+                from ouroboros.events.interview import interview_response_emitted
+
+                self._emit_event_bg(
+                    interview_response_emitted(
+                        state.interview_id,
+                        response_kind="start",
+                        round_number=len(state.rounds),
+                        payload_chars=len(start_response_text),
+                        transcript_chars=_compute_transcript_chars(state),
+                        ambiguity_prefix_present=display_question.startswith("(ambiguity:"),
+                        is_length_guard=is_length_guard,
+                    )
+                )
                 return Result.ok(
                     MCPToolResult(
                         content=(
                             MCPContentItem(
                                 type=ContentType.TEXT,
-                                text=(
-                                    f"Interview started. Session ID: {state.interview_id}\n\n"
-                                    f"{display_question}"
-                                ),
+                                text=start_response_text,
                             ),
                         ),
                         is_error=False,
@@ -1540,18 +1569,35 @@ class InterviewHandler:
                         ),
                     }
                     if resume_is_length_guard:
-                        # Q00/ouroboros#831: structured signal when resuming
-                        # an interview whose pending round is the length-guard
-                        # meta-directive.  ``is_error`` stays ``False`` so
-                        # callers like the auto driver do not treat the
+                        # Q00/ouroboros#831 (Direction A): structured signal
+                        # when resuming an interview whose pending round is
+                        # the length-guard meta-directive.  ``is_error`` stays
+                        # ``False`` so the auto driver does not treat the
                         # summarize prompt as a hard failure.
                         resume_meta.update(_length_guard_meta_fields())
+
+                    resume_response_text = f"Session {session_id}\n\n{display_question}"
+                    # Q00/ouroboros#831 (diagnostics): response-shape event for
+                    # the resume-pending branch.  Pure observability.
+                    from ouroboros.events.interview import interview_response_emitted
+
+                    self._emit_event_bg(
+                        interview_response_emitted(
+                            session_id,
+                            response_kind="resume_pending",
+                            round_number=len(state.rounds),
+                            payload_chars=len(resume_response_text),
+                            transcript_chars=_compute_transcript_chars(state),
+                            ambiguity_prefix_present=display_question.startswith("(ambiguity:"),
+                            is_length_guard=resume_is_length_guard,
+                        )
+                    )
                     return Result.ok(
                         MCPToolResult(
                             content=(
                                 MCPContentItem(
                                     type=ContentType.TEXT,
-                                    text=f"Session {session_id}\n\n{display_question}",
+                                    text=resume_response_text,
                                 ),
                             ),
                             is_error=False,
@@ -1911,19 +1957,34 @@ class InterviewHandler:
                     ),
                 }
                 if answer_is_length_guard:
-                    # Q00/ouroboros#831: structured signal when the next
-                    # question after an answer is again the length-guard
-                    # meta-directive (the post-answer scoring path may still
-                    # require the user to summarize before continuing).
-                    # ``is_error`` stays ``False`` so the auto driver's
-                    # ``answer()`` path is not raised on.
+                    # Q00/ouroboros#831 (Direction A): structured signal when
+                    # the next question after an answer is again the length-
+                    # guard meta-directive.  ``is_error`` stays ``False`` so
+                    # the auto driver's ``answer()`` path is not raised on.
                     answer_meta.update(_length_guard_meta_fields())
+
+                answer_response_text = f"Session {session_id}\n\n{display_question}"
+                # Q00/ouroboros#831 (diagnostics): response-shape event for
+                # the answer branch.  Pure observability.
+                from ouroboros.events.interview import interview_response_emitted
+
+                self._emit_event_bg(
+                    interview_response_emitted(
+                        session_id,
+                        response_kind="answer",
+                        round_number=len(state.rounds),
+                        payload_chars=len(answer_response_text),
+                        transcript_chars=_compute_transcript_chars(state),
+                        ambiguity_prefix_present=display_question.startswith("(ambiguity:"),
+                        is_length_guard=answer_is_length_guard,
+                    )
+                )
                 return Result.ok(
                     MCPToolResult(
                         content=(
                             MCPContentItem(
                                 type=ContentType.TEXT,
-                                text=f"Session {session_id}\n\n{display_question}",
+                                text=answer_response_text,
                             ),
                         ),
                         is_error=False,
