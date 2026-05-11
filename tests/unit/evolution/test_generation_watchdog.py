@@ -15,6 +15,7 @@ from ouroboros.config.models import RuntimeControlsConfig
 from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
 from ouroboros.events.lineage import lineage_generation_failed
+from ouroboros.evolution.loop import EvolutionaryLoop, StepAction
 import ouroboros.evolution.watchdog as watchdog_module
 from ouroboros.evolution.watchdog import (
     GenerationProgressWatchdog,
@@ -444,6 +445,93 @@ async def test_late_discovered_session_starts_from_attempt_baseline() -> None:
     assert watchdog._last_event_type == "workflow.progress.updated"
     assert session_id in watchdog._session_cursors
     assert watchdog._session_cursors[session_id] >= watchdog._attempt_start_cursor
+
+
+@pytest.mark.asyncio
+async def test_watchdog_decision_survives_for_resume() -> None:
+    """Watchdog cancellation persists its decision on the EventStore.
+
+    A resumer that creates a fresh watchdog on the same lineage_id reads the
+    trailing ``lineage.generation.watchdog_decision`` and
+    ``control.directive.emitted`` events via replay.  The evolution loop maps
+    watchdog timeouts to ``StepAction.FAILED``, whose default recovery
+    directive is retry.
+    """
+    event_store = await _store()
+    lineage_id = "lin-resume-contract"
+    generation_number = 1
+    execution_id = "exec-resume-contract"
+
+    # --- First attempt: watchdog times out due to no material progress ---
+    first_watchdog = _watchdog(
+        event_store,
+        lineage_id=lineage_id,
+        generation_number=generation_number,
+        execution_id=execution_id,
+        generation_no_progress_timeout_seconds=0.05,
+        generation_idle_timeout_seconds=0,
+    )
+
+    async def busy_no_progress() -> str:
+        await event_store.append(_workflow_progress(execution_id, completed_count=0))
+        try:
+            while True:
+                await asyncio.sleep(0.02)
+                await event_store.append(_workflow_progress(execution_id, completed_count=0))
+        except asyncio.CancelledError:
+            raise
+
+    with pytest.raises(GenerationWatchdogTimeout) as exc_info:
+        await first_watchdog.watch(busy_no_progress())
+
+    assert exc_info.value.timeout_kind == "no_material_progress_timeout"
+
+    # Simulate the production evolution-loop branch for watchdog timeouts:
+    # GenerationWatchdogTimeout is surfaced as StepAction.FAILED, not STAGNATED.
+    loop = EvolutionaryLoop(event_store=event_store)
+    await loop._emit_step_directive(
+        StepAction.FAILED,
+        lineage_id=lineage_id,
+        generation_number=generation_number,
+        phase="executing",
+        reason=exc_info.value.message,
+    )
+
+    # --- Drop the first watchdog; create a fresh instance on the same store ---
+    del first_watchdog
+    _fresh_watchdog = _watchdog(
+        event_store,
+        lineage_id=lineage_id,
+        generation_number=generation_number,
+        execution_id=execution_id,
+    )
+    assert not _fresh_watchdog._baseline_initialized
+
+    # --- Replay from the resumer's perspective ---
+    events = await event_store.replay("lineage", lineage_id)
+    event_types = [e.type for e in events]
+
+    assert "lineage.generation.watchdog_decision" in event_types, (
+        "watchdog_decision must survive cancellation for a resumer to act on it"
+    )
+    assert "control.directive.emitted" in event_types, (
+        "directive event must be present in the lineage replay for a resumer"
+    )
+
+    decision_event = next(e for e in events if e.type == "lineage.generation.watchdog_decision")
+    directive_event = next(e for e in events if e.type == "control.directive.emitted")
+
+    assert directive_event.data["directive"] == "retry", (
+        "watchdog timeouts are StepAction.FAILED and default to retry"
+    )
+    assert directive_event.data["emitted_by"] == "evolver"
+    assert directive_event.data["phase"] == "executing"
+    assert directive_event.data["extra"] == {
+        "step_action": "failed",
+        "is_terminal": False,
+    }
+    assert decision_event.data["generation_number"] == generation_number
+    assert directive_event.data["generation_number"] == generation_number
 
 
 @pytest.mark.asyncio

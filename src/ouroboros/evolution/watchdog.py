@@ -37,7 +37,24 @@ class GenerationWatchdogTimeout(OuroborosError):
 
 @dataclass(slots=True)
 class GenerationProgressWatchdog:
-    """Watch EventStore activity and material progress for one generation."""
+    """Watch EventStore activity and material progress for one generation.
+
+    Resume contract
+    ---------------
+    The EventStore is the recovery substrate. When ``watch()`` raises
+    ``GenerationWatchdogTimeout``, the cancelled task is gone but every event
+    from that attempt — including the trailing ``lineage.generation.watchdog_decision``
+    and the ``control.directive.emitted`` written by the evolution loop — remains
+    durably persisted.  The production loop treats
+    ``GenerationWatchdogTimeout`` as ``StepAction.FAILED``; replay consumers
+    read the trailing directive via ``event_store.replay("lineage", lineage_id)``.
+    Because the watchdog timeout path does not currently pass a real
+    ``retry_budget_remaining`` value, that directive follows the default
+    ``StepAction.FAILED`` mapping to ``Directive.RETRY``.
+    The watchdog itself is stateless across attempts: each new instance starts
+    fresh ``initialize_baseline()`` cursors, so stale events from the previous
+    attempt are not double-counted as activity or material progress.
+    """
 
     event_store: EventStore
     lineage_id: str
