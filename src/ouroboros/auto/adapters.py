@@ -6,7 +6,6 @@ import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-import re
 from typing import Any
 
 import yaml
@@ -23,7 +22,14 @@ from ouroboros.mcp.tools.ralph_handlers import RalphHandler
 from ouroboros.mcp.types import MCPToolResult
 from ouroboros.resilience.lateral import ThinkingPersona
 
-_SAFE_SEED_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
+_SAFE_SEED_ID_FILENAME_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+)
+_WINDOWS_RESERVED_FILENAME_STEMS = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{index}" for index in range(1, 10)}
+    | {f"LPT{index}" for index in range(1, 10)}
+)
 
 
 class HandlerError(RuntimeError):
@@ -610,12 +616,26 @@ def save_seed(seed: Seed, *, seeds_dir: Path | None = None) -> str:
 
 
 def _safe_seed_id_for_filename(seed_id: str) -> str:
-    """Return a seed id that is safe to interpolate into a filename."""
-    candidate = seed_id.strip()
-    if not candidate or not _SAFE_SEED_ID_PATTERN.fullmatch(candidate):
-        msg = f"Seed id is not safe for persistence filename: {seed_id!r}"
-        raise HandlerError(msg)
-    return candidate
+    """Return a filesystem-safe filename stem for a Seed id.
+
+    Seed ids are semantic identifiers, not a filesystem trust boundary.  Keep
+    common generated ids readable, but percent-encode every other UTF-8 byte so
+    traversal separators, whitespace, dots, and path-sensitive characters cannot
+    become path syntax while the persisted Seed metadata remains intact.
+    """
+    if seed_id == "":
+        return "%EMPTY%"
+    parts: list[str] = []
+    for char in seed_id:
+        if char in _SAFE_SEED_ID_FILENAME_CHARS:
+            parts.append(char)
+        else:
+            parts.extend(f"%{byte:02X}" for byte in char.encode("utf-8"))
+    stem = "".join(parts)
+    if stem.upper() in _WINDOWS_RESERVED_FILENAME_STEMS:
+        first_byte = stem[0].encode("utf-8")[0]
+        stem = f"%{first_byte:02X}{stem[1:]}"
+    return stem
 
 
 def _require_path_inside_directory(path: Path, directory: Path) -> None:
