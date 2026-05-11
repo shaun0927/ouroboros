@@ -325,6 +325,18 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    - Short PATH 2 answers (e.g., "Yes" / single proper noun) with no
      reasoning attached
 
+   **Exception — Restate corrections never skip Refine, regardless of length.**
+   Any free-text follow-up collected by the Step 9 Restate gate
+   ("Adjust wording" / "Missing scope") must go through Refine before being
+   forwarded to MCP. Even a short correction like
+   `"Exclude retry scheduling from the seed."` carries scope/boundary
+   information that MCP needs in structured form during the reopen call, so
+   the short-PATH-2 exemption above does NOT apply to Restate corrections.
+   A single-line Restate correction that bypasses Refine would forward
+   `[from-user]` instead of `[from-user][refined]` and would not trigger the
+   `last_question` reopen, leaving MCP on stale pre-correction state when
+   the seed is generated.
+
    Refine-passed answers count as direct user judgment — they reset the
    Dialectic Rhythm Guard counter to 0 (see below).
 
@@ -425,8 +437,13 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
 
    Treat the follow-up text as a real interview correction, not a local-only
    wording tweak. Route the follow-up text through the Refine gate before
-   forwarding it: build the same structured multi-section payload from Step 3
-   using the canonical five-section schema —
+   forwarding it. **The Step 4 short-PATH-2 skip rule does NOT apply here,
+   even if the correction is a single sentence** — a bare reply like
+   `"Exclude retry scheduling from the seed."` still encodes a boundary
+   decision that must reach MCP as `[from-user][refined]` with the reopen
+   `last_question`; sending it as `[from-user]` would leave MCP on the stale
+   pre-correction state. Then build the same structured multi-section
+   payload from Step 3 using the canonical five-section schema —
    - **Decision**: the corrected one-line goal verbatim.
    - **Reasoning**: why the wording/scope changed (carry over the user's
      correction text, do not paraphrase).
