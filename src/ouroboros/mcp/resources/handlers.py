@@ -528,13 +528,14 @@ def _is_secret_field_name(key: str | None) -> bool:
     secret_terminal_parts = {
         "credential",
         "credentials",
-        "key",
         "password",
         "secret",
         "token",
     }
-    return normalized in _SECRET_FIELD_NAMES or (
-        bool(field_parts) and field_parts[-1] in secret_terminal_parts
+    return (
+        normalized in _SECRET_FIELD_NAMES
+        or normalized.endswith(("_api_key", "_private_key"))
+        or (bool(field_parts) and field_parts[-1] in secret_terminal_parts)
     )
 
 

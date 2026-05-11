@@ -450,6 +450,7 @@ async def test_events_handler_redacts_secret_shaped_resource_payloads(tmp_path: 
                 "github_token": "opaque-github-token-value",
                 "db_password": "opaque-db-password-value",
                 "google_preview": "key=AIzaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "idempotency_key": "event-correlation-key-123",
                 "safe_count": 3,
             },
         )
@@ -482,6 +483,7 @@ async def test_events_handler_redacts_secret_shaped_resource_payloads(tmp_path: 
     assert data["github_token"] == "[redacted]"
     assert data["db_password"] == "[redacted]"
     assert data["google_preview"] == "key=[redacted]"
+    assert data["idempotency_key"] == "event-correlation-key-123"
     assert data["safe_count"] == 3
 
     await store.close()
