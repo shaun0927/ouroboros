@@ -422,7 +422,12 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    ```
 
    Treat the follow-up text as a real interview correction, not a local-only
-   wording tweak. Send it back to MCP as a structured restate correction with
+   wording tweak. Route the follow-up text through the Refine gate before
+   forwarding it: build the same structured multi-section payload from Step 3
+   with `answer_summary` describing the corrected one-line goal, `reasoning`
+   preserving why the wording/scope changed, and `constraints`, `out_of_scope`,
+   or `open_questions` populated from the user's correction where applicable.
+   Send that structured restate correction back to MCP with
    `[from-user][refined]`, preserving the corrected goal line and the user's
    stated wording or missing scope. Then return to Step 7 so MCP can update its
    interview state and the Seed-ready Acceptance Guard can run again against the
@@ -559,7 +564,11 @@ MCP signals seed-ready; Acceptance Guard passes
 → User: "Missing scope"
 → Follow-up asks for exact missing scope
 → User: "Exclude retry scheduling from the seed."
+→ Refine gate structures the restate correction
 → [from-user][refined] restate correction sent to MCP; return to Step 7/Seed-ready guard
+→ MCP signals seed-ready again; Acceptance Guard still passes
+→ Restate again: "Add Stripe payments with charges, webhooks, refunds, failed-payment rollback, and no retry scheduling."
+→ User: "Yes, generate seed"
 
 📍 Next: `ooo seed` to crystallize these requirements into a specification
 ```
