@@ -8,13 +8,18 @@ exactly once.
 
 from __future__ import annotations
 
-# coding profile lands in PR-2 (#809 P3, PR 2/6); import conditionally
-# so this package remains importable before that PR merges.
-try:
-    from .coding import CODING_PROFILE  # noqa: F401
-except ImportError:
-    CODING_PROFILE = None  # type: ignore[assignment]
+from importlib import import_module
+from importlib.util import find_spec
+from typing import Any
 
-from .research import RESEARCH_PROFILE  # noqa: F401
+# coding profile lands in PR-2 (#809 P3, PR 2/6); import conditionally
+# so this package remains importable before that PR merges.  Check for module
+# absence before import so ImportError raised inside an existing coding profile
+# still propagates instead of being mistaken for an optional missing module.
+CODING_PROFILE: Any = None
+if find_spec(f"{__name__}.coding") is not None:
+    CODING_PROFILE = import_module(f"{__name__}.coding").CODING_PROFILE
+
+from .research import RESEARCH_PROFILE  # noqa: E402,F401
 
 __all__ = ["CODING_PROFILE", "RESEARCH_PROFILE"]

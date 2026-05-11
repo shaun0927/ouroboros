@@ -14,7 +14,6 @@ from typing import Any
 import pytest
 
 from ouroboros.auto.domain_profile import (
-    DEFAULT_REGISTRY,
     DomainProfile,
     DomainProfileRegistry,
     IntentClassifier,
@@ -218,8 +217,7 @@ def test_registry_union_predicates_applies_threshold() -> None:
     assert "wcag_contrast" not in codes
 
 
-def test_default_registry_starts_empty() -> None:
-    # DEFAULT_REGISTRY is a module-level singleton; PR-2 registers coding here.
-    # At this point (PR-1) it must be empty.
-    assert DEFAULT_REGISTRY.all() == ()
-    assert DEFAULT_REGISTRY.detect_best(Path("/tmp")) is None
+def test_new_registry_starts_empty() -> None:
+    registry = DomainProfileRegistry()
+    assert registry.all() == ()
+    assert registry.detect_best(Path("/tmp")) is None
