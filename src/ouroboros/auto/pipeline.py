@@ -11,7 +11,9 @@ import time
 from typing import Any, Protocol
 
 from ouroboros.auto.adapters import EvaluateResult, LateralResult
+from ouroboros.auto.answerer import AutoAnswerer
 from ouroboros.auto.blocker_attribution import record_authoring_backend
+from ouroboros.auto.domain_profile import DEFAULT_REGISTRY
 from ouroboros.auto.grading import GradeGate, deterministic_floor
 from ouroboros.auto.handoff_contract import (
     IDEMPOTENCY_KEY_FIELD,
@@ -247,6 +249,16 @@ class AutoPipeline:
             state.complete_product = True
         elif state.complete_product and not self.complete_product:
             self.complete_product = True
+        # Q00/ouroboros#809 P3 PR-4: thread active domain profile into the
+        # answerer.  Resolve name → DomainProfile via DEFAULT_REGISTRY and
+        # inject it so intent classification, vague-term detection, and
+        # verifiable-predicate repair all delegate to the profile when active.
+        # When the name is None or not found, ``active_profile=None`` is set
+        # which preserves the hardcoded coding-domain safety hatch verbatim.
+        # Guard with getattr so test doubles that omit ``answerer`` are skipped.
+        _answerer = getattr(self.interview_driver, "answerer", None)
+        if _answerer is not None:
+            _apply_active_profile(state, _answerer)
         # Validate the persisted Seed artifact BEFORE any other path can
         # trigger a state-validating save. ``AutoStore.save`` re-validates the
         # full state, so a malformed ``seed_artifact`` would otherwise raise a
@@ -2139,3 +2151,24 @@ def _artifact_text(value: object) -> str | None:
     and silently transition to COMPLETE.
     """
     return value if isinstance(value, str) else None
+
+
+# -- PR-4 helper: thread domain profile into answerer -----------------------
+
+
+def _apply_active_profile(state: AutoPipelineState, answerer: AutoAnswerer) -> None:
+    """Resolve ``state.active_domain_profile_name`` and inject into ``answerer``.
+
+    When the name is ``None`` or not found in ``DEFAULT_REGISTRY``, sets
+    ``answerer.active_profile = None`` so the hardcoded safety hatch runs.
+    This is intentionally a no-op for sessions that never activated a profile.
+    When ``answerer`` does not have an ``active_profile`` attribute (e.g. a
+    test double), the call is silently skipped.
+    """
+    if not hasattr(answerer, "active_profile"):
+        return
+    name = getattr(state, "active_domain_profile_name", None)
+    if name:
+        answerer.active_profile = DEFAULT_REGISTRY.get(name)
+    else:
+        answerer.active_profile = None
