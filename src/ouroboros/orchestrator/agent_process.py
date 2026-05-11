@@ -394,7 +394,11 @@ class AgentProcessHandle:
         _store = store if store is not None else CheckpointStore()
         try:
             _store.initialize()
-            result = _store.load(process_id)
+            # Pause recovery needs the newest durable lifecycle truth, not
+            # CheckpointStore.load()'s generic rollback-to-older-valid behavior:
+            # if the latest row is corrupt, fail closed to not paused rather
+            # than resurrecting a stale paused checkpoint from .1/.2/.3.
+            result = _store._load_checkpoint_level(process_id, 0)  # noqa: SLF001
             if result.is_err:
                 return False
             return result.value.phase == "agent_process_paused"

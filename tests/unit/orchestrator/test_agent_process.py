@@ -741,6 +741,40 @@ async def test_resume_clears_persisted_pause(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_load_persisted_pause_does_not_rollback_to_stale_paused_checkpoint(
+    tmp_path: Path,
+) -> None:
+    """Corrupt latest lifecycle truth must fail closed instead of resurrecting .1 paused."""
+    ck_store = CheckpointStore(base_path=tmp_path)
+    process = AgentProcess(event_store=None)
+    started = asyncio.Event()
+
+    async def work(handle):
+        started.set()
+        while not handle.should_cancel():
+            await handle.wait_unpaused()
+            await asyncio.sleep(0.005)
+
+    handle = await process.spawn(intent="ralph", work_fn=work)
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    await handle.pause(store=ck_store)
+    await _wait_for_status(handle, AgentProcessStatus.PAUSED)
+    await handle.resume(store=ck_store)
+
+    current_checkpoint = tmp_path / f"checkpoint_{handle.process_id}.json"
+    current_checkpoint.write_text("{not valid json", encoding="utf-8")
+
+    # The generic API rolls back to the older paused row, but pause recovery
+    # must use stricter latest-row semantics and return False.
+    assert ck_store.load(handle.process_id).value.phase == "agent_process_paused"
+    assert AgentProcessHandle.load_persisted_pause(handle.process_id, store=ck_store) is False
+
+    await handle.cancel(reason="end test")
+    await handle.wait_until_complete(timeout=1.0)
+
+
+@pytest.mark.asyncio
 async def test_pause_swallows_checkpoint_save_error() -> None:
     """pause() must flip the in-memory flag and not raise even when CheckpointStore.save errors."""
     erroring_store = _ErroringCheckpointStore()
