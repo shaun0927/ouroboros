@@ -317,16 +317,18 @@ class AgentProcessHandle:
 
         Slice 2 (#518): overwrites the persisted pause checkpoint with a
         ``running`` row so ``load_persisted_pause`` returns False after
-        resume. Failures are logged and never raised.
+        resume. Persistence failures are raised before the loop is released
+        so durable state cannot remain paused while in-memory work resumes.
+        If *store* differs from the store captured by the acknowledged
+        pause, the captured store remains authoritative and *store* is
+        ignored.
         """
         if self._status in _TERMINAL_STATUSES or not self.should_pause():
             return
-        self._paused_event.set()
-        if self._status is AgentProcessStatus.PAUSED:
-            await self._set_status(AgentProcessStatus.RUNNING, reason="resume requested")
 
-        # Overwrite any acknowledged paused checkpoint so restart recovery
-        # no longer treats this process as paused.
+        # Overwrite any acknowledged paused checkpoint before releasing the
+        # work loop; otherwise a failed save could leave durable state paused
+        # while in-memory work has resumed.
         self._save_lifecycle_checkpoint(
             phase="agent_process_running",
             status="running",
@@ -337,6 +339,10 @@ class AgentProcessHandle:
         )
         self._pause_checkpoint_reason = None
         self._pause_checkpoint_requested = False
+
+        self._paused_event.set()
+        if self._status is AgentProcessStatus.PAUSED:
+            await self._set_status(AgentProcessStatus.RUNNING, reason="resume requested")
 
     async def cancel(self, reason: str = "cancel requested") -> None:
         """Request a cooperative cancel.
@@ -477,9 +483,6 @@ class AgentProcessHandle:
         """
         if self._status in _TERMINAL_STATUSES and not force:
             return
-        self._status = AgentProcessStatus.FAILED
-        if self._emit_directive is not None:
-            await self._emit_directive(Directive.CANCEL, reason, AgentProcessStatus.FAILED)
         if self._pause_checkpoint_requested:
             self._save_lifecycle_checkpoint(
                 phase="agent_process_failed",
@@ -489,6 +492,9 @@ class AgentProcessHandle:
                 store=self._pause_checkpoint_store,
                 strict=True,
             )
+        self._status = AgentProcessStatus.FAILED
+        if self._emit_directive is not None:
+            await self._emit_directive(Directive.CANCEL, reason, AgentProcessStatus.FAILED)
         self._completed_event.set()
 
     async def _mark_cancelled(self) -> None:
@@ -505,19 +511,20 @@ class AgentProcessHandle:
     async def _set_status(self, new_status: AgentProcessStatus, *, reason: str) -> None:
         if new_status == self._status:
             return
+        if new_status in _TERMINAL_STATUSES and self._pause_checkpoint_requested:
+            self._save_lifecycle_checkpoint(
+                phase=f"agent_process_{new_status.value}",
+                status=new_status.value,
+                event_key=f"{new_status.value}_at",
+                log_key="terminal",
+                store=self._pause_checkpoint_store,
+                strict=True,
+            )
         self._status = new_status
         directive = _TRANSITION_DIRECTIVE.get(new_status)
         if directive is not None and self._emit_directive is not None:
             await self._emit_directive(directive, reason, new_status)
         if new_status in _TERMINAL_STATUSES:
-            if self._pause_checkpoint_requested:
-                self._save_lifecycle_checkpoint(
-                    phase=f"agent_process_{new_status.value}",
-                    status=new_status.value,
-                    event_key=f"{new_status.value}_at",
-                    log_key="terminal",
-                    store=self._pause_checkpoint_store,
-                )
             self._completed_event.set()
 
     def _save_lifecycle_checkpoint(

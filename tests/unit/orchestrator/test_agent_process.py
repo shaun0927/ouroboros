@@ -937,6 +937,30 @@ async def test_resume_surfaces_checkpoint_save_error(tmp_path: Path) -> None:
     with pytest.raises(PersistenceError):
         await handle.resume()
 
+    assert handle.status() is AgentProcessStatus.PAUSED
+    assert handle.should_pause() is True
+
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+
+
+@pytest.mark.asyncio
+async def test_terminal_transition_surfaces_checkpoint_save_error(tmp_path: Path) -> None:
+    """Terminal cleanup must not silently leave durable pause truth stale."""
+    ck_store = _FailingSecondSaveCheckpointStore(base_path=tmp_path)
+    handle = AgentProcessHandle(process_id="erroring-terminal")
+
+    await handle.pause(store=ck_store)
+    waiter = asyncio.create_task(handle.wait_unpaused())
+    await _wait_for_status(handle, AgentProcessStatus.PAUSED)
+
+    with pytest.raises(PersistenceError):
+        await handle._mark_cancelled()
+
+    assert handle.status() is AgentProcessStatus.PAUSED
+    assert handle.should_pause() is True
+
     waiter.cancel()
     with pytest.raises(asyncio.CancelledError):
         await waiter
