@@ -1,36 +1,41 @@
 """Three-surface AgentProcess acceptance test — issue #518.
 
-Verifies that evolve_step, ralph, and execute_seed all emit identical
-lifecycle patterns when wrapped in AgentProcess.spawn:
+This is an acceptance boundary over the *production start surfaces* that own
+long-running work:
 
-    RUNNING (continue) directive on spawn
-    CONVERGE (converge) directive on success
+* ``StartEvolveStepHandler`` for evolve_step
+* ``RalphHandler`` for ralph
+* ``StartExecuteSeedHandler`` for execute_seed
 
-And that a cooperative cancel from outside cleanly stops each surface.
-
-NOTE: evolve_step real wrapping lands in PR-D.  This test exercises a
-trivial AgentProcess-wrapped coroutine that mimics evolve_step's shape
-(spawn → await work → return) so the three-surface contract is pinned
-without a hard dependency on PR-D having landed.
+The inner work is kept cheap with fake downstream handlers/job manager, but the
+test calls the real public handler methods.  It therefore fails if any surface
+stops routing its background runner through ``AgentProcess.spawn``.
 """
 
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
 
-from ouroboros.orchestrator.agent_process import AgentProcess, AgentProcessStatus
-
-# ---------------------------------------------------------------------------
-# Shared helpers
-# ---------------------------------------------------------------------------
+from ouroboros.core.types import Result
+from ouroboros.mcp.job_manager import JobLinks, JobStatus
+from ouroboros.mcp.tools.evolution_handlers import StartEvolveStepHandler
+from ouroboros.mcp.tools.execution_handlers import StartExecuteSeedHandler
+from ouroboros.mcp.tools.ralph_handlers import RalphHandler
+from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 
 
 class _FakeEventStore:
     def __init__(self) -> None:
         self.appended: list[Any] = []
+        self.initialized = False
+
+    async def initialize(self) -> None:
+        self.initialized = True
 
     async def append(self, event: Any) -> None:
         self.appended.append(event)
@@ -44,140 +49,259 @@ def _directives(store: _FakeEventStore) -> list[str]:
     ]
 
 
-async def _wait_for_status(handle, status: AgentProcessStatus, *, timeout: float = 2.0) -> None:
-    deadline = asyncio.get_event_loop().time() + timeout
-    while True:
-        if handle.status() is status:
-            return
-        if asyncio.get_event_loop().time() >= deadline:
-            raise AssertionError(
-                f"Handle status did not reach {status!r} within {timeout}s; "
-                f"current: {handle.status()!r}"
+def _directive_intents(store: _FakeEventStore) -> list[str]:
+    return [
+        e.data["extra"]["intent"]
+        for e in store.appended
+        if getattr(e, "type", None) == "control.directive.emitted"
+    ]
+
+
+@dataclass
+class _CompletedJobSnapshot:
+    job_id: str
+    links: JobLinks
+    status: JobStatus = JobStatus.COMPLETED
+    cursor: int = 1
+
+
+class _CancellableJobManager:
+    """JobManager test double that starts the runner and lets tests cancel it."""
+
+    def __init__(self) -> None:
+        self.runner_task: asyncio.Task[Any] | None = None
+        self.job_types: list[str] = []
+
+    async def start_job(
+        self,
+        *,
+        job_type: str,
+        initial_message: str,  # noqa: ARG002 - mirrors JobManager API
+        runner: Any,
+        links: JobLinks | None = None,
+    ) -> _CompletedJobSnapshot:
+        self.job_types.append(job_type)
+        self.runner_task = asyncio.create_task(runner)
+        return _CompletedJobSnapshot(
+            job_id=f"job_{job_type}",
+            links=links or JobLinks(),
+            status=JobStatus.RUNNING,
+        )
+
+    async def cancel_runner(self) -> None:
+        assert self.runner_task is not None
+        self.runner_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await self.runner_task
+
+
+class _InlineJobManager:
+    """JobManager test double that executes the supplied production runner."""
+
+    def __init__(self) -> None:
+        self.runner_results: list[MCPToolResult] = []
+        self.job_types: list[str] = []
+
+    async def start_job(
+        self,
+        *,
+        job_type: str,
+        initial_message: str,  # noqa: ARG002 - mirrors JobManager API
+        runner: Any,
+        links: JobLinks | None = None,
+    ) -> _CompletedJobSnapshot:
+        self.job_types.append(job_type)
+        self.runner_results.append(await runner)
+        return _CompletedJobSnapshot(
+            job_id=f"job_{job_type}",
+            links=links or JobLinks(),
+        )
+
+
+class _FakeEvolveHandler:
+    async def handle(self, arguments: dict[str, Any]):
+        return Result.ok(
+            MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text="evolve ok"),),
+                is_error=False,
+                meta={
+                    "lineage_id": arguments["lineage_id"],
+                    "generation": 1,
+                    "action": "converged",
+                },
             )
-        await asyncio.sleep(0.01)
-
-
-# ---------------------------------------------------------------------------
-# Surface simulators
-# ---------------------------------------------------------------------------
-
-
-async def _evolve_step_surface(ap: AgentProcess) -> AgentProcessStatus:
-    """Mimics evolve_step's shape: spawn → do work → return success.
-
-    Real wrapping lands in PR-D.  This stand-in confirms the lifecycle
-    contract without a hard dependency on that PR.
-    """
-    result_box: list[str] = []
-
-    async def _work(handle) -> None:
-        await handle.wait_unpaused()
-        if handle.should_cancel():
-            return
-        # Simulate a unit of evolve_step work.
-        await asyncio.sleep(0)
-        result_box.append("done")
-
-    handle = await ap.spawn(intent="evolve_step", work_fn=_work)
-    return await handle.wait_until_complete(timeout=2.0)
-
-
-async def _ralph_surface(ap: AgentProcess) -> AgentProcessStatus:
-    """Mimics one ralph iteration wrapped in AgentProcess."""
-    result_box: list[str] = []
-
-    async def _work(handle) -> None:
-        await handle.wait_unpaused()
-        if handle.should_cancel():
-            return
-        await asyncio.sleep(0)
-        result_box.append("done")
-
-    handle = await ap.spawn(intent="ralph_iteration:1", work_fn=_work)
-    return await handle.wait_until_complete(timeout=2.0)
-
-
-async def _execute_seed_surface(ap: AgentProcess) -> AgentProcessStatus:
-    """Mimics execute_seed wrapped in AgentProcess (StartExecuteSeedHandler shape)."""
-    result_box: list[str] = []
-
-    async def _work(handle) -> None:
-        await handle.wait_unpaused()
-        if handle.should_cancel():
-            return
-        await asyncio.sleep(0)
-        result_box.append("done")
-
-    handle = await ap.spawn(intent="execute_seed", work_fn=_work)
-    return await handle.wait_until_complete(timeout=2.0)
-
-
-# ---------------------------------------------------------------------------
-# Acceptance test: identical lifecycle pattern on success
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_all_three_surfaces_emit_running_then_converge_on_success() -> None:
-    """Each surface emits RUNNING on spawn and CONVERGE on success."""
-    for surface_fn, label in [
-        (_evolve_step_surface, "evolve_step"),
-        (_ralph_surface, "ralph"),
-        (_execute_seed_surface, "execute_seed"),
-    ]:
-        store = _FakeEventStore()
-        ap = AgentProcess(event_store=store)
-
-        final = await surface_fn(ap)
-
-        directives = _directives(store)
-        assert final is AgentProcessStatus.COMPLETED, f"{label}: expected COMPLETED, got {final!r}"
-        assert directives[0] == "continue", (
-            f"{label}: first directive must be 'continue' (RUNNING), got {directives[0]!r}"
-        )
-        assert directives[-1] == "converge", (
-            f"{label}: last directive must be 'converge' (CONVERGE), got {directives[-1]!r}"
         )
 
 
-# ---------------------------------------------------------------------------
-# Acceptance test: cooperative cancel stops each surface cleanly
-# ---------------------------------------------------------------------------
+class _BlockingEvolveHandler:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+
+    async def handle(self, arguments: dict[str, Any]):  # noqa: ARG002 - protocol fixture
+        self.started.set()
+        await asyncio.sleep(60)
+        return Result.ok(MCPToolResult())
+
+
+class _FakeExecuteHandler:
+    agent_runtime_backend: str | None = None
+    llm_backend: str | None = None
+
+    async def handle(
+        self,
+        arguments: dict[str, Any],
+        *,
+        execution_id: str | None = None,
+        session_id_override: str | None = None,
+        synchronous: bool = False,
+    ):
+        assert synchronous is True
+        return Result.ok(
+            MCPToolResult(
+                content=(MCPContentItem(type=ContentType.TEXT, text="execute ok"),),
+                is_error=False,
+                meta={
+                    "seed_content": arguments["seed_content"],
+                    "execution_id": execution_id,
+                    "session_id": session_id_override,
+                },
+            )
+        )
+
+
+class _BlockingExecuteHandler:
+    agent_runtime_backend: str | None = None
+    llm_backend: str | None = None
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+
+    async def handle(
+        self,
+        arguments: dict[str, Any],  # noqa: ARG002 - protocol fixture
+        *,
+        execution_id: str | None = None,  # noqa: ARG002 - protocol fixture
+        session_id_override: str | None = None,  # noqa: ARG002 - protocol fixture
+        synchronous: bool = False,  # noqa: ARG002 - protocol fixture
+    ):
+        self.started.set()
+        await asyncio.sleep(60)
+        return Result.ok(MCPToolResult())
 
 
 @pytest.mark.asyncio
-async def test_all_three_surfaces_cancel_cleanly() -> None:
-    """A cooperative cancel from outside terminates each surface without raising."""
-    for intent_label, label in [
+@pytest.mark.parametrize(
+    ("surface", "expected_intent", "expected_job_type"),
+    [
+        ("evolve_step", "evolve_step", "evolve_step"),
+        ("ralph", "ralph", "ralph"),
+        ("execute_seed", "execute_seed", "execute_seed"),
+    ],
+)
+async def test_production_start_surfaces_emit_running_then_converge(
+    surface: str,
+    expected_intent: str,
+    expected_job_type: str,
+) -> None:
+    """Each real start surface routes its background runner through AgentProcess."""
+    store = _FakeEventStore()
+    job_manager = _InlineJobManager()
+
+    if surface == "evolve_step":
+        handler = StartEvolveStepHandler(
+            evolve_handler=_FakeEvolveHandler(),  # type: ignore[arg-type]
+            event_store=store,  # type: ignore[arg-type]
+            job_manager=job_manager,  # type: ignore[arg-type]
+        )
+        result = await handler.handle({"lineage_id": "lin_accept", "seed_content": "goal: test"})
+    elif surface == "ralph":
+        handler = RalphHandler(
+            evolve_handler=_FakeEvolveHandler(),  # type: ignore[arg-type]
+            event_store=store,  # type: ignore[arg-type]
+            job_manager=job_manager,  # type: ignore[arg-type]
+        )
+        result = await handler.handle(
+            {
+                "lineage_id": "lin_accept",
+                "seed_content": "goal: test",
+                "max_generations": 1,
+                "per_iteration_timeout_seconds": 30,
+                "max_total_seconds": 30,
+            }
+        )
+    else:
+        handler = StartExecuteSeedHandler(
+            execute_handler=_FakeExecuteHandler(),  # type: ignore[arg-type]
+            event_store=store,  # type: ignore[arg-type]
+            job_manager=job_manager,  # type: ignore[arg-type]
+        )
+        result = await handler.handle({"seed_content": "goal: test"})
+
+    assert result.is_ok, surface
+    directives = _directives(store)
+    assert directives[0] == "continue", surface
+    assert directives[-1] == "converge", surface
+    assert _directive_intents(store) == [expected_intent, expected_intent]
+    assert job_manager.job_types == [expected_job_type]
+    assert len(job_manager.runner_results) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("surface", "expected_intent"),
+    [
         ("evolve_step", "evolve_step"),
-        ("ralph_iteration:1", "ralph"),
+        ("ralph", "ralph"),
         ("execute_seed", "execute_seed"),
-    ]:
-        store = _FakeEventStore()
-        ap = AgentProcess(event_store=store)
+    ],
+)
+async def test_production_start_surfaces_emit_cancel_when_job_runner_is_cancelled(
+    surface: str, expected_intent: str
+) -> None:
+    """Job-runner cancellation is mirrored into the AgentProcess lifecycle."""
+    store = _FakeEventStore()
+    job_manager = _CancellableJobManager()
 
-        started = asyncio.Event()
-        release = asyncio.Event()
-
-        async def _long_work(handle, _started=started, _release=release) -> None:
-            _started.set()
-            await handle.wait_unpaused()
-            if handle.should_cancel():
-                return
-            # Block until cancelled.
-            while not handle.should_cancel():
-                await asyncio.sleep(0.005)
-
-        handle = await ap.spawn(intent=intent_label, work_fn=_long_work)
-        await asyncio.wait_for(started.wait(), timeout=2.0)
-
-        await handle.cancel(reason=f"test cancel: {label}")
-        final = await handle.wait_until_complete(timeout=2.0)
-
-        assert final is AgentProcessStatus.CANCELLED, (
-            f"{label}: expected CANCELLED after cancel(), got {final!r}"
+    if surface == "evolve_step":
+        blocking = _BlockingEvolveHandler()
+        handler = StartEvolveStepHandler(
+            evolve_handler=blocking,  # type: ignore[arg-type]
+            event_store=store,  # type: ignore[arg-type]
+            job_manager=job_manager,  # type: ignore[arg-type]
         )
-        directives = _directives(store)
-        assert "cancel" in directives, (
-            f"{label}: expected a 'cancel' directive after cancel(), got {directives!r}"
+        result = await handler.handle({"lineage_id": "lin_cancel", "seed_content": "goal: test"})
+        await asyncio.wait_for(blocking.started.wait(), timeout=2.0)
+    elif surface == "ralph":
+        blocking = _BlockingEvolveHandler()
+        handler = RalphHandler(
+            evolve_handler=blocking,  # type: ignore[arg-type]
+            event_store=store,  # type: ignore[arg-type]
+            job_manager=job_manager,  # type: ignore[arg-type]
         )
+        result = await handler.handle(
+            {
+                "lineage_id": "lin_cancel",
+                "seed_content": "goal: test",
+                "max_generations": 1,
+                "per_iteration_timeout_seconds": 30,
+                "max_total_seconds": 30,
+            }
+        )
+        await asyncio.wait_for(blocking.started.wait(), timeout=2.0)
+    else:
+        blocking = _BlockingExecuteHandler()
+        handler = StartExecuteSeedHandler(
+            execute_handler=blocking,  # type: ignore[arg-type]
+            event_store=store,  # type: ignore[arg-type]
+            job_manager=job_manager,  # type: ignore[arg-type]
+        )
+        result = await handler.handle({"seed_content": "goal: test"})
+        await asyncio.wait_for(blocking.started.wait(), timeout=2.0)
+
+    assert result.is_ok, surface
+    await job_manager.cancel_runner()
+
+    directives = _directives(store)
+    assert directives[0] == "continue", surface
+    assert directives[-1] == "cancel", surface
+    assert _directive_intents(store)[-1] == expected_intent

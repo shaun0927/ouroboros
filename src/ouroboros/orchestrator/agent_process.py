@@ -522,3 +522,47 @@ class AgentProcess:
 def _new_process_id() -> str:
     """Return a fresh process_id."""
     return uuid4().hex
+
+
+async def run_with_agent_process[T](
+    *,
+    event_store: _AppendableEventStore | None,
+    intent: str,
+    work_fn: Callable[[AgentProcessHandle], Awaitable[T]],
+    timeout: float | None = None,
+) -> T:
+    """Run one production surface through :class:`AgentProcess.spawn`.
+
+    This helper is the shared acceptance boundary for long-running MCP
+    surfaces.  It lets each surface keep its existing JobManager contract
+    while ensuring the actual background runner emits the uniform
+    AgentProcess lifecycle directives (RUNNING/CONVERGE/CANCEL/FAILED).
+    """
+    result_box: list[T] = []
+    error_box: list[BaseException] = []
+
+    async def _work(handle: AgentProcessHandle) -> None:
+        try:
+            result_box.append(await work_fn(handle))
+        except BaseException as exc:  # noqa: BLE001 - preserve the original runner failure
+            error_box.append(exc)
+            raise
+
+    process = AgentProcess(event_store=event_store)
+    handle = await process.spawn(intent=intent, work_fn=_work)
+    try:
+        final_status = await handle.wait_until_complete(timeout=timeout)
+    except asyncio.CancelledError:
+        await handle.cancel(reason="cancelled by job runner")
+        await handle._mark_cancelled()
+        raise
+
+    if final_status is AgentProcessStatus.CANCELLED:
+        raise asyncio.CancelledError(f"{intent} cancelled")
+    if final_status is AgentProcessStatus.FAILED:
+        if error_box:
+            raise RuntimeError(f"{intent} failed") from error_box[0]
+        raise RuntimeError(f"{intent} failed")
+    if not result_box:
+        raise RuntimeError(f"{intent} completed without a result")
+    return result_box[0]
