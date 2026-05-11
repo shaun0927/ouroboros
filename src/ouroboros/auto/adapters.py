@@ -12,10 +12,11 @@ import yaml
 from ouroboros.auto.interview_driver import InterviewBackend, InterviewTurn
 from ouroboros.core.seed import Seed
 from ouroboros.mcp.errors import MCPServerError
-from ouroboros.mcp.job_manager import JobManager, JobStatus
+from ouroboros.mcp.job_manager import JobManager
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
 from ouroboros.mcp.tools.execution_handlers import StartExecuteSeedHandler
 from ouroboros.mcp.tools.ralph_handlers import RalphHandler
+from ouroboros.mcp.tools.subagent import should_dispatch_via_plugin
 from ouroboros.mcp.types import MCPToolResult
 
 
@@ -179,6 +180,12 @@ class HandlerRalphStarter:
     def __init__(self, handler: RalphHandler) -> None:
         self.handler = handler
 
+    @property
+    def job_event_store(self) -> Any:
+        """Expose Ralph's JobManager event store for the auto status mirror."""
+        job_manager = getattr(self.handler, "_job_manager", None)
+        return getattr(job_manager, "_event_store", None)
+
     async def __call__(
         self,
         seed: Seed,
@@ -211,6 +218,32 @@ class HandlerRalphStarter:
             arguments["max_total_seconds"] = max_total_seconds
         if per_iteration_timeout_seconds is not None:
             arguments["per_iteration_timeout_seconds"] = per_iteration_timeout_seconds
+        # Q00/ouroboros#782 review-5 BLOCKING #2 + review-12 BLOCKING #2:
+        # the plugin ``ouroboros_ralph`` call commits an externally observable
+        # side effect (``mcp.subagent.dispatched`` event + the bridge's child
+        # session). If the process dies between that side effect and the
+        # post-call save, resume must detect the dispatch already happened
+        # and transition to COMPLETE instead of dispatching a duplicate.
+        # However, the pre-call checkpoint MUST distinguish "dispatch attempted"
+        # from "dispatch succeeded" — otherwise a crash *before* the handler
+        # actually emits the subagent event leaves persisted state that looks
+        # like a completed plugin dispatch even though no child session was
+        # ever started, and resume falsely transitions to COMPLETE. We
+        # therefore use ``"plugin_pending"`` for the pre-call checkpoint and
+        # ``"plugin"`` for the post-call confirmation envelope below;
+        # :meth:`AutoPipeline._resume_ralph_handoff` retries dispatch when it
+        # observes the unconfirmed marker.
+        plugin_dispatch = should_dispatch_via_plugin(
+            self.handler.agent_runtime_backend, self.handler.opencode_mode
+        )
+        if plugin_dispatch and on_dispatched is not None:
+            on_dispatched(
+                {
+                    "job_id": None,
+                    "lineage_id": lineage_id,
+                    "dispatch_mode": "plugin_pending",
+                }
+            )
         result = _unwrap(
             await self.handler.handle(arguments),
             tool_name="ouroboros_ralph",
@@ -222,12 +255,16 @@ class HandlerRalphStarter:
         # ``delegated_to_plugin`` status. The auto pipeline records this and
         # transitions straight to COMPLETE — there is nothing to wait for.
         if status == "delegated_to_plugin" or dispatch_mode == "plugin":
+            ralph_subagent = (
+                meta.get("_subagent") if isinstance(meta.get("_subagent"), dict) else None
+            )
             envelope = {
                 "job_id": None,
                 "lineage_id": _optional_str(meta.get("lineage_id")) or lineage_id,
                 "dispatch_mode": "plugin",
                 "terminal_status": "delegated_to_plugin",
                 "stop_reason": None,
+                "_subagent": ralph_subagent,
             }
             if on_dispatched is not None:
                 on_dispatched(envelope)
@@ -254,12 +291,16 @@ class HandlerRalphStarter:
         terminal_meta = await _wait_for_job_terminal(job_manager, job_id)
         terminal_status = _optional_str(terminal_meta.get("status")) or "failed"
         stop_reason = _optional_str(terminal_meta.get("stop_reason"))
+        current_generation = _optional_int(terminal_meta.get("current_generation"))
+        if current_generation is None:
+            current_generation = _last_int(terminal_meta.get("generations"))
         return {
             "job_id": job_id,
             "lineage_id": _optional_str(meta.get("lineage_id")) or lineage_id,
             "dispatch_mode": "job",
             "terminal_status": terminal_status,
             "stop_reason": stop_reason,
+            "current_generation": current_generation,
         }
 
 
@@ -281,17 +322,29 @@ class HandlerRalphPoller:
     def __init__(self, handler: RalphHandler) -> None:
         self.handler = handler
 
+    @property
+    def job_event_store(self) -> Any:
+        """Expose Ralph's JobManager event store for the auto status mirror."""
+        job_manager = getattr(self.handler, "_job_manager", None)
+        return getattr(job_manager, "_event_store", None)
+
     async def __call__(self, *, job_id: str) -> dict[str, Any]:
         job_manager = self.handler._job_manager  # noqa: SLF001
         terminal_meta = await _wait_for_job_terminal(job_manager, job_id)
         terminal_status = _optional_str(terminal_meta.get("status")) or "failed"
         stop_reason = _optional_str(terminal_meta.get("stop_reason"))
+        current_generation = _optional_int(terminal_meta.get("current_generation"))
+        if current_generation is None:
+            current_generation = _optional_int(terminal_meta.get("iterations"))
+        if current_generation is None:
+            current_generation = _last_int(terminal_meta.get("generations"))
         return {
             "job_id": job_id,
             "lineage_id": _optional_str(terminal_meta.get("lineage_id")),
             "dispatch_mode": "job",
             "terminal_status": terminal_status,
             "stop_reason": stop_reason,
+            "current_generation": current_generation,
         }
 
 
@@ -310,10 +363,7 @@ async def _wait_for_job_terminal(
         snapshot = await job_manager.get_snapshot(job_id)
         if snapshot.is_terminal:
             meta = dict(snapshot.result_meta or {})
-            meta.setdefault(
-                "status",
-                "completed" if snapshot.status is JobStatus.COMPLETED else "failed",
-            )
+            meta.setdefault("status", snapshot.status.value)
             return meta
         await asyncio.sleep(poll_interval)
 
@@ -378,3 +428,17 @@ def _extract_seed_yaml(text: str) -> str:
 
 def _optional_str(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _optional_int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _last_int(value: object) -> int | None:
+    if not isinstance(value, list):
+        return None
+    for item in reversed(value):
+        found = _optional_int(item)
+        if found is not None:
+            return found
+    return None
