@@ -228,6 +228,7 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    - If the user supplies a correction directly without using the option, treat
      that free text the same way: Refine first, then send with
      `[from-user][refined]`.
+   - Increment the auto-confirm counter (see Dialectic Rhythm Guard below)
    - **Facts, not decisions**: "Stripe rate limit is 100 req/s" is research.
      "We should use Stripe" is a DECISION — route to PATH 2.
 
@@ -320,6 +321,22 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    Refine-passed answers count as direct user judgment — they reset the
    Dialectic Rhythm Guard counter to 0 (see below).
 
+   If the user picks "Add to Constraints", "Add to Out of scope", or
+   "Rewrite", do not infer the missing text from the option label. Immediately
+   ask one follow-up AskUserQuestion to collect the exact text:
+   ```json
+   {
+     "questions": [{
+       "question": "What text should I add or change before sending this to MCP?\n\nCurrent structured answer:\n\n<multi-section payload>",
+       "header": "Refine — Missing Text"
+     }]
+   }
+   ```
+   Apply the follow-up text to the structured payload, then ask the Refine gate
+   once more. This retry is bounded: after the second Refine response, send the
+   updated payload to MCP with a valid source prefix plus `[refined]` (for
+   example, `[from-user][refined]`), unless the user explicitly cancels.
+
 5. **Mark the answer as Refine-passed**:
    Append `[refined]` to the prefix when sending the structured payload to
    MCP (e.g., `[from-user][refined]`). MCP treats refined answers as
@@ -393,11 +410,18 @@ MCP (question generator) ←→ You (answerer + router) ←→ User (human judgm
    }
    ```
 
-   Use the follow-up text only to revise the one-line Restate goal; do not send
-   Restate corrections through the Refine gate and do not mark them `[refined]`
-   unless you route back to PATH 2. After revising, ask the Restate gate once
-   more. Do not loop more than twice; if alignment is not reached, route back
-   to PATH 2 with a targeted question instead of forcing a goal line.
+   Treat the follow-up text as a real interview correction, not a local-only
+   wording tweak. Send it back to MCP as a structured restate correction with
+   `[from-user][refined]`, preserving the corrected goal line and the user's
+   stated wording or missing scope. Then return to Step 7 so MCP can update its
+   interview state and the Seed-ready Acceptance Guard can run again against the
+   updated state. Do not proceed directly to `ooo seed` from the stale pre-
+   correction MCP state.
+
+   After MCP returns seed-ready again and the Acceptance Guard still passes, ask
+   the Restate gate once more with the corrected goal line. Do not loop more
+   than twice; if alignment is not reached, route back to PATH 2 with a targeted
+   question instead of forcing a goal line.
 
 10. **Prefer stopping over over-interviewing**:
    When the Restate gate passes, suggest `ooo seed`.
@@ -499,11 +523,23 @@ MCP Q3: "What authentication method does the project use?"
 MCP Q4: "How should payment failures affect order state?"
 → PATH 2: design decision
 → User: "Saga pattern for rollback"
-→ [from-user] sent to MCP (counter reset to 0)
+→ Refine gate structures the answer
+→ User: "Add to Out of scope"
+→ Follow-up asks for exact missing text
+→ User: "Do not build automatic retry scheduling yet"
+→ Refine gate runs once more, then [from-user][refined] sent to MCP (counter reset to 0)
 
 MCP Q5: "What are the acceptance criteria for this feature?"
 → PATH 2: requires human judgment
 → User: "Successful Stripe charge, webhook handling, refund support"
+→ Refine gate passes; [from-user][refined] sent to MCP
+
+MCP signals seed-ready; Acceptance Guard passes
+→ Restate: "Add Stripe payments with charges, webhooks, refunds, and failed-payment rollback."
+→ User: "Missing scope"
+→ Follow-up asks for exact missing scope
+→ User: "Exclude retry scheduling from the seed."
+→ [from-user][refined] restate correction sent to MCP; return to Step 7/Seed-ready guard
 
 📍 Next: `ooo seed` to crystallize these requirements into a specification
 ```
