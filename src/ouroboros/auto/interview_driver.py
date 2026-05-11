@@ -20,6 +20,7 @@ from ouroboros.auto.answerer import (
     AutoBlocker,
 )
 from ouroboros.auto.blocker_attribution import record_authoring_backend
+from ouroboros.auto.domain_profile import DEFAULT_REGISTRY
 from ouroboros.auto.gap_detector import GapDetector
 from ouroboros.auto.ledger import LedgerStatus, SeedDraftLedger
 from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
@@ -261,11 +262,17 @@ class AutoInterviewDriver:
             self._save(state)
 
         if not ledger.is_seed_ready():
+            _active_profile = (
+                DEFAULT_REGISTRY.get(state.active_domain_profile_name)
+                if state.active_domain_profile_name
+                else None
+            )
             finalization = finalize_safe_defaultable_gaps(
                 ledger,
                 goal=state.goal,
                 provenance=f"auto interview max rounds {self.max_rounds}",
                 pending_question=state.pending_question,
+                active_profile=_active_profile,
             )
             state.ledger = ledger.to_dict()
             if finalization.completed and ledger.is_seed_ready():
