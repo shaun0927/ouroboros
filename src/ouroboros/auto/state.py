@@ -301,6 +301,12 @@ class AutoPipelineState:
     # when the operator forgets to re-pass the flag. Defaults to False so
     # legacy state files load unchanged.
     complete_product: bool = False
+    # Q00/ouroboros#809 P3 PR-4: active domain profile name.  Set by the CLI
+    # activation layer (PR-3) to a name registered in ``DEFAULT_REGISTRY``.
+    # ``None`` means no profile is active — the answerer falls back to the
+    # hardcoded coding-domain paths.  Defaults to ``None`` so legacy state
+    # files load unchanged.
+    active_domain_profile_name: str | None = None
     ledger: dict[str, Any] = field(default_factory=dict)
     last_grade: str | None = None
     findings: list[dict[str, Any]] = field(default_factory=list)

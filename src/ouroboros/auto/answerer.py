@@ -6,8 +6,12 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 import re
+from typing import TYPE_CHECKING
 
 from ouroboros.auto.ledger import LedgerEntry, LedgerSource, LedgerStatus, SeedDraftLedger
+
+if TYPE_CHECKING:
+    from ouroboros.auto.domain_profile import DomainProfile
 
 
 class AutoAnswerSource(StrEnum):
@@ -114,7 +118,27 @@ class AutoAnswerer:
 
     This class is deterministic and performs no unbounded repository or network
     exploration.  Later integrations may pass bounded repo facts into it.
+
+    Parameters
+    ----------
+    active_profile:
+        Optional domain profile.  When supplied, intent classification,
+        vague-term detection, and verifiable-predicate lookup are delegated
+        to the profile.  When ``None`` (the default) the existing hardcoded
+        coding-domain logic runs verbatim — this is the **safety hatch** that
+        preserves backward compatibility for callers that do not activate a
+        profile.
     """
+
+    # -- DUAL-PATH MARKER (PR-4): the safety hatch lives in __init__ ---------
+    # With ``active_profile=None`` every method below falls through to the
+    # original hardcoded coding-domain paths.  With a profile the three hooks
+    # (intent classification, vague-term check, predicate repair) delegate to
+    # the profile's callbacks.  No hardcoded path is removed.
+    # -------------------------------------------------------------------------
+
+    def __init__(self, active_profile: DomainProfile | None = None) -> None:
+        self.active_profile = active_profile
 
     def answer(
         self,
@@ -125,7 +149,34 @@ class AutoAnswerer:
         """Answer ``question`` using a conservative policy and optional bounded facts."""
         context = context or AutoAnswerContext()
         lowered = _normalize_question(question)
-        intents = _classify_question_intents(question)
+
+        # -- DUAL-PATH HOOK 1: intent classification --------------------------
+        # When a domain profile is active, ask its classifier first.  The
+        # profile returns a single canonical label string (e.g.
+        # ``"verification"``) or None.  We map the label back to a
+        # QuestionIntent so the downstream routing logic is unchanged.  If the
+        # profile cannot classify (None) OR no profile is active, fall through
+        # to the hardcoded ``_classify_question_intents`` path.
+        if self.active_profile is not None:
+            profile_label = self.active_profile.intent_classifier.classify(question)
+            if profile_label is not None:
+                intents = _intents_from_profile_label(profile_label)
+            else:
+                intents = _classify_question_intents(question)
+            # -- DUAL-PATH HOOK 2: vague-term detection -----------------------
+            # When a profile is active, any term from its ``vague_terms`` set
+            # that appears in the lowered question signals that the AC is
+            # under-specified.  We inject VERIFICATION so the answerer steers
+            # the user toward observable behavior rather than accepting vague
+            # language.  The hardcoded path has no equivalent check (there are
+            # no inline vague-term lists in this file), so this is additive.
+            if any(term in lowered for term in self.active_profile.vague_terms):
+                intents = frozenset(intents | {QuestionIntent.VERIFICATION})
+        else:
+            # Safety hatch: original hardcoded coding-domain classification.
+            intents = _classify_question_intents(question)
+        # ---------------------------------------------------------------------
+
         blocker = _blocker_for(question)
         if blocker is not None:
             return AutoAnswer(
@@ -352,6 +403,24 @@ class AutoAnswerer:
         )
 
     def _verification_answer(self, question: str) -> AutoAnswer:  # noqa: ARG002
+        # -- DUAL-PATH HOOK 3: verifiable-predicate repair --------------------
+        # When a profile is active, iterate its ``verifiable_predicates`` in
+        # order and use the first one whose ``matches`` returns True against the
+        # question text.  The predicate's ``repair_template`` replaces the
+        # hardcoded "exit code 0 and stdout" AC text so domain-specific
+        # verification language appears in the Seed instead of the coding
+        # default.  When no predicate matches (or no profile is active), the
+        # original hardcoded coding-domain text is used verbatim — safety hatch.
+        if self.active_profile is not None:
+            matched = self.active_profile.find_verifiable_predicate(question)
+            if matched is not None:
+                ac_value = matched.repair_template(question)
+            else:
+                ac_value = "A command-level check returns exit code 0 and stdout contains stable output or writes a reproducible artifact for each acceptance criterion."
+        else:
+            # Safety hatch: original hardcoded coding-domain AC text.
+            ac_value = "A command-level check returns exit code 0 and stdout contains stable output or writes a reproducible artifact for each acceptance criterion."
+        # ---------------------------------------------------------------------
         value = "Success must be verified with observable behavior: commands or tests should produce stable output, non-zero failures for invalid input, and reproducible artifacts where applicable."
         updates = [
             (
@@ -369,7 +438,7 @@ class AutoAnswerer:
                 "acceptance_criteria",
                 LedgerEntry(
                     key="acceptance.observable_behavior",
-                    value="A command-level check returns exit code 0 and stdout contains stable output or writes a reproducible artifact for each acceptance criterion.",
+                    value=ac_value,
                     source=LedgerSource.CONSERVATIVE_DEFAULT,
                     confidence=0.82,
                     status=LedgerStatus.DEFAULTED,
@@ -806,6 +875,37 @@ def _classify_question_intents(question: str) -> frozenset[QuestionIntent]:
         intents.add(QuestionIntent.PRODUCT_BEHAVIOR)
 
     return frozenset(intents)
+
+
+# -- DUAL-PATH HELPER (PR-4): map profile label → QuestionIntent set ---------
+# Profile classifiers emit canonical string labels (e.g. ``"verification"``).
+# This helper translates a single label back into a frozenset so the existing
+# intent-routing table below works without modification.  Labels that do not
+# map to a known QuestionIntent return an empty frozenset, causing the answerer
+# to fall through to ``_default_answer`` — the same behavior as an empty
+# ``_classify_question_intents`` result.
+_PROFILE_LABEL_TO_INTENT: dict[str, QuestionIntent] = {
+    "non_goals": QuestionIntent.NON_GOALS,
+    "verification": QuestionIntent.VERIFICATION,
+    "acceptance_criteria": QuestionIntent.ACCEPTANCE_CRITERIA,
+    "actor_io": QuestionIntent.ACTOR_IO,
+    "runtime_context": QuestionIntent.RUNTIME_CONTEXT,
+    "product_behavior": QuestionIntent.PRODUCT_BEHAVIOR,
+}
+
+
+def _intents_from_profile_label(label: str) -> frozenset[QuestionIntent]:
+    """Convert a single profile-classifier label to a ``frozenset[QuestionIntent]``.
+
+    Returns an empty frozenset for unknown labels so the answerer falls back to
+    ``_default_answer`` — the same behavior as ``_classify_question_intents``
+    returning no intents.
+    """
+    intent = _PROFILE_LABEL_TO_INTENT.get(label)
+    return frozenset({intent}) if intent is not None else frozenset()
+
+
+# ----------------------------------------------------------------------------
 
 
 # Regex for cues composed only of plain ASCII letters (a–z), spaces, hyphens,
