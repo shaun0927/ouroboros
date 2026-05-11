@@ -140,16 +140,16 @@ is determined per-surface as follows.
 |---|---|---|---|
 | MCP tool timeout | `"mcp.tool_timeout"` | `Directive.CANCEL` | `MAX_RETRIES`/adapter retry envelope exhausted and terminal tool error returned |
 | Watchdog timeout | `"generation.watchdog"` | same directive the evolution loop would emit for the failed generation outcome via `step_action_to_directive(...)` | generation retry/resilience-budget dependent |
-| Auto interview timeout | `"auto.interview"` | `Directive.CANCEL` | `interview_driver.run(...)` times out and the pipeline marks blocked or returns early |
-| Auto seed-generation timeout | `"auto.seed_generation"` | `Directive.CANCEL` | `seed_generator(...)` times out and the pipeline marks blocked or returns early |
-| Auto repair timeout | `"auto.repair"` | `Directive.CANCEL` | `repairer.converge(...)` times out and the pipeline marks blocked or returns early |
-| Auto review timeout | `"auto.review"` | `Directive.CANCEL` | `reviewer.review(...)` times out and the pipeline marks blocked or returns early |
+| Auto interview timeout | `"auto.interview"` | `Directive.WAIT` when resumably blocked; `Directive.CANCEL` only for terminal/deadline-enforced/non-resumable termination | `interview_driver.run(...)` times out and the pipeline blocks or terminates |
+| Auto seed-generation timeout | `"auto.seed_generation"` | `Directive.WAIT` when resumably blocked; `Directive.CANCEL` only for terminal/deadline-enforced/non-resumable termination | `seed_generator(...)` times out and the pipeline blocks or terminates |
+| Auto repair timeout | `"auto.repair"` | `Directive.WAIT` when resumably blocked; `Directive.CANCEL` only for terminal/deadline-enforced/non-resumable termination | `repairer.converge(...)` times out and the pipeline blocks or terminates |
+| Auto review timeout | `"auto.review"` | `Directive.WAIT` when resumably blocked; `Directive.CANCEL` only for terminal/deadline-enforced/non-resumable termination | `reviewer.review(...)` times out and the pipeline blocks or terminates |
 | Auto handoff timeout — first occurrence | `"auto.run_handoff"` | `Directive.RETRY` | `run_handoff_status == "unknown_timeout"` and not yet retried |
-| Auto handoff timeout — terminal | `"auto.run_handoff"` | `Directive.CANCEL` | retry exhausted while still `unknown_timeout`, retry failed with `unknown_retry_failed`, or deadline enforced |
-| Auto Ralph handoff timeout | `"auto.ralph_handoff"` | `Directive.CANCEL` | `ralph_starter(...)` times out and the pipeline marks blocked or returns early |
-| Auto Ralph poll timeout | `"auto.ralph_poll"` | `Directive.CANCEL` | `ralph_resumer(...)` times out and the pipeline marks blocked or returns early |
-| Auto evaluator timeout | `"auto.evaluate"` | `Directive.CANCEL` | `evaluator(...)` times out and the pipeline marks blocked or returns early |
-| Auto lateral-thinker timeout | `"auto.lateral"` | `Directive.CANCEL` | `lateral_thinker(...)` times out and the pipeline marks blocked or returns early |
+| Auto handoff timeout — blocked after retry | `"auto.run_handoff"` | `Directive.WAIT` when blocked awaiting user/upstream resume on the same `auto_session_id`; `Directive.CANCEL` only when the auto attempt is truly terminal/deadline-enforced/non-resumable | retry exhausted while still `unknown_timeout`, retry failed with `unknown_retry_failed`, or deadline enforced |
+| Auto Ralph handoff timeout | `"auto.ralph_handoff"` | `Directive.WAIT` when resumably blocked; `Directive.CANCEL` only for terminal/deadline-enforced/non-resumable termination | `ralph_starter(...)` times out and the pipeline blocks or terminates |
+| Auto Ralph poll timeout | `"auto.ralph_poll"` | `Directive.WAIT` when resumably blocked; `Directive.CANCEL` only for terminal/deadline-enforced/non-resumable termination | `ralph_resumer(...)` times out and the pipeline blocks or terminates |
+| Auto evaluator timeout | `"auto.evaluate"` | `Directive.WAIT` when resumably blocked; `Directive.CANCEL` only for terminal/deadline-enforced/non-resumable termination | `evaluator(...)` times out and the pipeline blocks or terminates |
+| Auto lateral-thinker timeout | `"auto.lateral"` | `Directive.WAIT` when resumably blocked; `Directive.CANCEL` only for terminal/deadline-enforced/non-resumable termination | `lateral_thinker(...)` times out and the pipeline blocks or terminates |
 
 ### MCP tool timeout mapping
 
@@ -171,12 +171,14 @@ terminal tool error, such as the existing
 adapter envelope, but they still must not emit `Directive.RETRY` without a
 durable retry token. A future MCP retry directive is allowed only if the MCP
 surface first adds persisted retry-pending state that satisfies I4/I5. The
-event target is either an execution/session/control target explicitly passed
-through the `MCPToolProvider.call_tool(...)` and `_call_with_retry(...)` call
-chain, or a different currently available aggregation target selected by the
-implementation and documented with its resume semantics. The current MCP
-provider path must not assume `execution_id` is already available at the
-terminal adapter decision site.
+canonical MCP timeout directive target is execution-scoped:
+`target_type="execution"`, `target_id=execution_id`, and
+`execution_id=execution_id`. Phase 1 must plumb this execution/control target
+context through both `MCPToolProvider.call_tool(...)` and `_call_with_retry(...)`
+before any MCP timeout directive can be emitted. If a call site cannot provide
+`execution_id`, that site must not emit `control.directive.emitted` for MCP
+timeouts until the missing plumbing exists; it must continue using the local
+terminal tool error path only. There is no alternate MCP timeout target.
 
 ### Watchdog timeout mapping
 
@@ -203,19 +205,26 @@ the watchdog decision metadata needed for audit.
 
 The watchdog source owns source-specific directive identity for
 `GenerationWatchdogTimeout` instances raised by `GenerationProgressWatchdog`,
-but it must not suppress or bypass the generation retry-budget semantics. A
-caller that catches the bubbled exception, including the current `evolve_step`
-path that can emit a generic `emitted_by="evolver"` directive for a failed
-generation, must not emit a second directive for the same watchdog timeout. The
-deduplication key is the timeout decision identity: `target_type`, `target_id`,
-timeout source (`GenerationWatchdogTimeout` / `generation.watchdog`),
-`timeout_kind`, and the triggering watchdog decision event or timestamp
-recorded with the existing lineage watchdog decision. If a source-specific
-`generation.watchdog` directive exists for that key, the generic evolver
-directive for the same failed generation is suppressed or replaced while
-preserving the directive value that `step_action_to_directive(...)` and the
-resilience budget selected. A generic evolver directive is allowed only when no
-source-specific timeout directive already exists for the same timeout decision.
+but it must not suppress or bypass the generation retry-budget semantics. Phase
+3 must make the identity concrete: `emit_decision(...)` must return or preserve
+the persisted `lineage.generation.watchdog_decision` event id, or an equivalent
+stable idempotency key, and attach it to the raised
+`GenerationWatchdogTimeout` before re-raise, for example as
+`exc.details["watchdog_decision_event_id"]`. The source-specific
+`generation.watchdog` directive must derive its `idempotency_key` from that
+stable decision identity plus `lineage_id`, `generation_number`, and
+`timeout_kind`.
+
+A caller that catches the bubbled exception, including the current
+`evolve_step` path that can emit a generic `emitted_by="evolver"` directive for
+a failed generation, must not emit a second directive for the same watchdog
+timeout. `evolve_step` and generic evolver emission sites must check the
+propagated watchdog `idempotency_key` or
+`watchdog_decision_event_id` on `GenerationWatchdogTimeout` and skip generic
+emission for that same watchdog decision. Without this propagated stable id,
+Phase 3 is not implementable. A generic evolver directive is allowed only when
+no source-specific timeout directive already exists for the same timeout
+decision.
 
 ### Auto pipeline timeout mapping
 
@@ -223,30 +232,39 @@ Phase timeouts in `src/ouroboros/auto/pipeline.py` catch `asyncio.TimeoutError`
 and update mutable `AutoPipelineState`. Every auto-pipeline `except
 TimeoutError` branch that marks the state blocked, enforces the pipeline
 deadline, or returns early must emit exactly one source-specific
-`control.directive.emitted` event at the timeout decision point. Terminal
-`Directive.CANCEL` branches may emit at the terminal decision before the state
-mutation or immediately before the early return. Non-terminal
-`Directive.RETRY` branches must first persist and commit, or atomically commit
-with the directive emission, the retry-pending state transition that makes the
-retry durable. A non-terminal `RETRY` event must never become durable without
-the corresponding durable retry marker. The event target is always
-`target_type="session"`, `target_id=state.auto_session_id`; `extra` should
-include the current `state.phase.value`, the timeout seconds used by the
-bounded call when available, `state.last_tool_name` or the tool name being
-marked, and any phase-specific handle fields needed for resume
+`control.directive.emitted` event at the timeout decision point. A timeout that
+blocks a resumable auto phase on the same `auto_session_id` emits
+`Directive.WAIT`, not terminal `Directive.CANCEL`. `Directive.CANCEL` is
+reserved for explicit terminal termination: deadline-enforced aborts, explicit
+terminal decisions, and non-resumable failures that must not be resumed on the
+same auto session. Non-terminal `Directive.RETRY` branches must first persist
+and commit, or atomically commit with the directive emission, the retry-pending
+state transition that makes the retry durable. A non-terminal `RETRY` event
+must never become durable without the corresponding durable retry marker. The
+event target is always `target_type="session"`,
+`target_id=state.auto_session_id`; `extra` should include the current
+`state.phase.value`, the timeout seconds used by the bounded call when
+available, `state.last_tool_name` or the tool name being marked,
+`resume_tool_name` or the resume tool surfaced by the blocked state, and any
+phase-specific handle fields needed for resume
 (`run_handoff_status`, `ralph_job_id`, `ralph_lineage_id`,
 `ralph_dispatch_mode`).
 
-Most auto-pipeline timeout branches are terminal for the current auto attempt:
-interview, seed generation, repair, review, Ralph handoff, Ralph poll,
-evaluator, and lateral-thinker timeouts emit `Directive.CANCEL` when they block
-or return early. The run-handoff branch is the only currently defined
-auto-pipeline timeout branch with a non-terminal retry directive: first
-`"unknown_timeout"` while no retry has been attempted emits `Directive.RETRY`;
-retried `"unknown_timeout"`, `"unknown_retry_failed"`, or a deadline
-enforcement path emits `Directive.CANCEL`. For the first `auto.run_handoff`
-`RETRY`, the persisted `run_start_attempted`/`run_handoff_status` transition is
-the retry-pending marker and must be durable before, or atomically with,
+Under the current auto resume model, blocked interview, seed generation,
+repair, review, Ralph handoff, Ralph poll, evaluator, and lateral-thinker phase
+timeouts are resumable when the auto session remains blocked with a resume tool
+on the same `auto_session_id`; those sites emit `Directive.WAIT` with
+`extra.phase`, resume tool information, and phase handles needed to resume. The
+run-handoff branch has the only currently defined auto-pipeline timeout
+`Directive.RETRY`: first `"unknown_timeout"` while no retry has been attempted
+emits `Directive.RETRY` and records the durable retry marker. After that, a
+retried `"unknown_timeout"` or `"unknown_retry_failed"` emits `Directive.WAIT`
+when the state is blocked awaiting user or upstream resume on the same
+`auto_session_id`; it emits `Directive.CANCEL` only when deadline enforcement
+or another explicit terminal path makes the auto attempt truly terminal. For
+the first `auto.run_handoff` `RETRY`, the persisted
+`run_start_attempted`/`run_handoff_status` transition is the retry-pending
+marker and must be durable before, or atomically with,
 `control.directive.emitted`.
 
 ## Invariants
@@ -265,23 +283,32 @@ inspecting `extra`.
 **I3 — Terminal vs non-terminal is explicit.** Each emitted directive's
 `is_terminal` property (defined on `Directive` in `src/ouroboros/core/directive.py:99`)
 must match the actual run outcome at that site. `Directive.CANCEL` is terminal;
-`Directive.RETRY` is not. No site may emit a terminal directive and then
-continue executing.
+`Directive.RETRY` and `Directive.WAIT` are not. No site may emit a terminal
+directive and then continue executing or resume the same target. A terminal
+`Directive.CANCEL` must brick only the target it truly terminates: an
+execution-scoped MCP timeout cancels that execution target, a lineage-scoped
+watchdog terminal outcome cancels that lineage/generation target, and a
+session-scoped auto `CANCEL` is valid only when the auto session is truly
+terminal, deadline-enforced, or non-resumable.
 
 **I4 — Resume combines the trailing directive with local state.** On session
 resume, the control-plane consumer reads the last `control.directive.emitted`
 event for the relevant target before deciding whether to continue or abort.
 This links to #578 item 4 (resume-path directive consumption). A terminal
-`CANCEL` directive on resume is authoritative and must not restart work. A
-non-terminal `RETRY` directive is actionable only while the corresponding
-persisted local retry-pending state or token still indicates that the retry is
-pending; if the owning surface has since succeeded or transitioned state, that
-local state supersedes the stale trailing `RETRY` without requiring a success
-directive. The current MCP Phase 1 contract has no such persisted token, so MCP
-does not emit `Directive.RETRY`. Producers must preserve the same ordering on
-write: a non-terminal `RETRY` may be appended only after, or in the same atomic
-commit as, the persisted retry-pending state transition that makes it
-actionable on resume.
+`CANCEL` directive on resume is authoritative only for the target it actually
+terminates and must not be generalized to unrelated resumable state. A
+non-terminal `WAIT` directive means the owning surface is blocked and resume
+must use the directive `extra` plus local state, such as `extra.phase` and the
+recorded resume tool, to continue on the same durable target when the blocker
+is cleared. A non-terminal `RETRY` directive is actionable only while the
+corresponding persisted local retry-pending state or token still indicates that
+the retry is pending; if the owning surface has since succeeded or transitioned
+state, that local state supersedes the stale trailing `RETRY` without requiring
+a success directive. The current MCP Phase 1 contract has no such persisted
+token, so MCP does not emit `Directive.RETRY`. Producers must preserve the same
+ordering on write: a non-terminal `RETRY` may be appended only after, or in the
+same atomic commit as, the persisted retry-pending state transition that makes
+it actionable on resume.
 
 **I5 — Retry success clears actionability without success spam.** If a
 timed-out operation succeeds on a subsequent attempt, no additional
@@ -315,13 +342,14 @@ only terminal MCP timeout directives because `_call_with_retry(...)` and
 `Result.err(MCPTimeoutError)` do not persist retry-pending state. Emit one
 terminal `Directive.CANCEL` from the caller-visible terminal decision site when
 the `MAX_RETRIES`/adapter envelope is exhausted and a terminal tool error is
-returned. Phase 1 also requires an API/plumbing change for the emission target:
-either pass an execution/session/control target context through
-`MCPToolProvider.call_tool(...)` and `_call_with_retry(...)`, or select a
-different aggregation target that is already available at the terminal decision
-site and document its resume semantics. The current `MCPToolProvider` call path
-must not be treated as if `execution_id` or session context is already
-available at `_call_with_retry(...)`.
+returned. Phase 1 also requires an API/plumbing change for the canonical
+execution target: pass `execution_id` and the execution/control target context
+through `MCPToolProvider.call_tool(...)` and `_call_with_retry(...)`, then emit
+with `target_type="execution"`, `target_id=execution_id`, and
+`execution_id=execution_id`. The current `MCPToolProvider` call path must not
+be treated as if `execution_id` is already available at `_call_with_retry(...)`.
+Any site that cannot provide `execution_id` after the Phase 1 plumbing must not
+emit an MCP timeout directive until that site is plumbed.
 
 ### Phase 2 — Auto handoff timeout
 
@@ -331,9 +359,13 @@ state machine (`run_handoff_status`, `run_start_attempted`, and
 `control.directive.emitted` emission at the existing timeout decision point.
 For the non-terminal first-time `RETRY`, commit the
 `run_start_attempted`/`run_handoff_status` retry-pending transition before, or
-atomically with, the directive append. Terminal `CANCEL` paths may emit at the
-terminal decision or immediately before the early return. `state.auto_session_id`
-is available throughout the pipeline.
+atomically with, the directive append. After the first retry, a timeout that
+blocks the same auto session awaiting user or upstream resume emits
+`Directive.WAIT` with `extra.phase` and resume tool information. Terminal
+`Directive.CANCEL` paths are limited to deadline-enforced, explicit terminal,
+or non-resumable termination and may emit at the terminal decision or
+immediately before the early return. `state.auto_session_id` is available
+throughout the pipeline.
 
 ### Phase 2b — Remaining auto-pipeline timeout branches
 
@@ -342,7 +374,11 @@ branch that marks blocked or returns early: interview, seed generation, repair,
 review, Ralph handoff, Ralph poll, evaluator, and lateral thinker. This phase
 is still additive and small-blast-radius because it changes only emission at
 existing timeout decision points; it does not alter phase ordering, retry
-counts, state transitions, or resume behavior.
+counts, state transitions, or resume behavior. Resumable blocked phase
+timeouts emit `Directive.WAIT` on `target_type="session"` with `extra.phase`,
+resume tool information, and any phase handles needed to resume on the same
+`auto_session_id`; `Directive.CANCEL` is reserved for explicit
+terminal/deadline-enforced/non-resumable termination.
 
 ### Phase 3 — Watchdog timeout (deferred to #836)
 
@@ -352,7 +388,14 @@ existing lineage event without changing the generation retry-budget contract.
 #836 must not map `timeout_kind` directly to `Directive.RETRY` or
 `Directive.CANCEL`; it should preserve the directive that the failed generation
 would receive through `step_action_to_directive(...)` with the active
-resilience budget, and record `timeout_kind` only in `extra`.
+resilience budget, and record `timeout_kind` only in `extra`. The implementation
+must also make `emit_decision(...)` return or preserve the persisted
+`lineage.generation.watchdog_decision` event id, or an equivalent stable
+idempotency key, attach it to `GenerationWatchdogTimeout` before re-raise, and
+derive the `generation.watchdog` directive `idempotency_key` from that stable
+decision id plus lineage/generation/timeout kind. `evolve_step` and generic
+evolver emission must check the propagated key and skip generic emission for
+the same watchdog decision.
 
 ## Non-goals
 
