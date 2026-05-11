@@ -428,6 +428,75 @@ def test_trust_partial_grant_records_installed_in_audit_event(
     )
 
 
+def test_trust_multi_scope_audit_events_reflect_incremental_grant_state(
+    runner: CliRunner, tmp_path: Path
+) -> None:
+    """Multi-scope trust persists atomically, but the audit stream is still
+    one event per requested scope. Each event's trust_state must describe
+    the conceptual grant step for that event, not the final batched result.
+    """
+    manifest_with_two_required = {
+        **REFERENCE_MANIFEST,
+        "permissions": [
+            {"scope": "github:read", "risk": "read_only", "required": True},
+            {
+                "scope": "github:pull_request:write",
+                "risk": "destructive",
+                "required": True,
+            },
+        ],
+    }
+    plugin_dir = tmp_path / "github-pr-ops"
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    (plugin_dir / "ouroboros.plugin.json").write_text(json.dumps(manifest_with_two_required))
+    paths = _common_paths(tmp_path)
+    install = runner.invoke(
+        plugin_app,
+        [
+            "install",
+            str(plugin_dir),
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--plugin-home-root",
+            str(paths["plugin_home_root"]),
+        ],
+    )
+    assert install.exit_code == 0, install.output
+
+    result = runner.invoke(
+        plugin_app,
+        [
+            "trust",
+            "github-pr-ops",
+            "--scope",
+            "github:read",
+            "--scope",
+            "github:pull_request:write",
+            "--lockfile",
+            str(paths["lockfile"]),
+            "--trust-root",
+            str(paths["trust_root"]),
+            "--audit-log",
+            str(paths["audit_log"]),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    payloads = [json.loads(line)["payload"] for line in paths["audit_log"].read_text().splitlines()]
+    assert [payload["provenance"]["granted_scope"] for payload in payloads] == [
+        "github:read",
+        "github:pull_request:write",
+    ]
+    assert [payload["trust_state"] for payload in payloads] == ["installed", "trusted"]
+
+    record = TrustStore(root=paths["trust_root"]).read("github-pr-ops")
+    assert record is not None
+    assert {g.scope for g in record.granted_scopes} == {
+        "github:read",
+        "github:pull_request:write",
+    }
+
+
 def test_trust_full_required_grant_records_trusted_in_audit_event(
     runner: CliRunner, tmp_path: Path
 ) -> None:

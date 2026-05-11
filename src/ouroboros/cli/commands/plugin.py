@@ -2473,6 +2473,7 @@ def trust_command(
     # MUST surface that state's own corruption clearly.
     try:
         was_disabled = trust.is_disabled(name)
+        existing_record = trust.read(name) if scopes else None
     except (ValueError, OSError) as exc:
         print_error(
             f"trust state for {name!r} is unreadable: {exc}. "
@@ -2480,6 +2481,17 @@ def trust_command(
             f"then re-run `ooo plugin trust {name} --scope <...>`."
         )
         raise typer.Exit(code=1) from exc
+    prior_granted_scopes = (
+        {g.scope for g in existing_record.granted_scopes}
+        if existing_record is not None
+        and existing_record.matches_subject(
+            version=manifest.version,
+            source_type=entry.source_type,
+            source_identity=entry.source_identity,
+            artifact_digest=entry.artifact_digest,
+        )
+        else set()
+    )
 
     # ``--audit-log`` is operator-supplied and routinely points at a
     # path the user expects to exist (e.g. inside a pre-created log
@@ -2519,9 +2531,11 @@ def trust_command(
                     f"re-run `ooo plugin trust {name} --scope <...>`."
                 )
                 raise typer.Exit(code=1) from exc
+        granted_for_event = set(prior_granted_scopes)
         for scope in scopes:
             assert record is not None
             print_success(f"Granted: {scope} ({len(record.granted_scopes)} total scope(s))")
+            granted_for_event.add(scope)
 
             # Audit `trust_state` must mirror the firewall's invokability
             # view, not the fact that *some* grant was just written. A
@@ -2534,11 +2548,10 @@ def trust_command(
             # one optional scope, where the user grants only the
             # optional one. Compute the same predicate the firewall
             # uses post-grant.
-            granted_after = {g.scope for g in record.granted_scopes}
             required_scopes = {p.scope for p in manifest.permissions if p.required}
             event_trust_state = (
                 "trusted"
-                if granted_after and not (required_scopes - granted_after)
+                if granted_for_event and not (required_scopes - granted_for_event)
                 else "installed"
             )
 
