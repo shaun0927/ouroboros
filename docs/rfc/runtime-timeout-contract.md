@@ -11,8 +11,9 @@ timeout representation and signals cancellation through its own mechanism.
 They do not provide a consistent, source-specific `control.directive.emitted`
 signal, so the control plane has no unified visibility into why a run was
 interrupted. This RFC proposes a contract that maps every timeout surface onto
-the `Directive` vocabulary and requires each site to emit
-`control.directive.emitted` as the canonical control-plane signal.
+the `Directive` vocabulary and, once that surface's target plumbing is
+migrated, requires each site to emit `control.directive.emitted` as the
+canonical control-plane signal.
 
 ## Context
 
@@ -121,18 +122,29 @@ runtime decision was made here."
 
 ## Proposed contract
 
-All three surfaces must emit `control.directive.emitted` via
-`create_control_directive_emitted_event` from `src/ouroboros/events/control.py`
-at the local timeout decision point. The event is the sole authoritative
-control-plane signal that a timeout caused a retry, block, cancellation, or
-early return. Existing exception types, state mutation, and lineage events
-remain as local implementation details; consumers should derive timeout control
-decisions from the directive journal, with non-terminal retry actionability
-resolved against the owning surface's persisted retry-pending state as defined
-in I4.
+In the completed migration state, all three surfaces must emit
+`control.directive.emitted` via `create_control_directive_emitted_event` from
+`src/ouroboros/events/control.py` at the local timeout decision point. The event
+is the sole authoritative control-plane signal that a migrated timeout decision
+caused a retry, block, cancellation, or early return. A migration phase is not
+complete for a surface until every covered decision site has both the local
+timeout decision and the durable control target needed to emit that directive;
+unplumbed sites remain explicitly outside that phase's completed coverage rather
+than silently violating I1. Existing exception types, state mutation, and
+lineage events remain as local implementation details; consumers should derive
+timeout control decisions from the directive journal for migrated sites, with
+non-terminal retry actionability resolved against the owning surface's persisted
+retry-pending state as defined in I4.
 
 The `emitted_by` field distinguishes the source surface. The `directive` field
 is determined per-surface as follows.
+
+Target types follow `CANONICAL_CONTROL_TARGET_TYPES` where an existing durable
+target has the right resume semantics (`session`, `execution`, `lineage`,
+`agent_process`, `contract`, `execution_node`). This RFC also introduces the
+additive `lineage_generation` target for generation-local watchdog decisions;
+`ControlContract.target_type` is advisory rather than closed, so additive Agent
+OS targets may be documented without changing stored event schemas.
 
 ### Mapping table
 
@@ -175,10 +187,12 @@ canonical MCP timeout directive target is execution-scoped:
 `target_type="execution"`, `target_id=execution_id`, and
 `execution_id=execution_id`. Phase 1 must plumb this execution/control target
 context through both `MCPToolProvider.call_tool(...)` and `_call_with_retry(...)`
-before any MCP timeout directive can be emitted. If a call site cannot provide
-`execution_id`, that site must not emit `control.directive.emitted` for MCP
-timeouts until the missing plumbing exists; it must continue using the local
-terminal tool error path only. There is no alternate MCP timeout target.
+before the MCP surface is considered migrated. If a call site cannot provide
+`execution_id`, Phase 1 is incomplete for that call site and it must continue
+using the local terminal tool error path only; implementations must not claim
+unified MCP timeout coverage until all caller-visible MCP timeout decisions in
+scope have the execution target plumbing. There is no alternate MCP timeout
+target.
 
 ### Watchdog timeout mapping
 
@@ -199,9 +213,13 @@ maps `timeout_kind` directly to `Directive.RETRY` or `Directive.CANCEL`. If
 `step_action_to_directive(...)` with the same retry budget the evolution loop
 would use, or accept the already-computed directive from the loop. The watchdog
 event appends `control.directive.emitted` with
-`emitted_by="generation.watchdog"`, `target_type="lineage"`,
-`target_id=lineage_id`, and `extra` including `timeout_kind`, thresholds, and
-the watchdog decision metadata needed for audit.
+`emitted_by="generation.watchdog"` on a generation-scoped target:
+`target_type="lineage_generation"`,
+`target_id=f"{lineage_id}:{generation_number}"`, `lineage_id=lineage_id`, and
+`generation_number=generation_number`. `extra` includes `timeout_kind`,
+thresholds, and the watchdog decision metadata needed for audit. This target is
+generation-local even when the directive is terminal; a watchdog `CANCEL` bricks
+only that failed generation attempt, not the whole lineage chain.
 
 The watchdog source owns source-specific directive identity for
 `GenerationWatchdogTimeout` instances raised by `GenerationProgressWatchdog`,
@@ -286,8 +304,9 @@ must match the actual run outcome at that site. `Directive.CANCEL` is terminal;
 `Directive.RETRY` and `Directive.WAIT` are not. No site may emit a terminal
 directive and then continue executing or resume the same target. A terminal
 `Directive.CANCEL` must brick only the target it truly terminates: an
-execution-scoped MCP timeout cancels that execution target, a lineage-scoped
-watchdog terminal outcome cancels that lineage/generation target, and a
+execution-scoped MCP timeout cancels that execution target, a
+generation-scoped watchdog terminal outcome cancels only the
+`lineage_generation` target for that `lineage_id`/`generation_number`, and a
 session-scoped auto `CANCEL` is valid only when the auto session is truly
 terminal, deadline-enforced, or non-resumable.
 
@@ -393,9 +412,10 @@ must also make `emit_decision(...)` return or preserve the persisted
 `lineage.generation.watchdog_decision` event id, or an equivalent stable
 idempotency key, attach it to `GenerationWatchdogTimeout` before re-raise, and
 derive the `generation.watchdog` directive `idempotency_key` from that stable
-decision id plus lineage/generation/timeout kind. `evolve_step` and generic
-evolver emission must check the propagated key and skip generic emission for
-the same watchdog decision.
+decision id plus `lineage_id`, `generation_number`, and `timeout_kind` on the
+`lineage_generation` target. `evolve_step` and generic evolver emission must
+check the propagated key and skip generic emission for the same watchdog
+decision.
 
 ## Non-goals
 
