@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -22,7 +23,7 @@ from ouroboros.orchestrator.agent_process import (
     AgentProcessStatus,
     project_agent_process_snapshot,
 )
-from ouroboros.persistence.checkpoint import CheckpointStore
+from ouroboros.persistence.checkpoint import CheckpointData, CheckpointStore
 from ouroboros.persistence.event_store import EventStore
 
 
@@ -793,16 +794,71 @@ async def test_load_persisted_pause_does_not_rollback_to_stale_paused_checkpoint
     await _wait_for_status(handle, AgentProcessStatus.PAUSED)
     await handle.resume(store=ck_store)
 
-    current_checkpoint = tmp_path / f"checkpoint_{handle.process_id}.json"
+    checkpoint_seed = f"agent_process_{hashlib.sha256(handle.process_id.encode()).hexdigest()}"
+    current_checkpoint = tmp_path / f"checkpoint_{checkpoint_seed}.json"
     current_checkpoint.write_text("{not valid json", encoding="utf-8")
 
     # The generic API rolls back to the older paused row, but pause recovery
     # must use stricter latest-row semantics and return False.
-    assert ck_store.load(handle.process_id).value.phase == "agent_process_paused"
+    assert ck_store.load(checkpoint_seed).value.phase == "agent_process_paused"
     assert AgentProcessHandle.load_persisted_pause(handle.process_id, store=ck_store) is False
 
     await handle.cancel(reason="end test")
     await handle.wait_until_complete(timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_pause_checkpoint_uses_agent_process_namespace(tmp_path: Path) -> None:
+    """Agent pause persistence must not overwrite a workflow checkpoint with the same id."""
+    ck_store = CheckpointStore(base_path=tmp_path)
+    process_id = "shared-id"
+    workflow_checkpoint = CheckpointData.create(
+        seed_id=process_id,
+        phase="workflow_running",
+        state={"owner": "workflow"},
+    )
+    assert ck_store.save(workflow_checkpoint).is_ok
+
+    process = AgentProcess(event_store=None)
+    started = asyncio.Event()
+
+    async def work(handle):
+        started.set()
+        while not handle.should_cancel():
+            await handle.wait_unpaused()
+            await asyncio.sleep(0.005)
+
+    handle = await process.spawn(intent="ralph", work_fn=work, process_id=process_id)
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    await handle.pause(store=ck_store)
+    await _wait_for_status(handle, AgentProcessStatus.PAUSED)
+
+    assert AgentProcessHandle.load_persisted_pause(process_id, store=ck_store) is True
+    loaded_workflow = ck_store.load(process_id)
+    assert loaded_workflow.is_ok
+    assert loaded_workflow.value.phase == "workflow_running"
+    assert loaded_workflow.value.state == {"owner": "workflow"}
+
+    await handle.cancel(reason="end test")
+    await handle.wait_until_complete(timeout=1.0)
+
+
+def test_pause_checkpoint_key_avoids_sanitizer_collisions(tmp_path: Path) -> None:
+    """Distinct process ids that sanitize alike must not share pause recovery state."""
+    ck_store = CheckpointStore(base_path=tmp_path)
+    colliding_raw_id = "a/b"
+    other_raw_id = "a_b"
+
+    checkpoint = CheckpointData.create(
+        seed_id=f"agent_process_{hashlib.sha256(colliding_raw_id.encode()).hexdigest()}",
+        phase="agent_process_paused",
+        state={"status": "paused"},
+    )
+    assert ck_store.save(checkpoint).is_ok
+
+    assert AgentProcessHandle.load_persisted_pause(colliding_raw_id, store=ck_store) is True
+    assert AgentProcessHandle.load_persisted_pause(other_raw_id, store=ck_store) is False
 
 
 @pytest.mark.asyncio

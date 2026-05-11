@@ -56,6 +56,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
+import hashlib
 import logging
 from typing import Any, Final, Protocol
 from uuid import uuid4
@@ -291,9 +292,9 @@ class AgentProcessHandle:
         :attr:`AgentProcessStatus.PAUSED`, so restart recovery reflects
         acknowledged lifecycle truth rather than a merely requested pause.
 
-        Note: ``process_id`` is UUID4 hex (32 hex chars, no separators)
-        which contains only ``[0-9a-f]`` — safe for :class:`CheckpointStore`
-        sanitization without truncation or collision.
+        Checkpoint rows use an agent-process-specific key derived from
+        ``process_id`` so lifecycle persistence cannot collide with generic
+        workflow checkpoints in the shared :class:`CheckpointStore`.
         """
         if self._status in _TERMINAL_STATUSES or self.should_cancel():
             return
@@ -400,7 +401,9 @@ class AgentProcessHandle:
             # CheckpointStore.load()'s generic rollback-to-older-valid behavior:
             # if the latest row is corrupt, fail closed to not paused rather
             # than resurrecting a stale paused checkpoint from .1/.2/.3.
-            result = _store._load_checkpoint_level(process_id, 0)  # noqa: SLF001
+            result = _store._load_checkpoint_level(  # noqa: SLF001
+                _pause_checkpoint_seed_id(process_id), 0
+            )
             if result.is_err:
                 return False
             return result.value.phase == "agent_process_paused"
@@ -537,7 +540,7 @@ class AgentProcessHandle:
             if reason is not None:
                 state["reason"] = reason
             checkpoint = CheckpointData.create(
-                seed_id=self.process_id,
+                seed_id=_pause_checkpoint_seed_id(self.process_id),
                 phase=phase,
                 state=state,
             )
@@ -671,6 +674,11 @@ class AgentProcess:
                 )
 
         return emit
+
+
+def _pause_checkpoint_seed_id(process_id: str) -> str:
+    """Return the CheckpointStore key for agent-process pause state."""
+    return f"agent_process_{hashlib.sha256(process_id.encode()).hexdigest()}"
 
 
 def _new_process_id() -> str:
