@@ -414,6 +414,37 @@ class TestComplete:
         assert "Hello there!" in result.value.content
 
     @pytest.mark.asyncio
+    async def test_fallback_plain_text_ignores_json_metadata_and_tool_events(self) -> None:
+        adapter = CopilotCliLLMAdapter(cli_path="copilot", cwd=os.getcwd())
+        stdout = "\n".join(
+            [
+                json.dumps({"type": "session.started", "session_id": "sess-mixed"}),
+                json.dumps({"type": "tool_use", "name": "shell", "command": "pwd"}),
+                "Plain text fallback answer.",
+                json.dumps({"type": "turn.completed", "usage": {"input_tokens": 12}}),
+            ]
+        )
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _FakeProcess:
+            return _FakeProcess(stdout=stdout, returncode=0)
+
+        with patch(
+            "ouroboros.providers.copilot_cli_adapter.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
+        ):
+            result = await adapter.complete(
+                [Message(role=MessageRole.USER, content="Answer plainly")],
+                CompletionConfig(model="default"),
+            )
+
+        assert result.is_ok
+        assert result.value.content == "Plain text fallback answer."
+        assert result.value.raw_response["session_id"] == "sess-mixed"
+        assert "session.started" not in result.value.content
+        assert "tool_use" not in result.value.content
+        assert "turn.completed" not in result.value.content
+
+    @pytest.mark.asyncio
     async def test_nonzero_exit_returns_provider_error(self) -> None:
         adapter = CopilotCliLLMAdapter(cli_path="copilot", cwd=os.getcwd())
 
