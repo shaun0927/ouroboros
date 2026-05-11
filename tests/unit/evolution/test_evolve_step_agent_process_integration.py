@@ -9,29 +9,25 @@ Issue #518 — slice 5 of M6. Pins three contracts:
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 from ouroboros.core.lineage import (
     EvaluationSummary,
     GenerationPhase,
-    OntologyLineage,
     OntologySchema,
 )
 from ouroboros.core.seed import Seed
 from ouroboros.core.types import Result
-from ouroboros.evolution.convergence import ConvergenceSignal
+from ouroboros.events.base import BaseEvent
 from ouroboros.evolution.loop import (
     EvolutionaryLoop,
     EvolutionaryLoopConfig,
     GenerationResult,
     StepAction,
-    StepResult,
 )
-from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.agent_process import AgentProcess, AgentProcessStatus
 
 
@@ -235,9 +231,9 @@ async def test_evolve_step_existing_lineage_events_unchanged() -> None:
     assert "lineage.created" in event_types, f"Missing lineage.created in {event_types}"
 
     # lineage.generation.completed must be emitted (the main lineage state event)
-    assert (
-        "lineage.generation.completed" in event_types
-    ), f"Missing lineage.generation.completed in {event_types}"
+    assert "lineage.generation.completed" in event_types, (
+        f"Missing lineage.generation.completed in {event_types}"
+    )
 
     # Verify the completed event carries the correct generation number
     completed_events = [e for e in store.appended if e.type == "lineage.generation.completed"]
