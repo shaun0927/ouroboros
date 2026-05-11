@@ -2496,6 +2496,7 @@ def trust_command(
     # MUST surface that state's own corruption clearly.
     try:
         was_disabled = trust.is_disabled(name)
+        existing_record = trust.read(name) if scopes else None
     except (ValueError, OSError) as exc:
         print_error(
             f"trust state for {name!r} is unreadable: {exc}. "
@@ -2503,6 +2504,17 @@ def trust_command(
             f"then re-run `ooo plugin trust {name} --scope <...>`."
         )
         raise typer.Exit(code=1) from exc
+    prior_granted_scopes = (
+        {g.scope for g in existing_record.granted_scopes}
+        if existing_record is not None
+        and existing_record.matches_subject(
+            version=manifest.version,
+            source_type=entry.source_type,
+            source_identity=entry.source_identity,
+            artifact_digest=entry.artifact_digest,
+        )
+        else set()
+    )
 
     # ``--audit-log`` is operator-supplied and routinely points at a
     # path the user expects to exist (e.g. inside a pre-created log
@@ -2523,12 +2535,13 @@ def trust_command(
         )
         raise typer.Exit(code=1) from exc
     try:
-        for scope in scopes:
+        record = None
+        if scopes:
             try:
-                record = trust.grant(
+                record = trust.grant_many_and_clear_disable(
                     plugin=name,
                     version=manifest.version,
-                    scope=scope,
+                    scopes=scopes,
                     granted_by=granted_by,
                     source_type=entry.source_type,
                     source_identity=entry.source_identity,
@@ -2541,7 +2554,11 @@ def trust_command(
                     f"re-run `ooo plugin trust {name} --scope <...>`."
                 )
                 raise typer.Exit(code=1) from exc
+        granted_for_event = set(prior_granted_scopes)
+        for scope in scopes:
+            assert record is not None
             print_success(f"Granted: {scope} ({len(record.granted_scopes)} total scope(s))")
+            granted_for_event.add(scope)
 
             # Audit `trust_state` must mirror the firewall's invokability
             # view, not the fact that *some* grant was just written. A
@@ -2554,11 +2571,10 @@ def trust_command(
             # one optional scope, where the user grants only the
             # optional one. Compute the same predicate the firewall
             # uses post-grant.
-            granted_after = {g.scope for g in record.granted_scopes}
             required_scopes = {p.scope for p in manifest.permissions if p.required}
             event_trust_state = (
                 "trusted"
-                if granted_after and not (required_scopes - granted_after)
+                if granted_for_event and not (required_scopes - granted_for_event)
                 else "installed"
             )
 
@@ -2623,26 +2639,19 @@ def trust_command(
                 # with a teardown failure.
                 pass
 
-    # Clear the disable record only after all fallible writes above
-    # have succeeded. ``clear_disable`` is idempotent and the
-    # *last* state-changing step the command makes. Wrap so a
-    # filesystem failure (permissions, etc.) on ``unlink(disabled.json)``
-    # does NOT crash after the user has already seen ``Granted: ...``
-    # — that left a partial-commit at the trust boundary where the
-    # trust file looked updated while the plugin was still disabled.
-    # The recovery hint instructs the user to re-run ``trust`` after
-    # repairing the underlying filesystem condition.
-    try:
-        trust.clear_disable(name)
-    except (ValueError, OSError) as exc:
-        print_error(
-            f"grants for {name!r} were written, but clearing the disable "
-            f"record failed: {exc}. The plugin remains disabled until "
-            f"`ooo plugin disable {name}` is unwound — re-run "
-            f"`ooo plugin trust {name} ...` after the underlying "
-            f"filesystem issue is fixed."
-        )
-        raise typer.Exit(code=1) from exc
+    # Scope grants clear disable atomically via grant_many_and_clear_disable().
+    # A bare re-enable still has no grant to combine with, so keep the
+    # idempotent clear-only path for zero-required-permission plugins.
+    if not scopes:
+        try:
+            trust.clear_disable(name)
+        except (ValueError, OSError) as exc:
+            print_error(
+                f"clearing the disable record for {name!r} failed: {exc}. "
+                f"The plugin remains disabled until `ooo plugin trust {name}` "
+                "is re-run after the underlying filesystem issue is fixed."
+            )
+            raise typer.Exit(code=1) from exc
     if not scopes and was_disabled:
         # Bare `ooo plugin trust <zero-perm-plugin>` (or all-optional)
         # against a disabled subject — the only effective change is
@@ -2694,7 +2703,7 @@ def disable_command(
     # a recovery hint instead of a raw traceback in the very command
     # operators run to repair that state.
     try:
-        removed_trust = trust.remove(name)
+        removed_trust = trust.has_trust_record(name)
         if not removed_trust:
             # Disabling an already-untrusted plugin is valid: the disable
             # record is an independent revocation signal. However, when
@@ -2709,14 +2718,14 @@ def disable_command(
                 candidate_root = candidate_root.expanduser()
                 if candidate_root == trust.root.expanduser():
                     continue
-                if (candidate_root / name / "trust.json").is_file():
+                if TrustStore(root=candidate_root).has_trust_record(name):
                     print_error(
                         f"no trust grant for {name!r} exists under {trust.root}, "
                         f"but a grant exists under {candidate_root}; pass the "
                         "same --trust-root used for the grant before disabling."
                     )
                     raise typer.Exit(code=1)
-        trust.write_disable(
+        trust.apply_disable(
             name,
             source_type=entry.source_type
             or ("plugin_home" if entry.source_kind == "git" else "local_path"),
