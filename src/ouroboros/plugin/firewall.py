@@ -820,6 +820,24 @@ def invoke_plugin(
     }
     if plugin_home is not None:
         run_kwargs["cwd"] = str(plugin_home)
+
+    # Coerce stdout/stderr to bytes for hashing, regardless of whether
+    # the runner returned ``bytes`` (real subprocess.run without
+    # ``text=True``) or ``str`` (test fakes that pre-decode). This also
+    # handles partial buffers attached to ``subprocess.TimeoutExpired``.
+    # ``surrogateescape`` round-trips arbitrary byte sequences through
+    # str without raising, matching how Python decodes filesystem paths.
+    def _to_bytes(value: object) -> bytes:
+        if value is None:
+            return b""
+        if isinstance(value, bytes):
+            return value
+        if isinstance(value, str):
+            return value.encode("utf-8", errors="surrogateescape")
+        # Defensive: any other type is treated as empty so we never
+        # crash on an unexpected runner return shape.
+        return b""
+
     try:
         completed = runner(cmd_argv, **run_kwargs)
     except FileNotFoundError as exc:
@@ -850,6 +868,10 @@ def invoke_plugin(
         # Ralph runtimes bound their agent loops, and always close the
         # audit sequence with a terminal ``plugin.failed`` event rather
         # than leaving the caller hung indefinitely.
+        stdout_bytes = _to_bytes(exc.stdout)
+        stderr_bytes = _to_bytes(exc.stderr)
+        stdout_hash = hashlib.sha256(stdout_bytes).hexdigest()
+        stderr_hash = hashlib.sha256(stderr_bytes).hexdigest()
         message = (
             f"entrypoint timed out after "
             f"{DEFAULT_PLUGIN_INVOCATION_TIMEOUT_SECONDS:g}s: {cmd_argv[0]!r}"
@@ -868,6 +890,8 @@ def invoke_plugin(
                     "reason": "timeout",
                     "exception_type": type(exc).__name__,
                     "timeout_seconds": f"{DEFAULT_PLUGIN_INVOCATION_TIMEOUT_SECONDS:g}",
+                    "stdout_sha256": stdout_hash,
+                    "stderr_sha256": stderr_hash,
                 },
             )
         )
@@ -875,6 +899,10 @@ def invoke_plugin(
             status="failed",
             exit_code=124,
             message=message,
+            stdout_sha256=stdout_hash,
+            stderr_sha256=stderr_hash,
+            stdout_bytes=stdout_bytes,
+            stderr_bytes=stderr_bytes,
             events=tuple(emitted),
         )
     except OSError as exc:
@@ -907,22 +935,6 @@ def invoke_plugin(
             message=message,
             events=tuple(emitted),
         )
-
-    # Coerce stdout/stderr to bytes for hashing, regardless of whether
-    # the runner returned ``bytes`` (real subprocess.run without
-    # ``text=True``) or ``str`` (test fakes that pre-decode).
-    # ``surrogateescape`` round-trips arbitrary byte sequences through
-    # str without raising, matching how Python decodes filesystem paths.
-    def _to_bytes(value: object) -> bytes:
-        if value is None:
-            return b""
-        if isinstance(value, bytes):
-            return value
-        if isinstance(value, str):
-            return value.encode("utf-8", errors="surrogateescape")
-        # Defensive: any other type is treated as empty so we never
-        # crash on an unexpected runner return shape.
-        return b""
 
     stdout_bytes = _to_bytes(completed.stdout)
     stderr_bytes = _to_bytes(completed.stderr)

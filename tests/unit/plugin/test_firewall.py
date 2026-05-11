@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -1233,3 +1234,63 @@ def test_subprocess_timeout_emits_terminal_failed_event(tmp_path: Path) -> None:
     assert failed["result"]["status"] == "failed"
     assert failed["provenance"]["reason"] == "timeout"
     assert failed["provenance"]["exception_type"] == "TimeoutExpired"
+
+
+def test_subprocess_timeout_preserves_partial_output_hashes_only_in_events(
+    tmp_path: Path,
+) -> None:
+    """TimeoutExpired may carry partial stdout/stderr buffers. The
+    firewall must return those bytes to in-process callers and put only
+    their hashes in the terminal audit event."""
+    program = _make_program(tmp_path)
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="u",
+    )
+    partial_stdout = b"partial stdout before timeout\n"
+    partial_stderr = b"partial stderr before timeout\n"
+
+    def _timeout_runner(argv, *args, **kwargs) -> subprocess.CompletedProcess:  # noqa: ARG001
+        raise subprocess.TimeoutExpired(
+            cmd=argv,
+            timeout=kwargs["timeout"],
+            output=partial_stdout,
+            stderr=partial_stderr,
+        )
+
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["url"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-timeout-partial",
+        subprocess_runner=_timeout_runner,
+    )
+
+    expected_stdout_hash = hashlib.sha256(partial_stdout).hexdigest()
+    expected_stderr_hash = hashlib.sha256(partial_stderr).hexdigest()
+    assert result.status == "failed"
+    assert result.exit_code == 124
+    assert result.stdout_bytes == partial_stdout
+    assert result.stderr_bytes == partial_stderr
+    assert result.stdout_sha256 == expected_stdout_hash
+    assert result.stderr_sha256 == expected_stderr_hash
+
+    assert [event["event_type"] for event in events] == [
+        "plugin.invoked",
+        "plugin.permission_used",
+        "plugin.failed",
+    ]
+    failed = events[-1]
+    assert failed["result"]["status"] == "failed"
+    assert failed["provenance"]["reason"] == "timeout"
+    assert failed["provenance"]["stdout_sha256"] == expected_stdout_hash
+    assert failed["provenance"]["stderr_sha256"] == expected_stderr_hash
+
+    serialized = json.dumps(events)
+    assert "partial stdout before timeout" not in serialized
+    assert "partial stderr before timeout" not in serialized
