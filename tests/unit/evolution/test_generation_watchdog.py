@@ -338,6 +338,55 @@ async def test_no_progress_timeout_emits_unstuck_directive() -> None:
 
 
 @pytest.mark.asyncio
+async def test_timeout_preserved_when_control_directive_append_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The additive control event must not mask the watchdog timeout."""
+    clock = _FakeMonotonicClock()
+    monkeypatch.setattr(watchdog_module, "time", SimpleNamespace(monotonic=clock))
+    event_store = await _store()
+    lineage_id = "lin-578-control-fail"
+    execution_id = "exec-578-control-fail"
+    watchdog = _watchdog(
+        event_store,
+        lineage_id=lineage_id,
+        execution_id=execution_id,
+        generation_safety_timeout_seconds=0.1,
+        watchdog_poll_seconds=0.005,
+    )
+    original_append = event_store.append
+
+    async def append_with_control_failure(event: BaseEvent) -> None:
+        if event.type == "control.directive.emitted":
+            raise PersistenceError(
+                "control directive append failed",
+                operation="append",
+                details={"event_type": event.type},
+            )
+        await original_append(event)
+
+    monkeypatch.setattr(event_store, "append", append_with_control_failure)
+
+    async def long_work() -> str:
+        try:
+            while True:
+                await asyncio.sleep(0.01)
+                clock.advance(0.05)
+        except asyncio.CancelledError:
+            raise
+
+    with pytest.raises(GenerationWatchdogTimeout) as exc_info:
+        await watchdog.watch(long_work())
+
+    assert exc_info.value.timeout_kind == "safety_timeout"
+    events = await event_store.replay("lineage", lineage_id)
+    decision_events = [e for e in events if e.type == "lineage.generation.watchdog_decision"]
+    assert len(decision_events) == 1
+    assert decision_events[0].data["details"]["directive"] == "cancel"
+    assert [e for e in events if e.type == "control.directive.emitted"] == []
+
+
+@pytest.mark.asyncio
 async def test_directive_emission_alphabet_matches_watchdog_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

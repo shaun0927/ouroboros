@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
+import logging
 import time
 from typing import Any
 
@@ -19,6 +20,8 @@ from ouroboros.evolution.directive_mapping import (
     watchdog_timeout_to_directive,
 )
 from ouroboros.persistence.event_store import EventStore
+
+logger = logging.getLogger(__name__)
 
 _LINEAGE_MATERIAL_EVENTS = frozenset(
     {
@@ -245,23 +248,31 @@ class GenerationProgressWatchdog:
         if directive is None:
             return
 
-        await self.event_store.append(
-            create_control_directive_emitted_event(
-                target_type="lineage",
-                target_id=self.lineage_id,
-                emitted_by="watchdog",
-                directive=directive,
-                reason=reason,
-                lineage_id=self.lineage_id,
-                generation_number=self.generation_number,
-                execution_id=self.execution_id,
-                extra={
-                    "watchdog_action": action,
-                    "timeout_kind": (details or {}).get("timeout_kind"),
-                    "is_terminal": is_terminal_directive(directive),
-                },
+        try:
+            await self.event_store.append(
+                create_control_directive_emitted_event(
+                    target_type="lineage",
+                    target_id=self.lineage_id,
+                    emitted_by="watchdog",
+                    directive=directive,
+                    reason=reason,
+                    lineage_id=self.lineage_id,
+                    generation_number=self.generation_number,
+                    execution_id=self.execution_id,
+                    extra={
+                        "watchdog_action": action,
+                        "timeout_kind": (details or {}).get("timeout_kind"),
+                        "is_terminal": is_terminal_directive(directive),
+                    },
+                )
             )
-        )
+        except Exception:
+            logger.warning(
+                "Failed to persist watchdog control directive for lineage %s generation %s",
+                self.lineage_id,
+                self.generation_number,
+                exc_info=True,
+            )
 
     def _record_event(self, event: BaseEvent) -> None:
         if event.id in self._seen_event_ids:
