@@ -77,31 +77,40 @@ runner = CliRunner()
 
 
 @pytest.fixture()
-def fake_profile():
-    """Register a fake 'fake-domain' profile in DEFAULT_REGISTRY for the test duration."""
-    profile = _make_fake_profile("fake-domain", detector_score=0.0)
-    DEFAULT_REGISTRY.register(profile)
-    yield profile
-    # Cleanup: remove the registered profile so other tests are not affected.
-    DEFAULT_REGISTRY._profiles[:] = [
-        p for p in DEFAULT_REGISTRY._profiles if p.name != "fake-domain"
-    ]
+def isolated_default_registry(monkeypatch):
+    """Give each test an isolated DEFAULT_REGISTRY profile list."""
+    monkeypatch.setattr(DEFAULT_REGISTRY, "_profiles", [])
 
 
 @pytest.fixture()
-def detectable_profile(tmp_path):
+def fake_profile(isolated_default_registry):
+    """Register a fake 'fake-domain' profile in DEFAULT_REGISTRY for the test duration."""
+    profile = _make_fake_profile("fake-domain", detector_score=0.0)
+    DEFAULT_REGISTRY.register(profile)
+    return profile
+
+
+@pytest.fixture()
+def detectable_profile(isolated_default_registry, tmp_path):
     """Register a fake 'detectable' profile that returns high confidence for any dir."""
     profile = _make_fake_profile("detectable", detector_score=0.9)
     DEFAULT_REGISTRY.register(profile)
-    yield profile, tmp_path
-    DEFAULT_REGISTRY._profiles[:] = [
-        p for p in DEFAULT_REGISTRY._profiles if p.name != "detectable"
-    ]
+    return profile, tmp_path
 
 
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+def test_auto_help_hides_domain_option(isolated_default_registry) -> None:
+    """The dormant domain activation hook is accepted but not publicly advertised."""
+    assert DEFAULT_REGISTRY.all() == ()
+
+    result = runner.invoke(app, ["auto", "--help"])
+
+    assert result.exit_code == 0
+    assert "--domain" not in result.output
 
 
 def test_domain_flag_overrides_detection(fake_profile, tmp_path) -> None:
@@ -213,29 +222,27 @@ def test_detector_exception_leaves_profile_none(tmp_path) -> None:
 
     from ouroboros.cli.commands.auto import _run_auto
 
-    profile = _make_fake_profile("broken-detector", detector=_raise_detector)
-    DEFAULT_REGISTRY.register(profile)
-    try:
-        with patch(
-            "ouroboros.auto.pipeline.AutoPipeline.run",
-            side_effect=_fake_pipeline_run,
+    with patch.object(DEFAULT_REGISTRY, "_profiles", []):
+        profile = _make_fake_profile("broken-detector", detector=_raise_detector)
+        DEFAULT_REGISTRY.register(profile)
+        with (
+            patch(
+                "ouroboros.auto.pipeline.AutoPipeline.run",
+                side_effect=_fake_pipeline_run,
+            ),
+            patch("ouroboros.cli.commands.auto._safe_default_cwd", return_value=tmp_path),
         ):
-            with patch("ouroboros.cli.commands.auto._safe_default_cwd", return_value=tmp_path):
-                result = asyncio.run(
-                    _run_auto(
-                        goal="build something",
-                        resume=None,
-                        runtime=None,
-                        max_interview_rounds=None,
-                        max_repair_rounds=None,
-                        skip_run=True,
-                        domain=None,
-                    )
+            result = asyncio.run(
+                _run_auto(
+                    goal="build something",
+                    resume=None,
+                    runtime=None,
+                    max_interview_rounds=None,
+                    max_repair_rounds=None,
+                    skip_run=True,
+                    domain=None,
                 )
-    finally:
-        DEFAULT_REGISTRY._profiles[:] = [
-            p for p in DEFAULT_REGISTRY._profiles if p.name != "broken-detector"
-        ]
+            )
 
     assert result.status == "complete"
     assert captured["profile_name"] is None

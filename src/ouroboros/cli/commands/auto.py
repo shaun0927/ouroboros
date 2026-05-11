@@ -180,6 +180,7 @@ def auto_command(
         str | None,
         typer.Option(
             "--domain",
+            hidden=True,
             help=(
                 "Explicitly activate a domain profile by name (e.g. 'coding'). "
                 "Overrides auto-detection. Use 'ooo auto --domain coding <goal>' "
