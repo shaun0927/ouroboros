@@ -14,9 +14,13 @@ from ouroboros.auto.adapters import EvaluateResult, LateralResult
 from ouroboros.auto.blocker_attribution import record_authoring_backend
 from ouroboros.auto.grading import GradeGate, deterministic_floor
 from ouroboros.auto.handoff_contract import (
+    IDEMPOTENCY_KEY_FIELD,
     IDEMPOTENCY_KWARG_NAME,
     RETRY_GUIDANCE_PHRASE,
     UNKNOWN_HANDOFF_STATUSES,
+    UNKNOWN_NO_HANDLE_STATUS,
+    UNKNOWN_TIMEOUT_STATUS,
+    unknown_handoff_guidance,
 )
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.lateral_routing import select_persona_for_qa_failure
@@ -746,7 +750,7 @@ class AutoPipeline:
         # do NOT call the run starter a third time — the in-process
         # idempotency map cannot rule out a duplicate enqueue past two
         # attempts on the same session.
-        idempotency_key = state.auto_session_id
+        idempotency_key = getattr(state, IDEMPOTENCY_KEY_FIELD)
         prior_retry_exhausted = (
             state.run_handoff_guidance is not None
             and RETRY_GUIDANCE_PHRASE in state.run_handoff_guidance
@@ -791,7 +795,7 @@ class AutoPipeline:
             try:
                 run_kwargs: dict[str, Any] = {}
                 if _accepts_keyword(self.run_starter, IDEMPOTENCY_KWARG_NAME):
-                    run_kwargs["idempotency_key"] = idempotency_key
+                    run_kwargs[IDEMPOTENCY_KWARG_NAME] = idempotency_key
                 run_meta = await asyncio.wait_for(
                     self.run_starter(seed, **run_kwargs),
                     timeout=run_start_timeout,
@@ -802,7 +806,7 @@ class AutoPipeline:
             except TimeoutError as exc:
                 if self._enforce_deadline(state):
                     return self._result(state, ledger, review=review, blocker=state.last_error)
-                _mark_unknown_run_handoff(state, status="unknown_timeout")
+                _mark_unknown_run_handoff(state, status=UNKNOWN_TIMEOUT_STATUS)
                 if retried:
                     state.run_handoff_guidance = (
                         f"{state.run_handoff_guidance or ''} "
@@ -2030,31 +2034,12 @@ def _mark_invalid_seed_artifact(state: AutoPipelineState, message: str) -> None:
 
 
 def _mark_unknown_run_handoff(
-    state: AutoPipelineState, *, status: str = "unknown_no_handle"
+    state: AutoPipelineState, *, status: str = UNKNOWN_NO_HANDLE_STATUS
 ) -> None:
-    if status == "unknown_no_handle" and state.run_handoff_status in {
-        "unknown_no_handle",
-        "unknown_timeout",
-    }:
+    if status == UNKNOWN_NO_HANDLE_STATUS and state.run_handoff_status in UNKNOWN_HANDOFF_STATUSES:
         status = state.run_handoff_status
     state.run_handoff_status = status
-    if status == "unknown_timeout":
-        state.run_handoff_guidance = (
-            "Run starter timed out before a durable tracking handle was captured. "
-            "The runtime may still have created an execution. Resume will attempt "
-            "exactly one automatic retry reusing the same idempotency key (state."
-            "auto_session_id) so the server-side handler can short-circuit a "
-            "duplicate enqueue. After that retry budget is exhausted the pipeline "
-            "blocks and any further resume requires manual inspection."
-        )
-        return
-    state.run_handoff_guidance = (
-        "Run starter was attempted, but no durable tracking handle was captured. "
-        "Resume will attempt exactly one automatic retry reusing the same "
-        "idempotency key (state.auto_session_id) so the server-side handler can "
-        "short-circuit a duplicate enqueue. After that retry budget is exhausted "
-        "the pipeline blocks and any further resume requires manual inspection."
-    )
+    state.run_handoff_guidance = unknown_handoff_guidance(status)
 
 
 def _grade_meets_required(actual: str | None, required: str) -> bool:

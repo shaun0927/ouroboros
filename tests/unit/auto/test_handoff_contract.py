@@ -84,6 +84,39 @@ def test_pipeline_uses_unknown_handoff_statuses_not_literal_set() -> None:
     ), "pipeline.py must use UNKNOWN_HANDOFF_STATUSES, not a literal set"
 
 
+def test_mark_unknown_run_handoff_uses_contract_statuses_and_guidance(
+    tmp_path, monkeypatch
+) -> None:
+    """Runtime unknown-status handling must read the contract-owned values."""
+    from ouroboros.auto import pipeline
+    from ouroboros.auto.state import AutoPipelineState
+
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.run_handoff_status = "contract_retryable"
+
+    monkeypatch.setattr(pipeline, "UNKNOWN_HANDOFF_STATUSES", frozenset({"contract_retryable"}))
+    monkeypatch.setattr(pipeline, "UNKNOWN_NO_HANDLE_STATUS", "contract_no_handle")
+    monkeypatch.setattr(
+        pipeline,
+        "unknown_handoff_guidance",
+        lambda status: f"contract guidance for {status}",
+    )
+
+    pipeline._mark_unknown_run_handoff(state, status="contract_no_handle")
+
+    assert state.run_handoff_status == "contract_retryable"
+    assert state.run_handoff_guidance == "contract guidance for contract_retryable"
+
+
+def test_pipeline_uses_contract_guidance_not_literal_text() -> None:
+    """The documented unknown-handoff guidance text belongs to the contract module."""
+    from ouroboros.auto import handoff_contract, pipeline
+
+    source = inspect.getsource(pipeline)
+    assert handoff_contract.UNKNOWN_NO_HANDLE_GUIDANCE not in source
+    assert handoff_contract.UNKNOWN_TIMEOUT_GUIDANCE not in source
+
+
 def test_all_contract_symbols_exported() -> None:
     """__all__ must include every public constant so wildcard imports are safe."""
     import ouroboros.auto.handoff_contract as hc
@@ -97,5 +130,10 @@ def test_all_contract_symbols_exported() -> None:
         "MAX_RUN_HANDOFF_RETRIES",
         "IDEMPOTENCY_KEY_FIELD",
         "IDEMPOTENCY_KWARG_NAME",
+        "UNKNOWN_NO_HANDLE_GUIDANCE",
+        "UNKNOWN_NO_HANDLE_STATUS",
+        "UNKNOWN_TIMEOUT_GUIDANCE",
+        "UNKNOWN_TIMEOUT_STATUS",
+        "unknown_handoff_guidance",
     ):
         assert expected in hc.__all__
