@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import re
 from typing import TYPE_CHECKING
@@ -175,7 +176,7 @@ def _resolve_spec(
         if isinstance(profile_raw, _DefaultSpec):
             if _is_valid_default_spec(profile_raw):
                 return profile_raw
-        if isinstance(profile_raw, dict):
+        if isinstance(profile_raw, Mapping):
             value = profile_raw.get("value")
             rationale = profile_raw.get("rationale")
             if (
