@@ -154,6 +154,13 @@ class StepResult:
         return self.action == StepAction.INTERRUPTED
 
 
+@dataclass
+class _StepResultContainer:
+    """Mutable container for passing StepResult out of AgentProcess work."""
+
+    result: Result[StepResult, OuroborosError] | None = None
+
+
 def _watchdog_timeout_step_action(timeout_kind: str) -> StepAction:
     """Return the public ``evolve_step`` action matching a watchdog directive."""
     directive = watchdog_timeout_to_directive(timeout_kind)
@@ -785,226 +792,292 @@ class EvolutionaryLoop:
             else:
                 return Result.err(OuroborosError("Events exist but no completed generations found"))
 
-        # Step 2: Run one generation with graceful shutdown support
-        # Pass resume phase hint for interrupted generations
+        # Step 2: Run one generation wrapped in AgentProcess for pause/cancel/replay
+        # primitives. State reconstruction above is outside the process boundary
+        # so that replays start with a clean slate.
         resume_after_phase = (
             interrupted_at_phase if last_phase == GenerationPhase.INTERRUPTED else None
         )
-        self._install_sigint_handler()
-        try:
-            gen_result = await self._run_generation_with_watchdog(
-                lineage=lineage,
-                generation_number=generation_number,
-                current_seed=current_seed,
-                execute=execute,
-                parallel=parallel,
-                resume_after_phase=resume_after_phase,
-            )
-        finally:
-            self._uninstall_sigint_handler()
+        container = _StepResultContainer()
 
-        if gen_result.is_err and isinstance(gen_result.error, GenerationWatchdogTimeout):
-            failed_gen = GenerationResult(
-                generation_number=generation_number,
-                seed=current_seed,
-                phase=GenerationPhase.FAILED,
-                success=False,
-            )
-            conv_signal = ConvergenceSignal(
-                converged=False,
-                reason=gen_result.error.message,
-                ontology_similarity=0.0,
-                generation=generation_number,
-            )
-            watchdog_action = _watchdog_timeout_step_action(gen_result.error.timeout_kind)
-            await self._emit_watchdog_timeout_directive(
-                gen_result.error,
-                lineage_id=lineage.lineage_id,
-                generation_number=generation_number,
-                phase=await self._phase_for_failed_step_directive(
+        async def _generation_work(handle: AgentProcessHandle) -> None:
+            # Cooperative checkpoint: before generation phases begin.
+            await handle.wait_unpaused()
+            if handle.should_cancel():
+                container.result = Result.ok(
+                    StepResult(
+                        generation_result=GenerationResult(
+                            generation_number=generation_number,
+                            seed=current_seed,
+                            phase=GenerationPhase.INTERRUPTED,
+                            success=False,
+                        ),
+                        convergence_signal=ConvergenceSignal(
+                            converged=False,
+                            reason="AgentProcess cancel requested before generation start",
+                            ontology_similarity=0.0,
+                            generation=generation_number,
+                        ),
+                        lineage=lineage,
+                        action=StepAction.INTERRUPTED,
+                        next_generation=generation_number,
+                    )
+                )
+                return
+
+            self._install_sigint_handler()
+            try:
+                gen_result = await self._run_generation_with_watchdog(
+                    lineage=lineage,
+                    generation_number=generation_number,
+                    current_seed=current_seed,
+                    execute=execute,
+                    parallel=parallel,
+                    resume_after_phase=resume_after_phase,
+                )
+            finally:
+                self._uninstall_sigint_handler()
+
+            if gen_result.is_err and isinstance(gen_result.error, GenerationWatchdogTimeout):
+                failed_gen = GenerationResult(
+                    generation_number=generation_number,
+                    seed=current_seed,
+                    phase=GenerationPhase.FAILED,
+                    success=False,
+                )
+                conv_signal = ConvergenceSignal(
+                    converged=False,
+                    reason=gen_result.error.message,
+                    ontology_similarity=0.0,
+                    generation=generation_number,
+                )
+                watchdog_action = _watchdog_timeout_step_action(gen_result.error.timeout_kind)
+                await self._emit_watchdog_timeout_directive(
+                    gen_result.error,
                     lineage_id=lineage.lineage_id,
                     generation_number=generation_number,
-                ),
-                action=watchdog_action,
-            )
-            return Result.ok(
-                StepResult(
-                    generation_result=failed_gen,
-                    convergence_signal=conv_signal,
-                    lineage=lineage,
+                    phase=await self._phase_for_failed_step_directive(
+                        lineage_id=lineage.lineage_id,
+                        generation_number=generation_number,
+                    ),
                     action=watchdog_action,
-                    next_generation=generation_number,
                 )
-            )
+                container.result = Result.ok(
+                    StepResult(
+                        generation_result=failed_gen,
+                        convergence_signal=conv_signal,
+                        lineage=lineage,
+                        action=watchdog_action,
+                        next_generation=generation_number,
+                    )
+                )
+                return
 
-        if gen_result.is_err:
-            # Note: _run_generation_phases already emits a phase-specific
-            # generation.failed event. No duplicate emission here.
-            failed_gen = GenerationResult(
-                generation_number=generation_number,
-                seed=current_seed,
-                phase=GenerationPhase.FAILED,
-                success=False,
-            )
-            conv_signal = ConvergenceSignal(
-                converged=False,
-                reason=str(gen_result.error),
-                ontology_similarity=0.0,
-                generation=generation_number,
-            )
-            await self._emit_step_directive(
-                StepAction.FAILED,
-                lineage_id=lineage.lineage_id,
-                generation_number=generation_number,
-                phase=await self._phase_for_failed_step_directive(
+            if gen_result.is_err:
+                # Note: _run_generation_phases already emits a phase-specific
+                # generation.failed event. No duplicate emission here.
+                failed_gen = GenerationResult(
+                    generation_number=generation_number,
+                    seed=current_seed,
+                    phase=GenerationPhase.FAILED,
+                    success=False,
+                )
+                conv_signal = ConvergenceSignal(
+                    converged=False,
+                    reason=str(gen_result.error),
+                    ontology_similarity=0.0,
+                    generation=generation_number,
+                )
+                await self._emit_step_directive(
+                    StepAction.FAILED,
                     lineage_id=lineage.lineage_id,
                     generation_number=generation_number,
-                ),
-                reason=conv_signal.reason,
+                    phase=await self._phase_for_failed_step_directive(
+                        lineage_id=lineage.lineage_id,
+                        generation_number=generation_number,
+                    ),
+                    reason=conv_signal.reason,
+                )
+                container.result = Result.ok(
+                    StepResult(
+                        generation_result=failed_gen,
+                        convergence_signal=conv_signal,
+                        lineage=lineage,
+                        action=StepAction.FAILED,
+                        next_generation=generation_number,
+                    )
+                )
+                return
+
+            result = gen_result.value
+
+            # Cooperative checkpoint: before post-processing / convergence check.
+            await handle.wait_unpaused()
+            if handle.should_cancel():
+                container.result = Result.ok(
+                    StepResult(
+                        generation_result=GenerationResult(
+                            generation_number=generation_number,
+                            seed=result.seed,
+                            phase=GenerationPhase.INTERRUPTED,
+                            success=False,
+                        ),
+                        convergence_signal=ConvergenceSignal(
+                            converged=False,
+                            reason="AgentProcess cancel requested before post-processing",
+                            ontology_similarity=0.0,
+                            generation=generation_number,
+                        ),
+                        lineage=lineage,
+                        action=StepAction.INTERRUPTED,
+                        next_generation=generation_number,
+                    )
+                )
+                return
+
+            # Handle graceful interruption — return without emitting completed.
+            if result.phase == GenerationPhase.INTERRUPTED:
+                conv_signal = ConvergenceSignal(
+                    converged=False,
+                    reason="Generation interrupted by SIGINT",
+                    ontology_similarity=0.0,
+                    generation=generation_number,
+                )
+                await self._emit_step_directive(
+                    StepAction.INTERRUPTED,
+                    lineage_id=lineage.lineage_id,
+                    generation_number=generation_number,
+                    phase="interrupted",
+                    reason=conv_signal.reason,
+                )
+                container.result = Result.ok(
+                    StepResult(
+                        generation_result=result,
+                        convergence_signal=conv_signal,
+                        lineage=lineage,
+                        action=StepAction.INTERRUPTED,
+                        next_generation=generation_number,
+                    )
+                )
+                return
+
+            # Step 3: Emit generation completed event (with seed_json).
+            nonlocal_lineage = lineage
+            record = GenerationRecord(
+                generation_number=generation_number,
+                seed_id=result.seed.metadata.seed_id,
+                parent_seed_id=result.seed.metadata.parent_seed_id,
+                ontology_snapshot=result.seed.ontology_schema,
+                evaluation_summary=result.evaluation_summary,
+                wonder_questions=result.wonder_output.questions if result.wonder_output else (),
+                phase=result.phase,
+                seed_json=json.dumps(result.seed.to_dict()),
+                execution_output=result.execution_output,
             )
-            return Result.ok(
-                StepResult(
-                    generation_result=failed_gen,
-                    convergence_signal=conv_signal,
-                    lineage=lineage,
-                    action=StepAction.FAILED,
-                    next_generation=generation_number,
+            nonlocal_lineage = nonlocal_lineage.with_generation(record)
+
+            await self.event_store.append(
+                lineage_generation_completed(
+                    nonlocal_lineage.lineage_id,
+                    generation_number,
+                    result.seed.metadata.seed_id,
+                    result.seed.ontology_schema.model_dump(mode="json"),
+                    result.evaluation_summary.model_dump(mode="json")
+                    if result.evaluation_summary
+                    else None,
+                    list(result.wonder_output.questions) if result.wonder_output else None,
+                    seed_json=json.dumps(result.seed.to_dict()),
+                    execution_output=result.execution_output,
+                    parent_seed_id=result.seed.metadata.parent_seed_id,
+                    seed_quality_canary_feedback=[
+                        feedback.model_dump(mode="json")
+                        for feedback in record.seed_quality_canary_feedback
+                    ]
+                    or None,
                 )
             )
 
-        result = gen_result.value
+            # Emit ontology evolved event if delta exists.
+            if result.ontology_delta and result.ontology_delta.similarity < 1.0:
+                await self.event_store.append(
+                    lineage_ontology_evolved(
+                        nonlocal_lineage.lineage_id,
+                        generation_number,
+                        result.ontology_delta.model_dump(mode="json"),
+                    )
+                )
 
-        # Handle graceful interruption — return without emitting completed
-        if result.phase == GenerationPhase.INTERRUPTED:
-            conv_signal = ConvergenceSignal(
-                converged=False,
-                reason="Generation interrupted by SIGINT",
-                ontology_similarity=0.0,
-                generation=generation_number,
+            # Step 4: Check convergence.
+            conv_signal = self._convergence.evaluate(
+                nonlocal_lineage,
+                result.wonder_output,
+                latest_evaluation=result.evaluation_summary,
+                validation_output=result.validation_output,
             )
+
+            action = StepAction.CONTINUE
+            if conv_signal.converged:
+                if generation_number >= self.config.max_generations:
+                    await self.event_store.append(
+                        lineage_exhausted(
+                            nonlocal_lineage.lineage_id,
+                            generation_number,
+                            self.config.max_generations,
+                        )
+                    )
+                    nonlocal_lineage = nonlocal_lineage.with_status(LineageStatus.EXHAUSTED)
+                    action = StepAction.EXHAUSTED
+                elif "Stagnation" in conv_signal.reason or "Oscillation" in conv_signal.reason:
+                    await self.event_store.append(
+                        lineage_stagnated(
+                            nonlocal_lineage.lineage_id,
+                            generation_number,
+                            conv_signal.reason,
+                            self.config.stagnation_window,
+                        )
+                    )
+                    # Stagnation is a non-terminal control handoff: the shared
+                    # Directive contract maps STAGNATED to UNSTUCK, so keep the
+                    # lineage resumable for the lateral-thinking recovery path.
+                    action = StepAction.STAGNATED
+                else:
+                    await self.event_store.append(
+                        lineage_converged(
+                            nonlocal_lineage.lineage_id,
+                            generation_number,
+                            conv_signal.reason,
+                            conv_signal.ontology_similarity,
+                        )
+                    )
+                    nonlocal_lineage = nonlocal_lineage.with_status(LineageStatus.CONVERGED)
+                    action = StepAction.CONVERGED
+
             await self._emit_step_directive(
-                StepAction.INTERRUPTED,
-                lineage_id=lineage.lineage_id,
+                action,
+                lineage_id=nonlocal_lineage.lineage_id,
                 generation_number=generation_number,
-                phase="interrupted",
+                phase=str(result.phase),
                 reason=conv_signal.reason,
             )
-            return Result.ok(
+            container.result = Result.ok(
                 StepResult(
                     generation_result=result,
                     convergence_signal=conv_signal,
-                    lineage=lineage,
-                    action=StepAction.INTERRUPTED,
-                    next_generation=generation_number,
+                    lineage=nonlocal_lineage,
+                    action=action,
+                    next_generation=generation_number + 1,
                 )
             )
 
-        # Step 3: Emit generation completed event (with seed_json)
-        record = GenerationRecord(
-            generation_number=generation_number,
-            seed_id=result.seed.metadata.seed_id,
-            parent_seed_id=result.seed.metadata.parent_seed_id,
-            ontology_snapshot=result.seed.ontology_schema,
-            evaluation_summary=result.evaluation_summary,
-            wonder_questions=result.wonder_output.questions if result.wonder_output else (),
-            phase=result.phase,
-            seed_json=json.dumps(result.seed.to_dict()),
-            execution_output=result.execution_output,
+        handle = await self._agent_process.spawn(
+            intent=f"evolve_step generation={generation_number}",
+            work_fn=_generation_work,
         )
-        lineage = lineage.with_generation(record)
+        await handle.wait_until_complete()
 
-        await self.event_store.append(
-            lineage_generation_completed(
-                lineage.lineage_id,
-                generation_number,
-                result.seed.metadata.seed_id,
-                result.seed.ontology_schema.model_dump(mode="json"),
-                result.evaluation_summary.model_dump(mode="json")
-                if result.evaluation_summary
-                else None,
-                list(result.wonder_output.questions) if result.wonder_output else None,
-                seed_json=json.dumps(result.seed.to_dict()),
-                execution_output=result.execution_output,
-                parent_seed_id=result.seed.metadata.parent_seed_id,
-                seed_quality_canary_feedback=[
-                    feedback.model_dump(mode="json")
-                    for feedback in record.seed_quality_canary_feedback
-                ]
-                or None,
-            )
-        )
-
-        # Emit ontology evolved event if delta exists
-        if result.ontology_delta and result.ontology_delta.similarity < 1.0:
-            await self.event_store.append(
-                lineage_ontology_evolved(
-                    lineage.lineage_id,
-                    generation_number,
-                    result.ontology_delta.model_dump(mode="json"),
-                )
-            )
-
-        # Step 4: Check convergence
-        conv_signal = self._convergence.evaluate(
-            lineage,
-            result.wonder_output,
-            latest_evaluation=result.evaluation_summary,
-            validation_output=result.validation_output,
-        )
-
-        action = StepAction.CONTINUE
-        if conv_signal.converged:
-            if generation_number >= self.config.max_generations:
-                await self.event_store.append(
-                    lineage_exhausted(
-                        lineage.lineage_id,
-                        generation_number,
-                        self.config.max_generations,
-                    )
-                )
-                lineage = lineage.with_status(LineageStatus.EXHAUSTED)
-                action = StepAction.EXHAUSTED
-            elif "Stagnation" in conv_signal.reason or "Oscillation" in conv_signal.reason:
-                await self.event_store.append(
-                    lineage_stagnated(
-                        lineage.lineage_id,
-                        generation_number,
-                        conv_signal.reason,
-                        self.config.stagnation_window,
-                    )
-                )
-                # Stagnation is a non-terminal control handoff: the shared
-                # Directive contract maps STAGNATED to UNSTUCK, so keep the
-                # lineage resumable for the lateral-thinking recovery path.
-                action = StepAction.STAGNATED
-            else:
-                await self.event_store.append(
-                    lineage_converged(
-                        lineage.lineage_id,
-                        generation_number,
-                        conv_signal.reason,
-                        conv_signal.ontology_similarity,
-                    )
-                )
-                lineage = lineage.with_status(LineageStatus.CONVERGED)
-                action = StepAction.CONVERGED
-
-        await self._emit_step_directive(
-            action,
-            lineage_id=lineage.lineage_id,
-            generation_number=generation_number,
-            phase=str(result.phase),
-            reason=conv_signal.reason,
-        )
-        return Result.ok(
-            StepResult(
-                generation_result=result,
-                convergence_signal=conv_signal,
-                lineage=lineage,
-                action=action,
-                next_generation=generation_number + 1,
-            )
-        )
+        if container.result is None:
+            return Result.err(OuroborosError("evolve_step: agent process exited without result"))
+        return container.result
 
     async def _run_generation(
         self,
