@@ -480,6 +480,15 @@ If MCP returns `is_error=true` with `meta.recoverable=true`:
 3. If still failing: "MCP is having trouble. Switching to direct interview mode."
    Then switch to Path B and continue from where you left off.
 
+**Special case — `meta.reason == "initial_context_too_large"`**: When the
+response carries this reason (also `is_error=true`, `recoverable=true`), the
+text body is a meta-directive asking *you* to re-send a shorter context — it
+is **NOT** an interview question. Do not route it via AskUserQuestion.
+Instead, produce a concise summary of the original `initial_context`
+(≤ `meta.max_chars` characters; covers goal, constraints, success criteria)
+and re-call `ouroboros_interview` with `session_id=<from meta>` and the
+summary as `answer`. The next response will contain the real first question.
+
 **Advantages of MCP mode**: State persists to disk, ambiguity scoring, direct `ooo seed` integration via session ID. Code-enriched confirmation questions reduce user burden — only human-judgment questions require user input.
 
 ### Path B: Plugin Fallback (No MCP Server)
