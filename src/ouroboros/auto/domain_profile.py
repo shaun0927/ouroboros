@@ -16,7 +16,7 @@ second built-in profile.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -109,7 +109,7 @@ class DomainProfile:
         Frozenset of phrases that are insufficiently precise for this domain
         (e.g. ``"clean"``, ``"easy"`` for coding).
     safe_defaults:
-        Domain-specific defaults keyed by ledger section.  PR-5 will
+        Immutable domain-specific defaults keyed by ledger section.  PR-5 will
         introduce a richer ``_DefaultSpec`` shape; ``Any`` is intentional here.
     detector:
         A callable ``(cwd: Path) -> float`` returning a confidence in
@@ -121,7 +121,7 @@ class DomainProfile:
     verifiable_predicates: tuple[VerifiablePredicate, ...]
     intent_classifier: IntentClassifier
     vague_terms: frozenset[str]
-    safe_defaults: dict[str, Any]
+    safe_defaults: Mapping[str, Any]
     detector: Callable[[Path], float]
 
     def find_verifiable_predicate(self, criterion: str) -> VerifiablePredicate | None:

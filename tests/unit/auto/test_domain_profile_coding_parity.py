@@ -9,6 +9,7 @@ refactored callers produce identical behaviour to the originals.
 from __future__ import annotations
 
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
@@ -61,6 +62,13 @@ def test_safe_defaults_values_match() -> None:
         )
 
 
+def test_safe_defaults_mapping_is_immutable() -> None:
+    """Callers must not be able to mutate shared singleton defaults."""
+    assert isinstance(CODING_PROFILE.safe_defaults, MappingProxyType)
+    with pytest.raises(TypeError):
+        CODING_PROFILE.safe_defaults["runtime_context"] = object()  # type: ignore[index]
+
+
 # ---------------------------------------------------------------------------
 # intent_classifier parity
 # ---------------------------------------------------------------------------
@@ -76,9 +84,7 @@ def test_safe_defaults_values_match() -> None:
         ("Who are the actors and what are the inputs?", "actor_io"),
     ],
 )
-def test_intent_classifier_matches_existing_classifier(
-    question: str, expected_intent: str
-) -> None:
+def test_intent_classifier_matches_existing_classifier(question: str, expected_intent: str) -> None:
     """intent_classifier.classify() must agree with _classify_question_intents."""
     from ouroboros.auto.answerer import _classify_question_intents  # noqa: PLC2701
 
@@ -88,17 +94,14 @@ def test_intent_classifier_matches_existing_classifier(
 
     # The profile must return a value that is also in the raw classifier output.
     assert profile_result in raw_values, (
-        f"classify({question!r}) returned {profile_result!r}; "
-        f"raw classifier returned {raw_values}"
+        f"classify({question!r}) returned {profile_result!r}; raw classifier returned {raw_values}"
     )
     assert expected_intent in raw_values
 
 
 def test_intent_classifier_returns_none_for_unknown() -> None:
     """An unclassifiable question returns None from classify()."""
-    result = CODING_PROFILE.intent_classifier.classify(
-        "The weather today is pleasant and mild."
-    )
+    result = CODING_PROFILE.intent_classifier.classify("The weather today is pleasant and mild.")
     assert result is None
 
 
@@ -168,10 +171,10 @@ def test_detector_returns_one_for_pyproject(tmp_path: Path) -> None:
     assert CODING_PROFILE.detector(tmp_path) == 1.0
 
 
-def test_detector_returns_one_for_package_json(tmp_path: Path) -> None:
-    """detector returns 1.0 when package.json exists."""
+def test_detector_returns_zero_for_package_json_without_pyproject(tmp_path: Path) -> None:
+    """detector only scores repos the current extractor can inspect."""
     (tmp_path / "package.json").write_text('{"name": "test"}\n')
-    assert CODING_PROFILE.detector(tmp_path) == 1.0
+    assert CODING_PROFILE.detector(tmp_path) == 0.0
 
 
 def test_detector_returns_zero_for_empty_dir(tmp_path: Path) -> None:

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+from types import MappingProxyType
 from typing import Any
 
 from ouroboros.auto.domain_profile import DEFAULT_REGISTRY, DomainProfile
@@ -170,16 +171,16 @@ class _CodingRepoContextExtractor:
 # ---------------------------------------------------------------------------
 
 
-def _build_safe_defaults() -> dict[str, Any]:
-    """Return a plain ``dict[str, Any]`` mirroring ``_SAFE_DEFAULTS``.
+def _build_safe_defaults() -> MappingProxyType[str, Any]:
+    """Return an immutable mapping mirroring ``_SAFE_DEFAULTS``.
 
     ``_SAFE_DEFAULTS`` is ``dict[str, _DefaultSpec]`` where ``_DefaultSpec``
-    is a frozen dataclass with ``value`` and ``rationale`` fields.  We copy
-    the mapping verbatim so the ``DomainProfile.safe_defaults`` type
-    (``dict[str, Any]``) holds the same objects.  PR-5 will introduce a
-    typed ``_DefaultSpec``-aware schema; ``Any`` is intentional here.
+    is a frozen dataclass with ``value`` and ``rationale`` fields.  We expose
+    a read-only copy so callers cannot mutate shared defaults on the module
+    singleton.  PR-5 will introduce a typed ``_DefaultSpec``-aware schema;
+    ``Any`` is intentional here.
     """
-    return dict(_SAFE_DEFAULTS)
+    return MappingProxyType(dict(_SAFE_DEFAULTS))
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +190,7 @@ def _build_safe_defaults() -> dict[str, Any]:
 
 def _coding_detector(cwd: Path) -> float:
     """Return 1.0 if the directory looks like a coding project, else 0.0."""
-    if (cwd / "pyproject.toml").exists() or (cwd / "package.json").exists():
+    if (cwd / "pyproject.toml").is_file():
         return 1.0
     return 0.0
 
