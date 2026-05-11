@@ -86,9 +86,11 @@ class GenerationProgressWatchdog:
     ``GenerationWatchdogTimeout``, the cancelled task is gone but every event
     from that attempt — including the trailing ``lineage.generation.watchdog_decision``
     and the ``control.directive.emitted`` written by the evolution loop — remains
-    durably persisted.  A caller resuming the same lineage reads the trailing
-    directive via ``event_store.replay("lineage", lineage_id)`` and uses it as
-    the canonical recovery signal (typically ``Directive.UNSTUCK``).
+    durably persisted.  The production loop treats
+    ``GenerationWatchdogTimeout`` as ``StepAction.FAILED``; replay consumers
+    read the trailing directive via ``event_store.replay("lineage", lineage_id)``.
+    That directive is ``Directive.RETRY`` by default, or ``Directive.CANCEL``
+    once the retry budget is exhausted.
     The watchdog itself is stateless across attempts: each new instance starts
     fresh ``initialize_baseline()`` cursors, so stale events from the previous
     attempt are not double-counted as activity or material progress.

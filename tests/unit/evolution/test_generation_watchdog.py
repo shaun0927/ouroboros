@@ -12,11 +12,10 @@ from uuid import uuid4
 import pytest
 
 from ouroboros.config.models import RuntimeControlsConfig
-from ouroboros.core.directive import Directive
 from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
-from ouroboros.events.control import create_control_directive_emitted_event
 from ouroboros.events.lineage import lineage_generation_failed
+from ouroboros.evolution.loop import EvolutionaryLoop, StepAction
 import ouroboros.evolution.watchdog as watchdog_module
 from ouroboros.evolution.watchdog import (
     GenerationProgressWatchdog,
@@ -454,8 +453,9 @@ async def test_watchdog_decision_survives_for_resume() -> None:
 
     A resumer that creates a fresh watchdog on the same lineage_id reads the
     trailing ``lineage.generation.watchdog_decision`` and
-    ``control.directive.emitted`` events via replay.  The directive value on
-    both events is the canonical recovery signal — they must agree.
+    ``control.directive.emitted`` events via replay.  The evolution loop maps
+    watchdog timeouts to ``StepAction.FAILED``, whose default recovery
+    directive is retry.
     """
     event_store = await _store()
     lineage_id = "lin-resume-contract"
@@ -486,19 +486,15 @@ async def test_watchdog_decision_survives_for_resume() -> None:
 
     assert exc_info.value.timeout_kind == "no_material_progress_timeout"
 
-    # Simulate what the evolution loop does after a watchdog timeout: emit the
-    # control directive so a resumer can read it from the lineage replay stream.
-    directive = Directive.UNSTUCK
-    await event_store.append(
-        create_control_directive_emitted_event(
-            target_type="lineage",
-            target_id=lineage_id,
-            emitted_by="evolver",
-            directive=directive,
-            reason="Watchdog timeout — unstuck next attempt",
-            lineage_id=lineage_id,
-            generation_number=generation_number,
-        )
+    # Simulate the production evolution-loop branch for watchdog timeouts:
+    # GenerationWatchdogTimeout is surfaced as StepAction.FAILED, not STAGNATED.
+    loop = EvolutionaryLoop(event_store=event_store)
+    await loop._emit_step_directive(
+        StepAction.FAILED,
+        lineage_id=lineage_id,
+        generation_number=generation_number,
+        phase="executing",
+        reason=exc_info.value.message,
     )
 
     # --- Drop the first watchdog; create a fresh instance on the same store ---
@@ -525,14 +521,17 @@ async def test_watchdog_decision_survives_for_resume() -> None:
     decision_event = next(e for e in events if e.type == "lineage.generation.watchdog_decision")
     directive_event = next(e for e in events if e.type == "control.directive.emitted")
 
-    # Both events must agree on the recovery directive value.
-    assert directive_event.data["directive"] == "unstuck", (
-        "control.directive.emitted must carry the unstuck directive"
+    assert directive_event.data["directive"] == "retry", (
+        "watchdog timeouts are StepAction.FAILED and default to retry"
     )
-    # The watchdog decision details contain the timeout_kind; the resumer
-    # reads the accompanying directive event for the recovery action.
-    # Invariant: both streams agree — the decision is for this generation.
+    assert directive_event.data["emitted_by"] == "evolver"
+    assert directive_event.data["phase"] == "executing"
+    assert directive_event.data["extra"] == {
+        "step_action": "failed",
+        "is_terminal": False,
+    }
     assert decision_event.data["generation_number"] == generation_number
+    assert directive_event.data["generation_number"] == generation_number
 
 
 @pytest.mark.asyncio
