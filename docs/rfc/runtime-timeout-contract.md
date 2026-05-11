@@ -125,7 +125,9 @@ at the local timeout decision point. The event is the sole authoritative
 control-plane signal that a timeout caused a retry, block, cancellation, or
 early return. Existing exception types, state mutation, and lineage events
 remain as local implementation details; consumers should derive timeout control
-state from the directive journal.
+decisions from the directive journal, with non-terminal retry actionability
+resolved against the owning surface's persisted retry-pending state as defined
+in I4.
 
 The `emitted_by` field distinguishes the source surface. The `directive` field
 is determined per-surface as follows.
@@ -180,6 +182,19 @@ appends the corresponding `control.directive.emitted` event with
 `emitted_by="generation.watchdog"`. Target: `target_type="lineage"`,
 `target_id=lineage_id`.
 
+The watchdog owns directive emission for `GenerationWatchdogTimeout` instances
+raised by `GenerationProgressWatchdog`. A caller that catches the bubbled
+exception, including the current `evolve_step` path that can emit a generic
+`emitted_by="evolver"` directive, must not emit a second directive for the same
+watchdog timeout. The deduplication key is the timeout decision identity:
+`target_type`, `target_id`, timeout source (`GenerationWatchdogTimeout` /
+`generation.watchdog`), `timeout_kind`, and the triggering watchdog decision
+event or timestamp recorded with the existing lineage watchdog decision. If a
+source-specific `generation.watchdog` directive exists for that key, the
+generic evolver timeout directive is suppressed or replaced. A generic evolver
+timeout directive is allowed only when no source-specific timeout directive
+already exists for the same timeout decision.
+
 ### Auto pipeline timeout mapping
 
 Phase timeouts in `src/ouroboros/auto/pipeline.py` catch `asyncio.TimeoutError`
@@ -222,18 +237,26 @@ must match the actual run outcome at that site. `Directive.CANCEL` is terminal;
 `Directive.RETRY` is not. No site may emit a terminal directive and then
 continue executing.
 
-**I4 — The resumer reads the trailing directive.** On session resume, the
-control-plane consumer reads the last `control.directive.emitted` event for the
-relevant target before deciding whether to continue or abort. This links to
-#578 item 4 (resume-path directive consumption). A `CANCEL` directive on resume
-must not restart work; a `RETRY` directive should re-enter the appropriate
-phase.
+**I4 — Resume combines the trailing directive with local state.** On session
+resume, the control-plane consumer reads the last `control.directive.emitted`
+event for the relevant target before deciding whether to continue or abort.
+This links to #578 item 4 (resume-path directive consumption). A terminal
+`CANCEL` directive on resume is authoritative and must not restart work. A
+non-terminal `RETRY` directive is actionable only while the corresponding
+persisted local retry-pending state or token still indicates that the retry is
+pending; if the owning surface has since succeeded or transitioned state, that
+local state supersedes the stale trailing `RETRY` without requiring a success
+directive.
 
-**I5 — No duplicate emission on retry success.** If a timed-out operation
-succeeds on a subsequent attempt, no additional
-`control.directive.emitted` event is emitted for the success — only the
-retry-triggering timeout decision is recorded. This keeps the directive journal
-as a decision log, not a full-trace log.
+**I5 — Retry success clears actionability without success spam.** If a
+timed-out operation succeeds on a subsequent attempt, no additional
+`control.directive.emitted` event is emitted for the success. The owning
+surface instead clears or updates its persisted retry-pending state or token as
+part of the normal success/state transition. The earlier `RETRY` remains in the
+directive journal as the recorded timeout decision, but it is no longer
+actionable on resume once local state shows that the retry has completed or the
+operation has moved to a later state. This keeps the directive journal as a
+decision log, not a full-trace log.
 
 ## Migration plan
 
