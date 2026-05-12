@@ -17,9 +17,10 @@ Loop semantics:
     2. The harness parses evidence (H2). If evidence cannot be extracted,
        that counts as a FAIL with a parser reason — verifier is NOT called.
     3. The harness validates the record against profile.evidence_schema.
-       If the record fails validation, the verifier is short-circuited
-       and the loop retries (the leaf would never satisfy the contract
-       even if the verifier said PASS).
+       If the record carries a typed blocker, the loop terminates as
+       BLOCKED without verifier invocation. Other validation failures
+       short-circuit the verifier and retry (the leaf would never satisfy
+       the contract even if the verifier said PASS).
     4. Otherwise the verifier is invoked. PASS → return. FAIL → retry,
        feeding the verdict reasons back to the executor.
     5. After `max_retries` exhausted FAILs, return the last attempt with
