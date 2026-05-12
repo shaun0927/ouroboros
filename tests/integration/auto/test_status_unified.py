@@ -370,6 +370,66 @@ async def test_cli_status_replays_same_job_events_as_mcp_status(tmp_path) -> Non
     await event_store.close()
 
 
+@pytest.mark.asyncio
+async def test_status_recovers_ralph_job_from_lineage_before_replay(tmp_path) -> None:
+    """CLI and MCP status recover the job id when only lineage was checkpointed."""
+    from ouroboros.cli.commands.status import _format_auto_status, _load_auto_status_state
+
+    event_store = EventStore("sqlite+aiosqlite:///:memory:")
+    await event_store.initialize()
+    manager = JobManager(event_store=event_store)
+    auto_store = AutoStore(tmp_path)
+    state = _state_at_ralph_handoff(tmp_path, with_job_id=False)
+    state.ralph_dispatch_mode = "job"
+    auto_store.save(state)
+
+    runner: asyncio.Future[Any] = asyncio.Future()
+    snapshot = await manager.start_job(
+        job_type="ralph",
+        initial_message="Queued Ralph",
+        runner=runner,
+        links=JobLinks(lineage_id=state.ralph_lineage_id),
+    )
+    await manager.update_status(
+        snapshot.job_id,
+        JobStatus.RUNNING,
+        "Generation 3 | verify",
+    )
+
+    handler = SessionStatusHandler(event_store=event_store, auto_store=auto_store)
+    mcp = await handler.handle({"session_id": state.auto_session_id})
+
+    assert mcp.is_ok
+    ralph = mcp.value.meta["ralph"]
+    assert ralph["job_id"] == snapshot.job_id
+    assert ralph["lineage_id"] == state.ralph_lineage_id
+    assert ralph["status"] == "running"
+    assert ralph["current_generation"] == 3
+
+    persisted = auto_store.load(state.auto_session_id)
+    assert persisted.ralph_job_id == snapshot.job_id
+    assert persisted.ralph_job_status == "running"
+
+    # Re-save the gap-window shape so the CLI path proves the same recovery
+    # behavior independently instead of relying on the MCP save above.
+    state.ralph_job_id = None
+    state.ralph_job_status = None
+    state.ralph_current_generation = None
+    auto_store.save(state)
+    cli_state = await _load_auto_status_state(
+        state.auto_session_id,
+        auto_store=auto_store,
+        event_store=event_store,
+    )
+    cli_text = _format_auto_status(cli_state)
+    assert cli_state.ralph_job_id == snapshot.job_id
+    assert "  status: running" in cli_text
+    assert "  current_generation: 3" in cli_text
+
+    await manager.cancel_job(snapshot.job_id)
+    await event_store.close()
+
+
 # ---------------------------------------------------------------------------
 # 4. Plugin delegation — no job query is attempted.
 # ---------------------------------------------------------------------------

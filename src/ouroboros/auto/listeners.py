@@ -282,7 +282,12 @@ def apply_events(state: AutoPipelineState, events: Iterable[BaseEvent]) -> int:
     return applied
 
 
-async def replay_ralph_job_events(state: AutoPipelineState, event_store: Any) -> int:
+async def replay_ralph_job_events(
+    state: AutoPipelineState,
+    event_store: Any,
+    *,
+    job_manager: Any | None = None,
+) -> int:
     """Replay the linked Ralph job history into ``state`` and return apply count.
 
     Production status paths use this as an on-demand listener pass: the job
@@ -290,8 +295,25 @@ async def replay_ralph_job_events(state: AutoPipelineState, event_store: Any) ->
     before CLI/MCP surfaces render it. Plugin delegations intentionally skip the
     replay because there is no in-process job lifecycle to mirror.
     """
-    if state.ralph_dispatch_mode == "plugin" or state.ralph_job_id is None:
+    if state.ralph_dispatch_mode == "plugin":
         return 0
+    if state.ralph_job_id is None:
+        if state.ralph_lineage_id is None:
+            return 0
+        manager = job_manager
+        if manager is None:
+            from ouroboros.mcp.job_manager import JobManager  # noqa: PLC0415
+
+            manager = JobManager(event_store)
+        recovered = await manager.find_active_job_by_lineage(
+            state.ralph_lineage_id,
+            job_type="ralph",
+            include_terminal=True,
+        )
+        if recovered is None:
+            return 0
+        state.ralph_job_id = recovered.job_id
+        state.ralph_dispatch_mode = state.ralph_dispatch_mode or "job"
     events = await event_store.replay("job", state.ralph_job_id)
     return apply_events(state, events)
 

@@ -83,15 +83,18 @@ async def _load_auto_status_state(
     """Load an auto state and mirror linked Ralph job events before rendering."""
     store = auto_store or AutoStore()
     state = store.load(auto_session_id)
-    if state.ralph_dispatch_mode == "plugin" or state.ralph_job_id is None:
+    if state.ralph_dispatch_mode == "plugin":
+        return state
+    if state.ralph_job_id is None and state.ralph_lineage_id is None:
         return state
 
     owns_event_store = event_store is None
     events = event_store or EventStore()
     try:
         await events.initialize()
+        previous_job_id = state.ralph_job_id
         applied = await replay_ralph_job_events(state, events)
-        if applied:
+        if applied or state.ralph_job_id != previous_job_id:
             store.save(state)
     finally:
         if owns_event_store:

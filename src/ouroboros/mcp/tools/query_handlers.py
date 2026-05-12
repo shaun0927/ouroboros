@@ -120,11 +120,14 @@ class SessionStatusHandler:
 
     async def _refresh_auto_ralph_mirror(self, state: Any) -> None:
         """Replay linked Ralph job events into the persisted auto snapshot."""
-        if state.ralph_dispatch_mode == "plugin" or state.ralph_job_id is None:
+        if state.ralph_dispatch_mode == "plugin":
+            return
+        if state.ralph_job_id is None and state.ralph_lineage_id is None:
             return
         await self._ensure_initialized()
+        previous_job_id = state.ralph_job_id
         applied = await replay_ralph_job_events(state, self._event_store)
-        if applied:
+        if applied or state.ralph_job_id != previous_job_id:
             self._auto_store.save(state)
 
     async def _handle_auto_session(

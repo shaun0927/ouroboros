@@ -334,6 +334,10 @@ class AutoPipeline:
                 state.ralph_job_id = None
                 state.ralph_lineage_id = None
                 state.ralph_dispatch_mode = None
+                state.ralph_job_status = None
+                state.ralph_stop_reason = None
+                state.ralph_current_generation = None
+                state.ralph_last_event_at = None
                 state.run_handoff_guidance = None
                 state.run_handoff_status = "ralph_retry_after_blocker"
             # Legacy auto sessions saved before #779 had no

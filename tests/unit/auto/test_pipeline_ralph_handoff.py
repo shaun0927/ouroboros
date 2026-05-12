@@ -221,6 +221,10 @@ async def test_resume_ralph_blocker_retries_fresh_handoff_without_terminal_reatt
     state.ralph_job_id = "job_ralph_terminal_old"
     state.ralph_lineage_id = "ralph-seed_test_001-auto_old"
     state.ralph_dispatch_mode = "job"
+    state.ralph_job_status = "failed"
+    state.ralph_stop_reason = "iteration_timeout"
+    state.ralph_current_generation = 7
+    state.ralph_last_event_at = datetime.now(UTC).isoformat()
     state.mark_blocked("iteration_timeout", tool_name="ralph_starter")
 
     captured: dict[str, Any] = {}
@@ -251,6 +255,10 @@ async def test_resume_ralph_blocker_retries_fresh_handoff_without_terminal_reatt
     assert state.ralph_job_id == "job_ralph_retry_new"
     assert state.ralph_lineage_id != "ralph-seed_test_001-auto_old"
     assert "-retry-" in state.ralph_lineage_id
+    assert state.ralph_job_status is None
+    assert state.ralph_stop_reason is None
+    assert state.ralph_current_generation is None
+    assert state.ralph_last_event_at is None
     assert captured["kwargs"]["reattach_terminal"] is False
     assert captured["kwargs"]["reuse_existing"] is False
 
