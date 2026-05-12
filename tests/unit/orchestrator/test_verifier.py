@@ -425,13 +425,15 @@ class TestEvidenceShortCircuit:
     def test_blocked_evidence_stops_without_retry_or_verifier(
         self, code_profile: ExecutionProfile
     ) -> None:
-        blocked = json.dumps({
-            "status": "blocked",
-            "blocker": {
-                "code": "MISSING_CONFIGURATION",
-                "reason": "DATABASE_URL is required to verify this AC",
-            },
-        })
+        blocked = json.dumps(
+            {
+                "status": "blocked",
+                "blocker": {
+                    "code": "MISSING_CONFIGURATION",
+                    "reason": "DATABASE_URL is required to verify this AC",
+                },
+            }
+        )
         executor = ScriptedExecutor(outputs=[blocked, _code_evidence()])
         verifier = ScriptedVerifier(verdicts=[VerifierVerdict(passed=True)])
 
