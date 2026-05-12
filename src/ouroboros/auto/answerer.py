@@ -151,18 +151,20 @@ class AutoAnswerer:
         lowered = _normalize_question(question)
 
         # -- DUAL-PATH HOOK 1: intent classification --------------------------
-        # When a domain profile is active, ask its classifier first.  The
-        # profile returns a single canonical label string (e.g.
-        # ``"verification"``) or None.  We map the label back to a
-        # QuestionIntent so the downstream routing logic is unchanged.  If the
-        # profile cannot classify (None) OR no profile is active, fall through
-        # to the hardcoded ``_classify_question_intents`` path.
+        # When a domain profile is active, consult its classifier but keep the
+        # hardcoded classifier as the safety base.  Existing answerer routing is
+        # multi-signal (for example PRODUCT_BEHAVIOR + VERIFICATION protects
+        # user-facing "verify email" feature questions), while profile
+        # classifiers currently emit one canonical label.  Union a known profile
+        # label with the hardcoded intents so profiles can add domain signal
+        # without erasing legacy multi-intent safeguards.  Unknown profile labels
+        # fall back to the hardcoded intents instead of silently routing to the
+        # generic default answer.
         if self.active_profile is not None:
+            intents = _classify_question_intents(question)
             profile_label = self.active_profile.intent_classifier.classify(question)
             if profile_label is not None:
-                intents = _intents_from_profile_label(profile_label)
-            else:
-                intents = _classify_question_intents(question)
+                intents = frozenset(intents | _intents_from_profile_label(profile_label))
             # -- DUAL-PATH HOOK 2: vague-term detection -----------------------
             # When a profile is active, whole vague terms from its
             # ``vague_terms`` set signal that the AC is under-specified.  Use a
@@ -897,9 +899,9 @@ def _classify_question_intents(question: str) -> frozenset[QuestionIntent]:
 # Profile classifiers emit canonical string labels (e.g. ``"verification"``).
 # This helper translates a single label back into a frozenset so the existing
 # intent-routing table below works without modification.  Labels that do not
-# map to a known QuestionIntent return an empty frozenset, causing the answerer
-# to fall through to ``_default_answer`` — the same behavior as an empty
-# ``_classify_question_intents`` result.
+# map to a known QuestionIntent return an empty frozenset; callers union this
+# with the hardcoded classifier output so unknown profile labels keep the
+# no-profile safety behavior instead of silently forcing ``_default_answer``.
 _PROFILE_LABEL_TO_INTENT: dict[str, QuestionIntent] = {
     "non_goals": QuestionIntent.NON_GOALS,
     "verification": QuestionIntent.VERIFICATION,
@@ -913,9 +915,9 @@ _PROFILE_LABEL_TO_INTENT: dict[str, QuestionIntent] = {
 def _intents_from_profile_label(label: str) -> frozenset[QuestionIntent]:
     """Convert a single profile-classifier label to a ``frozenset[QuestionIntent]``.
 
-    Returns an empty frozenset for unknown labels so the answerer falls back to
-    ``_default_answer`` — the same behavior as ``_classify_question_intents``
-    returning no intents.
+    Returns an empty frozenset for unknown labels.  ``AutoAnswerer.answer``
+    unions this with the hardcoded classifier output, preserving the safety
+    hatch for typos or future labels not yet known to this mapper.
     """
     intent = _PROFILE_LABEL_TO_INTENT.get(label)
     return frozenset({intent}) if intent is not None else frozenset()

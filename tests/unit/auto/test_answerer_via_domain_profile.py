@@ -31,6 +31,16 @@ class _AlwaysVerificationClassifier:
         return frozenset({"verification"})
 
 
+class _UnknownClassifier:
+    """Returns an unsupported label, simulating a typo or future profile label."""
+
+    def classify(self, question: str) -> str | None:
+        return "future_label"
+
+    def supported_intents(self) -> frozenset[str]:
+        return frozenset({"future_label"})
+
+
 class _NeverClassifier:
     """Always returns None — no intent recognised."""
 
@@ -123,13 +133,37 @@ class TestClassifyRoutesThroughProfileWhenActive:
         assert answer.source.value == "conservative_default"
         assert "verif" in answer.text.lower() or "observ" in answer.text.lower()
 
-    def test_unknown_intent_returns_default_answer(self):
+    def test_none_intent_uses_hardcoded_default_when_question_has_no_signal(self):
         profile = _make_profile(classifier=_NeverClassifier())
         answerer = AutoAnswerer(active_profile=profile)
         ledger = _ledger()
         answer = answerer.answer("Something completely unrelated xyzzy", ledger)
         # Falls through to _default_answer: generic_default=True
         assert answer.generic_default is True
+
+    def test_unknown_profile_label_falls_back_to_hardcoded_classifier(self):
+        profile = _make_profile(classifier=_UnknownClassifier())
+        answerer = AutoAnswerer(active_profile=profile)
+        ledger = _ledger()
+
+        answer = answerer.answer("How should we verify the tests pass?", ledger)
+
+        assert answer.generic_default is False
+        assert "verif" in answer.text.lower() or "observ" in answer.text.lower()
+
+    def test_profile_label_preserves_hardcoded_multi_signal_product_routing(self):
+        profile = _make_profile(classifier=_AlwaysVerificationClassifier())
+        answerer = AutoAnswerer(active_profile=profile)
+        ledger = _ledger()
+
+        answer = answerer.answer("Can users verify their email?", ledger)
+
+        assert answer.generic_default is False
+        assert "requested product behavior" in answer.text
+        assert any(
+            section == "constraints" and entry.key.startswith("constraints.behavior.")
+            for section, entry in answer.ledger_updates
+        )
 
 
 class TestVagueTermLookupUsesProfile:
