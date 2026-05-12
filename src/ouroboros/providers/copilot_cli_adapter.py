@@ -108,6 +108,12 @@ _COPILOT_EVENT_TYPES = frozenset(
     }
 )
 
+_COPILOT_ALWAYS_EVENT_TYPES = _COPILOT_EVENT_TYPES - {"agent.message", "message", "tool_use"}
+_COPILOT_MESSAGE_CONTENT_KEYS = frozenset({"content", "message", "text"})
+_COPILOT_TOOL_EVENT_KEYS = frozenset(
+    {"args", "arguments", "command", "id", "input", "name", "parameters", "tool"}
+)
+
 _JSON_OBJECT_DIRECTIVE = (
     "Respond with a single JSON object. Do not include prose, "
     "Markdown fences, or commentary outside the JSON value."
@@ -342,10 +348,34 @@ class CopilotCliLLMAdapter:
             return None
         return event if isinstance(event, dict) else None
 
-    @staticmethod
-    def _is_copilot_event_envelope(event: dict[str, Any]) -> bool:
+    def _is_copilot_event_envelope(self, event: dict[str, Any]) -> bool:
         event_type = event.get("type")
-        return isinstance(event_type, str) and event_type in _COPILOT_EVENT_TYPES
+        if not isinstance(event_type, str):
+            return False
+        if event_type in _COPILOT_ALWAYS_EVENT_TYPES:
+            return True
+        if event_type in {"agent.message", "message"}:
+            return any(key in event for key in _COPILOT_MESSAGE_CONTENT_KEYS)
+        if event_type == "tool_use":
+            return any(key in event for key in _COPILOT_TOOL_EVENT_KEYS)
+        return False
+
+    def _has_copilot_stream_context(self, stdout_lines: list[str]) -> bool:
+        nonempty_lines = [line for line in stdout_lines if line.strip()]
+        return len(nonempty_lines) > 1 and any(
+            self._is_copilot_event_envelope(event)
+            for line in nonempty_lines
+            if (event := self._parse_json_event(line)) is not None
+        )
+
+    @staticmethod
+    def _looks_like_future_event_envelope(event: dict[str, Any]) -> bool:
+        event_type = event.get("type")
+        if not isinstance(event_type, str):
+            return False
+        return "." in event_type or any(
+            key in event for key in ("payload", "usage", "session_id", "sessionId")
+        )
 
     @staticmethod
     def _is_structured_response_format(response_format: dict[str, object] | None) -> bool:
@@ -395,7 +425,9 @@ class CopilotCliLLMAdapter:
     @staticmethod
     def _is_completion_content_event(event: dict[str, Any]) -> bool:
         event_type = event.get("type")
-        return event_type in {"agent.message", "message"}
+        return event_type in {"agent.message", "message"} and any(
+            key in event for key in _COPILOT_MESSAGE_CONTENT_KEYS
+        )
 
     def _emit_callback_for_event(self, event: dict[str, Any]) -> None:
         if self._on_message is None:
@@ -405,13 +437,17 @@ class CopilotCliLLMAdapter:
         if not isinstance(event_type, str):
             return
 
-        if event_type in {"reasoning", "thinking", "agent.message", "message"}:
+        if event_type in {"reasoning", "thinking"} or self._is_completion_content_event(event):
             content = self._extract_text(event)
             if content:
                 self._on_message("thinking", content)
             return
 
-        if event_type in {"tool_use", "tool.start", "tool_call"}:
+        if event_type in {
+            "tool_use",
+            "tool.start",
+            "tool_call",
+        } and self._is_copilot_event_envelope(event):
             tool_name = event.get("name") or event.get("tool") or "tool"
             self._on_message("tool", str(tool_name))
 
@@ -457,12 +493,7 @@ class CopilotCliLLMAdapter:
     ) -> str:
         """Use stdout lines that are not Copilot JSONL event envelopes."""
         content_lines: list[str] = []
-        nonempty_lines = [line for line in stdout_lines if line.strip()]
-        has_stream_context = len(nonempty_lines) > 1 and any(
-            self._is_copilot_event_envelope(event)
-            for line in nonempty_lines
-            if (event := self._parse_json_event(line)) is not None
-        )
+        has_stream_context = self._has_copilot_stream_context(stdout_lines)
 
         for line in stdout_lines:
             if not line.strip():
@@ -473,8 +504,10 @@ class CopilotCliLLMAdapter:
                 continue
             if event is not None and (
                 self._is_copilot_event_envelope(event)
-                or (has_stream_context and isinstance(event.get("type"), str))
+                or (has_stream_context and self._looks_like_future_event_envelope(event))
             ):
+                continue
+            if event is not None and not preserve_structured_json:
                 continue
             content_lines.append(line)
         return "\n".join(content_lines)
@@ -667,7 +700,11 @@ class CopilotCliLLMAdapter:
             stdout_lines,
             preserve_structured_json=preserve_structured_json,
         )
-        content = last_content or fallback_content
+        content = (
+            fallback_content or last_content
+            if preserve_structured_json and not self._has_copilot_stream_context(stdout_lines)
+            else last_content or fallback_content
+        )
 
         if process.returncode != 0:
             return self._error_from_process(
@@ -791,7 +828,11 @@ class CopilotCliLLMAdapter:
             stdout_lines,
             preserve_structured_json=preserve_structured_json,
         )
-        content = last_content or fallback_content
+        content = (
+            fallback_content or last_content
+            if preserve_structured_json and not self._has_copilot_stream_context(stdout_lines)
+            else last_content or fallback_content
+        )
 
         if process.returncode != 0:
             return self._error_from_process(
