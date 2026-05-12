@@ -2094,6 +2094,37 @@ def test_auto_save_seed_long_unicode_filename_digest_avoids_prefix_collision(
     assert len(second_path.name.encode("utf-8")) <= 255
 
 
+def test_auto_save_seed_truncated_filename_namespace_cannot_overwrite_untruncated_id(
+    tmp_path: Path,
+) -> None:
+    from ouroboros.auto.adapters import load_seed, save_seed
+    from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
+
+    seeds_dir = tmp_path / "seeds"
+    ontology = OntologySchema(name="demo", description="demo ontology")
+    long_seed = Seed(
+        goal="Long Unicode goal",
+        ontology_schema=ontology,
+        metadata=SeedMetadata(seed_id="漢" * 80),
+    )
+
+    long_path = Path(save_seed(long_seed, seeds_dir=seeds_dir)).resolve()
+    colliding_semantic_id = long_path.stem
+    safe_ascii_seed = Seed(
+        goal="Safe ASCII goal",
+        ontology_schema=ontology,
+        metadata=SeedMetadata(seed_id=colliding_semantic_id),
+    )
+
+    safe_ascii_path = Path(save_seed(safe_ascii_seed, seeds_dir=seeds_dir)).resolve()
+
+    assert long_path != safe_ascii_path
+    assert long_path.exists()
+    assert safe_ascii_path.exists()
+    assert load_seed(long_path).metadata.seed_id == "漢" * 80
+    assert load_seed(safe_ascii_path).metadata.seed_id == colliding_semantic_id
+
+
 def test_auto_save_seed_accepts_default_seed_id_inside_seed_dir(tmp_path: Path) -> None:
     from ouroboros.auto.adapters import load_seed, save_seed
     from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata

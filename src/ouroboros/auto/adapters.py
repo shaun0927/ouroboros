@@ -35,7 +35,7 @@ _WINDOWS_RESERVED_FILENAME_STEMS = frozenset(
 _SEED_FILENAME_SUFFIX = ".yaml"
 _SEED_FILENAME_COMPONENT_MAX_BYTES = 255
 _SEED_FILENAME_DIGEST_HEX_LENGTH = 24
-_SEED_FILENAME_DIGEST_SEPARATOR = "--"
+_SEED_FILENAME_TRUNCATION_MARKER = "--%TRUNC%"
 _SEED_FILENAME_STEM_MAX_BYTES = _SEED_FILENAME_COMPONENT_MAX_BYTES - len(
     _SEED_FILENAME_SUFFIX.encode("utf-8")
 )
@@ -788,7 +788,7 @@ def _bound_seed_filename_stem(stem: str, seed_id: str) -> str:
         return stem
 
     digest = hashlib.sha256(seed_id.encode("utf-8")).hexdigest()[:_SEED_FILENAME_DIGEST_HEX_LENGTH]
-    suffix = f"{_SEED_FILENAME_DIGEST_SEPARATOR}{digest}"
+    suffix = f"{_SEED_FILENAME_TRUNCATION_MARKER}{digest}"
     prefix_budget = _SEED_FILENAME_STEM_MAX_BYTES - len(suffix.encode("utf-8"))
     prefix = stem[:prefix_budget]
     return f"{prefix}{suffix}"
