@@ -56,6 +56,11 @@ from ouroboros.orchestrator.control_plane import (
     serialize_control_plane_state,
 )
 from ouroboros.orchestrator.coordinator import CoordinatorReview, LevelCoordinator
+from ouroboros.orchestrator.decomposition_params import (
+    build_decomposition_system_prompt,
+    build_decomposition_user_prompt,
+    params_from_profile,
+)
 from ouroboros.orchestrator.events import (
     create_ac_stall_detected_event,
     create_heartbeat_event,
@@ -88,6 +93,7 @@ from ouroboros.orchestrator.policy import (
     PolicySessionRole,
     evaluate_capability_policy,
 )
+from ouroboros.orchestrator.profile_loader import ExecutionProfile
 from ouroboros.orchestrator.runtime_message_projection import (
     project_runtime_message,
 )
@@ -481,6 +487,7 @@ class ParallelACExecutor:
         checkpoint_store: Any | None = None,
         inherited_runtime_handle: RuntimeHandle | None = None,
         task_cwd: str | None = None,
+        execution_profile: ExecutionProfile | None = None,
     ):
         """Initialize executor.
 
@@ -495,6 +502,8 @@ class ParallelACExecutor:
             inherited_runtime_handle: Optional parent Claude runtime handle for
                         delegated child executions.
             task_cwd: Explicit working directory override for task execution metadata.
+            execution_profile: Optional profile that makes decomposition split along
+                profile axis/min_unit instead of the legacy generic prompt.
         """
         self._adapter = adapter
         self._event_store = event_store
@@ -503,6 +512,7 @@ class ParallelACExecutor:
         self._max_decomposition_depth = max(0, max_decomposition_depth)
         self._inherited_runtime_handle = inherited_runtime_handle
         self._task_cwd = task_cwd
+        self._execution_profile = execution_profile
         self._coordinator = LevelCoordinator(
             adapter,
             inherited_runtime_handle=inherited_runtime_handle,
@@ -2546,7 +2556,24 @@ class ParallelACExecutor:
             if node_identity is not None
             else f"AC #{ac_index + 1}"
         )
-        decompose_prompt = f"""Analyze this acceptance criterion and determine if it should be decomposed.
+        decomposition_system_prompt = (
+            "You are a task decomposition expert. Analyze tasks and break them down if needed."
+        )
+        if self._execution_profile is not None:
+            params = params_from_profile(
+                self._execution_profile,
+                min_branching=MIN_SUB_ACS,
+                max_branching=MAX_SUB_ACS,
+            )
+            decomposition_system_prompt = build_decomposition_system_prompt(params)
+            decompose_prompt = build_decomposition_user_prompt(
+                params,
+                ac_label=ac_label,
+                ac_content=ac_content,
+                seed_goal=seed_goal,
+            )
+        else:
+            decompose_prompt = f"""Analyze this acceptance criterion and determine if it should be decomposed.
 
 ## Goal Context
 {seed_goal}
@@ -2583,7 +2610,7 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                 async for message in self._adapter.execute_task(
                     prompt=decompose_prompt,
                     tools=[],  # No tools for decomposition analysis
-                    system_prompt="You are a task decomposition expert. Analyze tasks and break them down if needed.",
+                    system_prompt=decomposition_system_prompt,
                     resume_handle=self._inherited_runtime_handle,
                 ):
                     if message.content:

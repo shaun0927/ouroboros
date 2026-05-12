@@ -100,3 +100,52 @@ async def test_atomic_judgment_stops_single_ac_recursion_at_any_analyzed_depth(
     executor._execute_atomic_ac.assert_awaited_once()
     assert len(execute_single_ac_spy.await_args_list) == 1
     assert execute_single_ac_spy.await_args.kwargs["depth"] == depth
+
+
+class _CapturingDecompositionRuntime:
+    def __init__(self) -> None:
+        self.prompt: str | None = None
+        self.system_prompt: str | None = None
+
+    async def execute_task(
+        self,
+        prompt: str,
+        tools: list[str] | None = None,
+        system_prompt: str | None = None,
+        resume_handle: object | None = None,
+        resume_session_id: str | None = None,
+    ):
+        del tools, resume_handle, resume_session_id
+        self.prompt = prompt
+        self.system_prompt = system_prompt
+        yield AgentMessage(type="result", content="ATOMIC")
+
+
+@pytest.mark.asyncio
+async def test_try_decompose_ac_uses_profile_axis_when_profile_is_configured() -> None:
+    """Profile-aware decomposition should use axis/min_unit from ExecutionProfile."""
+    from ouroboros.orchestrator.profile_loader import load_profile
+
+    runtime = _CapturingDecompositionRuntime()
+    executor = ParallelACExecutor(
+        adapter=runtime,
+        event_store=AsyncMock(),
+        console=MagicMock(),
+        enable_decomposition=True,
+        execution_profile=load_profile("research"),
+    )
+
+    result = await executor._try_decompose_ac(
+        ac_content="Compare three runtime designs with citations.",
+        ac_index=0,
+        seed_goal="Produce a sourced design memo",
+        tools=["Read"],
+        system_prompt="legacy system prompt",
+    )
+
+    assert result is None
+    assert runtime.prompt is not None
+    assert "Split along the axis: subtopic" in runtime.prompt
+    assert "single question answerable from independently cited sources" in runtime.prompt
+    assert runtime.system_prompt is not None
+    assert "'research' domain" in runtime.system_prompt
