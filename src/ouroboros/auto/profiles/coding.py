@@ -253,11 +253,18 @@ _CODING_DIR_MARKERS = ("src", "tests")
 
 
 def _coding_detector(cwd: Path) -> float:
-    """Return 1.0 if the directory looks like a coding project, else 0.0."""
-    has_file_marker = any((cwd / marker).is_file() for marker in _CODING_FILE_MARKERS)
+    """Return confidence that *cwd* is a coding project.
+
+    Manifest files are strong coding signals.  Generic source/worktree markers
+    are weaker: they should select coding for plain source checkouts, but not
+    dominate more specific profiles such as research repositories that also
+    happen to be under Git.
+    """
+    if any((cwd / marker).is_file() for marker in _CODING_FILE_MARKERS):
+        return 1.0
     has_git_marker = (cwd / ".git").exists()
     has_dir_marker = any((cwd / marker).is_dir() for marker in _CODING_DIR_MARKERS)
-    return 1.0 if has_file_marker or has_git_marker or has_dir_marker else 0.0
+    return 0.4 if has_git_marker or has_dir_marker else 0.0
 
 
 # ---------------------------------------------------------------------------

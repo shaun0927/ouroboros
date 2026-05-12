@@ -37,6 +37,18 @@ def test_detect_best_returns_research_for_bib_repo(tmp_path: Path) -> None:
     assert best.name == "research"
 
 
+def test_research_beats_weak_git_coding_signal(tmp_path: Path) -> None:
+    """A bibliography repo under Git remains research, not generic coding."""
+    repo = tmp_path / "research_git_repo"
+    repo.mkdir()
+    (repo / ".git").write_text("gitdir: ../.git/worktrees/research_git_repo\n")
+    (repo / "references.bib").write_text("")
+
+    best = DEFAULT_REGISTRY.detect_best(repo)
+    assert best is not None
+    assert best.name == "research"
+
+
 def test_detect_best_returns_coding_for_python_repo(tmp_path: Path) -> None:
     """A repo with pyproject.toml is detected as coding (when that profile is present)."""
     names = {p.name for p in DEFAULT_REGISTRY.all()}
