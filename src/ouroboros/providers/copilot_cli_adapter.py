@@ -373,9 +373,7 @@ class CopilotCliLLMAdapter:
         event_type = event.get("type")
         if not isinstance(event_type, str):
             return False
-        return "." in event_type or any(
-            key in event for key in ("payload", "usage", "session_id", "sessionId")
-        )
+        return "." in event_type
 
     @staticmethod
     def _is_structured_response_format(response_format: dict[str, object] | None) -> bool:

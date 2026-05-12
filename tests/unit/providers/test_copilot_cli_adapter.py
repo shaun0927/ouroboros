@@ -578,6 +578,47 @@ class TestComplete:
         assert result.value.content == '{"type": "message", "body": "ok"}'
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "answer",
+        [
+            {"type": "result", "payload": {"value": "ok"}},
+            {"type": "result", "usage": {"completion_tokens": 4}},
+            {"type": "result", "session_id": "model-session"},
+            {"type": "result", "sessionId": "model-session"},
+        ],
+    )
+    async def test_structured_fallback_preserves_result_answer_with_metadata_keys_in_stream_context(
+        self,
+        answer: dict[str, Any],
+    ) -> None:
+        adapter = CopilotCliLLMAdapter(cli_path="copilot", cwd=os.getcwd())
+        stdout = "\n".join(
+            [
+                json.dumps({"type": "session.started", "session_id": "sess-json"}),
+                json.dumps(answer),
+                json.dumps({"type": "turn.completed", "usage": {"input_tokens": 12}}),
+            ]
+        )
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _FakeProcess:
+            return _FakeProcess(stdout=stdout, returncode=0)
+
+        with patch(
+            "ouroboros.providers.copilot_cli_adapter.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
+        ):
+            result = await adapter.complete(
+                [Message(role=MessageRole.USER, content="Return a result JSON object")],
+                CompletionConfig(
+                    model="default",
+                    response_format={"type": "json_object"},
+                ),
+            )
+
+        assert result.is_ok
+        assert result.value.content == json.dumps(answer)
+
+    @pytest.mark.asyncio
     async def test_structured_fallback_still_ignores_copilot_tool_events(self) -> None:
         adapter = CopilotCliLLMAdapter(cli_path="copilot", cwd=os.getcwd())
         stdout = "\n".join(
