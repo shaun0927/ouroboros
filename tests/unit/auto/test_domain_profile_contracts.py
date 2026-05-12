@@ -217,7 +217,7 @@ def test_find_verifiable_predicate_returns_first_match() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_lazy_registry_register_loads_defaults_before_custom_profile() -> None:
+def test_lazy_registry_preserves_custom_registration_order_before_defaults() -> None:
     calls: list[str] = []
 
     def _loader(registry: DomainProfileRegistry) -> None:
@@ -229,8 +229,9 @@ def test_lazy_registry_register_loads_defaults_before_custom_profile() -> None:
 
     registry.register(custom)
 
+    assert calls == []
+    assert [profile.name for profile in registry.all()] == ["custom", "built-in"]
     assert calls == ["loaded"]
-    assert [profile.name for profile in registry.all()] == ["built-in", "custom"]
 
 
 def test_lazy_registry_respects_replaced_profile_storage_temporarily() -> None:

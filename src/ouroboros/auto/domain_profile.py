@@ -224,7 +224,6 @@ class DomainProfileRegistry:
         ValueError
             If a profile with the same ``name`` is already registered.
         """
-        self._ensure_loaded()
         if any(p.name == profile.name for p in self._profiles):
             raise ValueError(f"A DomainProfile named {profile.name!r} is already registered.")
         self._profiles.append(profile)
