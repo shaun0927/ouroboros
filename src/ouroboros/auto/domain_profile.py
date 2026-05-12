@@ -16,10 +16,11 @@ second built-in profile.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 import importlib
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
 
 __all__ = [
@@ -30,6 +31,27 @@ __all__ = [
     "RepoContextExtractor",
     "VerifiablePredicate",
 ]
+
+
+def _freeze_safe_default_value(value: Any) -> Any:
+    """Recursively freeze common mutable containers used by safe defaults."""
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {key: _freeze_safe_default_value(nested) for key, nested in value.items()}
+        )
+    if isinstance(value, tuple):
+        return tuple(_freeze_safe_default_value(item) for item in value)
+    if isinstance(value, list):
+        return tuple(_freeze_safe_default_value(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_freeze_safe_default_value(item) for item in value)
+    return value
+
+
+def _freeze_safe_defaults(safe_defaults: Mapping[str, Any]) -> Mapping[str, Any]:
+    return MappingProxyType(
+        {key: _freeze_safe_default_value(value) for key, value in safe_defaults.items()}
+    )
 
 
 @runtime_checkable
@@ -86,7 +108,7 @@ class RepoContextExtractor(Protocol):
         ...
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class DomainProfile:
     """An immutable profile that describes how a domain verifies AC.
 
@@ -110,8 +132,9 @@ class DomainProfile:
         Frozenset of phrases that are insufficiently precise for this domain
         (e.g. ``"clean"``, ``"easy"`` for coding).
     safe_defaults:
-        Immutable domain-specific defaults keyed by ledger section.  PR-5 will
+        Domain-specific defaults keyed by ledger section.  PR-5 will
         introduce a richer ``_DefaultSpec`` shape; ``Any`` is intentional here.
+        Common mutable containers are recursively frozen at construction time.
     detector:
         A callable ``(cwd: Path) -> float`` returning a confidence in
         [0.0, 1.0] that *cwd* belongs to this domain.
@@ -124,6 +147,25 @@ class DomainProfile:
     vague_terms: frozenset[str]
     safe_defaults: Mapping[str, Any]
     detector: Callable[[Path], float]
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        repo_context_extractor: RepoContextExtractor,
+        verifiable_predicates: Iterable[VerifiablePredicate],
+        intent_classifier: IntentClassifier,
+        vague_terms: Iterable[str],
+        safe_defaults: Mapping[str, Any],
+        detector: Callable[[Path], float],
+    ) -> None:
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "repo_context_extractor", repo_context_extractor)
+        object.__setattr__(self, "verifiable_predicates", tuple(verifiable_predicates))
+        object.__setattr__(self, "intent_classifier", intent_classifier)
+        object.__setattr__(self, "vague_terms", frozenset(vague_terms))
+        object.__setattr__(self, "safe_defaults", _freeze_safe_defaults(safe_defaults))
+        object.__setattr__(self, "detector", detector)
 
     def find_verifiable_predicate(self, criterion: str) -> VerifiablePredicate | None:
         """Return the first predicate whose ``matches`` returns True, or None."""
@@ -195,7 +237,7 @@ class DomainProfileRegistry:
         best_profile: DomainProfile | None = None
         best_confidence: float = 0.0
         for profile in self._profiles:
-            confidence = profile.detector(cwd)
+            confidence = _detector_confidence(profile, cwd)
             if confidence > best_confidence:
                 best_confidence = confidence
                 best_profile = profile
@@ -222,12 +264,19 @@ class DomainProfileRegistry:
         seen_codes: set[str] = set()
         result: list[VerifiablePredicate] = []
         for profile in self._profiles:
-            if profile.detector(cwd) >= threshold:
+            if _detector_confidence(profile, cwd) >= threshold:
                 for predicate in profile.verifiable_predicates:
                     if predicate.code not in seen_codes:
                         seen_codes.add(predicate.code)
                         result.append(predicate)
         return tuple(result)
+
+
+def _detector_confidence(profile: DomainProfile, cwd: Path) -> float:
+    try:
+        return profile.detector(cwd)
+    except Exception:
+        return 0.0
 
 
 def _load_default_profiles(registry: DomainProfileRegistry) -> None:
