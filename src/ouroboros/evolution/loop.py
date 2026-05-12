@@ -173,6 +173,11 @@ def _watchdog_timeout_step_action(timeout_kind: str) -> StepAction:
     return StepAction.STAGNATED
 
 
+def _watchdog_timeout_has_directive_metadata(exc: GenerationWatchdogTimeout) -> bool:
+    """Return True when a timeout came from the watchdog directive path."""
+    return isinstance(exc.details.get("execution_id"), str) and bool(exc.details["execution_id"])
+
+
 class EvolutionaryLoop:
     """Manages the evolutionary cycle across generations.
 
@@ -478,16 +483,17 @@ class EvolutionaryLoop:
                         "details": gen_result.error.details,
                     },
                 )
-                await self._emit_watchdog_timeout_directive(
-                    gen_result.error,
-                    lineage_id=lineage.lineage_id,
-                    generation_number=generation_number,
-                    phase=await self._phase_for_failed_step_directive(
+                if _watchdog_timeout_has_directive_metadata(gen_result.error):
+                    await self._emit_watchdog_timeout_directive(
+                        gen_result.error,
                         lineage_id=lineage.lineage_id,
                         generation_number=generation_number,
-                    ),
-                    action=_watchdog_timeout_step_action(gen_result.error.timeout_kind),
-                )
+                        phase=await self._phase_for_failed_step_directive(
+                            lineage_id=lineage.lineage_id,
+                            generation_number=generation_number,
+                        ),
+                        action=_watchdog_timeout_step_action(gen_result.error.timeout_kind),
+                    )
                 break
 
             if gen_result.is_err:
@@ -874,17 +880,20 @@ class EvolutionaryLoop:
                     ontology_similarity=0.0,
                     generation=generation_number,
                 )
-                watchdog_action = _watchdog_timeout_step_action(gen_result.error.timeout_kind)
-                await self._emit_watchdog_timeout_directive(
-                    gen_result.error,
-                    lineage_id=lineage.lineage_id,
-                    generation_number=generation_number,
-                    phase=await self._phase_for_failed_step_directive(
+                if _watchdog_timeout_has_directive_metadata(gen_result.error):
+                    watchdog_action = _watchdog_timeout_step_action(gen_result.error.timeout_kind)
+                    await self._emit_watchdog_timeout_directive(
+                        gen_result.error,
                         lineage_id=lineage.lineage_id,
                         generation_number=generation_number,
-                    ),
-                    action=watchdog_action,
-                )
+                        phase=await self._phase_for_failed_step_directive(
+                            lineage_id=lineage.lineage_id,
+                            generation_number=generation_number,
+                        ),
+                        action=watchdog_action,
+                    )
+                else:
+                    watchdog_action = StepAction.FAILED
                 container.result = Result.ok(
                     StepResult(
                         generation_result=failed_gen,
