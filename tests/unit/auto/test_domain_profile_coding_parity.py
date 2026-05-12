@@ -124,13 +124,13 @@ def test_intent_classifier_supported_intents() -> None:
     ("criterion", "expected_code"),
     [
         ("Command exits 0 on success", "exit_code"),
-        ("exit_code must be zero", "exit_code"),
-        ("All tests pass", "test_pass"),
-        ("pytest reports no failures", "test_pass"),
-        ("Linter reports zero errors", "lint_clean"),
-        ("ruff check passes", "lint_clean"),
-        ("mypy reports no type errors", "type_check_clean"),
-        ("type check clean with pyright", "type_check_clean"),
+        ("Process returns with exit code 0", "exit_code"),
+        ("Test suite passes and verifies stdout output", "test_pass"),
+        ("pytest check passes and verifies stdout output", "test_pass"),
+        ("Linter check passes and verifies stdout output", "lint_clean"),
+        ("ruff check passes and verifies stdout output", "lint_clean"),
+        ("mypy type check passes and verifies stdout output", "type_check_clean"),
+        ("type check with pyright verifies stdout output", "type_check_clean"),
         ("GET /health responds with HTTP status 200", "observable_behavior"),
         ("CLI stdout contains created habits", "observable_behavior"),
         ("Export writes a JSON artifact file", "observable_behavior"),
@@ -163,6 +163,24 @@ def test_observable_predicate_matches_grading_observable_contract() -> None:
     for criterion in criteria:
         assert _is_observable(criterion), criterion
         assert CODING_PROFILE.find_verifiable_predicate(criterion) is not None, criterion
+
+
+@pytest.mark.parametrize(
+    "criterion",
+    [
+        "All tests pass",
+        "pytest reports no failures",
+        "Linter reports zero errors",
+        "ruff check passes",
+        "mypy reports no type errors",
+        "type check clean with pyright",
+        "exit_code must be zero",
+    ],
+)
+def test_predicates_do_not_widen_grading_observable_contract(criterion: str) -> None:
+    """The profile must not accept criteria rejected by the current grading gate."""
+    assert not _is_observable(criterion), criterion
+    assert CODING_PROFILE.find_verifiable_predicate(criterion) is None
 
 
 def test_predicate_codes_are_unique() -> None:

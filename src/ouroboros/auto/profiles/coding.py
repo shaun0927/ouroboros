@@ -24,18 +24,26 @@ from ouroboros.auto.safe_defaults import _SAFE_DEFAULTS  # noqa: PLC2701
 # ---------------------------------------------------------------------------
 
 
+def _matches_observable_pattern(criterion: str, *patterns: str) -> bool:
+    """Return True only for criteria accepted by the existing grading contract."""
+    if not _is_observable(criterion):
+        return False
+    lowered = criterion.lower()
+    return any(re.search(pattern, lowered) for pattern in patterns)
+
+
 class _ExitCodePredicate:
     """Matches AC text that references exit codes or command success/failure."""
 
     code = "exit_code"
 
     def matches(self, criterion: str) -> bool:
-        lowered = criterion.lower()
-        return bool(
-            re.search(r"\bexit\s*code\b", lowered)
-            or re.search(r"\bexit(?:s)?\s+(?:0|with|non-zero)\b", lowered)
-            or re.search(r"\breturns?\s+(?:0|non-zero|exit)\b", lowered)
-            or "exit_code" in lowered
+        return _matches_observable_pattern(
+            criterion,
+            r"\bexit\s*code\b",
+            r"\bexit(?:s)?\s+(?:0|with|non-zero)\b",
+            r"\breturns?\s+(?:0|non-zero|exit)\b",
+            r"exit_code",
         )
 
     def repair_template(self, criterion: str) -> str:
@@ -48,13 +56,13 @@ class _TestPassPredicate:
     code = "test_pass"
 
     def matches(self, criterion: str) -> bool:
-        lowered = criterion.lower()
-        return bool(
-            re.search(r"\btests?\s+pass\b", lowered)
-            or re.search(r"\ball\s+tests?\b", lowered)
-            or re.search(r"\btest\s+suite\b", lowered)
-            or re.search(r"\bpytest\b", lowered)
-            or re.search(r"\bjest\b", lowered)
+        return _matches_observable_pattern(
+            criterion,
+            r"\btests?\s+pass\b",
+            r"\ball\s+tests?\b",
+            r"\btest\s+suite\b",
+            r"\bpytest\b",
+            r"\bjest\b",
         )
 
     def repair_template(self, criterion: str) -> str:
@@ -67,14 +75,14 @@ class _LintCleanPredicate:
     code = "lint_clean"
 
     def matches(self, criterion: str) -> bool:
-        lowered = criterion.lower()
-        return bool(
-            re.search(r"\blinters?\b", lowered)
-            or re.search(r"\blint(?:s|ed|ing)\b", lowered)
-            or re.search(r"\bruff\b", lowered)
-            or re.search(r"\bflake8\b", lowered)
-            or re.search(r"\beslint\b", lowered)
-            or re.search(r"\bno\s+lint\s+errors?\b", lowered)
+        return _matches_observable_pattern(
+            criterion,
+            r"\blinters?\b",
+            r"\blint(?:s|ed|ing)\b",
+            r"\bruff\b",
+            r"\bflake8\b",
+            r"\beslint\b",
+            r"\bno\s+lint\s+errors?\b",
         )
 
     def repair_template(self, criterion: str) -> str:
@@ -87,13 +95,13 @@ class _TypeCheckCleanPredicate:
     code = "type_check_clean"
 
     def matches(self, criterion: str) -> bool:
-        lowered = criterion.lower()
-        return bool(
-            re.search(r"\btype\s*check\b", lowered)
-            or re.search(r"\bmypy\b", lowered)
-            or re.search(r"\bpyright\b", lowered)
-            or re.search(r"\btsc\b", lowered)
-            or re.search(r"\bno\s+type\s+errors?\b", lowered)
+        return _matches_observable_pattern(
+            criterion,
+            r"\btype\s*check\b",
+            r"\bmypy\b",
+            r"\bpyright\b",
+            r"\btsc\b",
+            r"\bno\s+type\s+errors?\b",
         )
 
     def repair_template(self, criterion: str) -> str:
@@ -125,17 +133,6 @@ class _CodingIntentClassifier:
     to the existing private classifier so intent routing stays in a single
     place until PR-4 migrates callers.
     """
-
-    _SUPPORTED: frozenset[str] = frozenset(
-        {
-            "non_goals",
-            "verification",
-            "acceptance_criteria",
-            "actor_io",
-            "runtime_context",
-            "product_behavior",
-        }
-    )
 
     def classify(self, question: str) -> str | None:
         # Import locally to avoid a circular import at module load time.
@@ -175,7 +172,12 @@ class _CodingIntentClassifier:
         return next(iter(intents)).value
 
     def supported_intents(self) -> frozenset[str]:
-        return self._SUPPORTED
+        # Import locally to avoid coupling this adapter's module import to
+        # answerer.py while still deriving the supported set from the source
+        # enum instead of hard-coding labels.
+        from ouroboros.auto.answerer import QuestionIntent
+
+        return frozenset(intent.value for intent in QuestionIntent)
 
 
 # ---------------------------------------------------------------------------
