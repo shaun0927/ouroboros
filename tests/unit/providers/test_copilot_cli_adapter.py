@@ -501,6 +501,7 @@ class TestComplete:
             [
                 json.dumps({"type": "session.started", "session_id": "sess-json"}),
                 json.dumps({"type": "tool_use", "name": "shell", "command": "pwd"}),
+                json.dumps({"type": "telemetry", "payload": {"phase": "done"}}),
                 json.dumps({"answer": "ok"}),
                 json.dumps({"type": "turn.completed", "usage": {"input_tokens": 12}}),
             ]
@@ -525,6 +526,37 @@ class TestComplete:
         assert result.value.content == '{"answer": "ok"}'
         assert result.value.raw_response["session_id"] == "sess-json"
         assert "tool_use" not in result.value.content
+        assert "telemetry" not in result.value.content
+
+    @pytest.mark.asyncio
+    async def test_structured_completion_event_wins_over_stray_stdout(self) -> None:
+        adapter = CopilotCliLLMAdapter(cli_path="copilot", cwd=os.getcwd())
+        stdout = "\n".join(
+            [
+                json.dumps({"type": "session.started", "session_id": "sess-json"}),
+                json.dumps({"type": "message", "content": '{"answer":"from-event"}'}),
+                "stray diagnostic text",
+            ]
+        )
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _FakeProcess:
+            return _FakeProcess(stdout=stdout, returncode=0)
+
+        with patch(
+            "ouroboros.providers.copilot_cli_adapter.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
+        ):
+            result = await adapter.complete(
+                [Message(role=MessageRole.USER, content="Return JSON")],
+                CompletionConfig(
+                    model="default",
+                    response_format={"type": "json_object"},
+                ),
+            )
+
+        assert result.is_ok
+        assert result.value.content == '{"answer":"from-event"}'
+        assert "stray diagnostic text" not in result.value.content
 
     @pytest.mark.asyncio
     async def test_nonzero_exit_returns_provider_error(self) -> None:

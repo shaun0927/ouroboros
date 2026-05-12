@@ -98,6 +98,7 @@ _COPILOT_EVENT_TYPES = frozenset(
         "session.ended",
         "session.ready",
         "session.started",
+        "telemetry",
         "thinking",
         "tool.start",
         "tool_call",
@@ -663,11 +664,7 @@ class CopilotCliLLMAdapter:
             stdout_lines,
             preserve_structured_json=preserve_structured_json,
         )
-        content = (
-            fallback_content or last_content
-            if preserve_structured_json
-            else last_content or fallback_content
-        )
+        content = last_content or fallback_content
 
         if process.returncode != 0:
             return self._error_from_process(
@@ -791,11 +788,7 @@ class CopilotCliLLMAdapter:
             stdout_lines,
             preserve_structured_json=preserve_structured_json,
         )
-        content = (
-            fallback_content or last_content
-            if preserve_structured_json
-            else last_content or fallback_content
-        )
+        content = last_content or fallback_content
 
         if process.returncode != 0:
             return self._error_from_process(
