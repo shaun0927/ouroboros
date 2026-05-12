@@ -26,11 +26,17 @@ def test_both_profiles_registered() -> None:
         assert "coding" in names
 
 
-def test_detect_best_returns_research_for_bib_repo(tmp_path: Path) -> None:
-    """A repo with references.bib is detected as the research domain."""
+@pytest.mark.parametrize("with_generic_code_layout", [False, True])
+def test_detect_best_returns_research_for_bib_repo(
+    tmp_path: Path, with_generic_code_layout: bool
+) -> None:
+    """Bibliography evidence beats generic coding-layout directories."""
     repo = tmp_path / "research_repo_with_bib"
     repo.mkdir()
     (repo / "references.bib").write_text("")
+    if with_generic_code_layout:
+        (repo / "src").mkdir()
+        (repo / "tests").mkdir()
 
     best = DEFAULT_REGISTRY.detect_best(repo)
     assert best is not None

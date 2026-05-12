@@ -413,6 +413,21 @@ def test_auto_package_exports_are_lazy() -> None:
     subprocess.run([sys.executable, "-c", code], check=True)
 
 
+def test_domain_profile_freezes_mapping_even_if_mapping_claims_frozen() -> None:
+    class _SpoofedFrozenMapping(dict):
+        __domain_profile_frozen__ = True
+
+    source = _SpoofedFrozenMapping({"runtime_context": ["pytest"]})
+    profile = _make_profile(safe_defaults=source)
+
+    source["runtime_context"].append("ruff")
+
+    commands = profile.safe_defaults["runtime_context"]
+    assert commands == ("pytest",)
+    with pytest.raises(AttributeError):
+        commands.append("ruff")
+
+
 def test_default_registry_get_returns_existing_profile_without_loading_builtins() -> None:
     registry = DomainProfileRegistry(
         loader=lambda _registry: (_ for _ in ()).throw(RuntimeError("boom"))

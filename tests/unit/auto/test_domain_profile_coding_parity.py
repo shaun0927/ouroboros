@@ -241,6 +241,26 @@ def test_detector_scores_linked_worktree_when_source_layout_exists(tmp_path: Pat
     assert 0.0 < CODING_PROFILE.detector(tmp_path) < 0.6
 
 
+def test_research_profile_beats_generic_src_and_tests_layout(tmp_path: Path) -> None:
+    """Research evidence must beat generic source-layout directory signals."""
+    from ouroboros.auto.domain_profile import DEFAULT_REGISTRY
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "references.bib").write_text("@article{demo}\n")
+
+    best = DEFAULT_REGISTRY.detect_best(tmp_path)
+
+    assert best is not None
+    assert best.name == "research"
+
+
+def test_detector_ignores_plain_files_named_like_directory_markers(tmp_path: Path) -> None:
+    """Directory markers must be directories, not arbitrary regular files."""
+    (tmp_path / "tests").write_text("not a directory")
+    assert CODING_PROFILE.detector(tmp_path) == 0.0
+
+
 def test_detector_returns_zero_for_empty_dir(tmp_path: Path) -> None:
     """detector returns 0.0 when neither marker file nor marker directory is present."""
     assert CODING_PROFILE.detector(tmp_path) == 0.0
