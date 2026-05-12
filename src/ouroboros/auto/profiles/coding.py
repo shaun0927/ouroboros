@@ -9,24 +9,27 @@ the parity tests can pin equality.
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 import re
-from types import MappingProxyType
 from typing import Any
 
 from ouroboros.auto.domain_profile import DomainProfile
-from ouroboros.auto.grading import VAGUE_TERMS, _is_observable  # noqa: PLC2701
-from ouroboros.auto.repo_context import repo_auto_answer_context
-from ouroboros.auto.safe_defaults import _SAFE_DEFAULTS  # noqa: PLC2701
 
 # ---------------------------------------------------------------------------
 # VerifiablePredicate implementations
 # ---------------------------------------------------------------------------
 
 
+def _is_observable_criterion(criterion: str) -> bool:
+    from ouroboros.auto.grading import _is_observable  # noqa: PLC2701
+
+    return _is_observable(criterion)
+
+
 def _matches_observable_pattern(criterion: str, *patterns: str) -> bool:
     """Return True only for criteria accepted by the existing grading contract."""
-    if not _is_observable(criterion):
+    if not _is_observable_criterion(criterion):
         return False
     lowered = criterion.lower()
     return any(re.search(pattern, lowered) for pattern in patterns)
@@ -114,7 +117,7 @@ class _ObservableBehaviorPredicate:
     code = "observable_behavior"
 
     def matches(self, criterion: str) -> bool:
-        return _is_observable(criterion)
+        return _is_observable_criterion(criterion)
 
     def repair_template(self, criterion: str) -> str:
         return f"Mention command output, file/artifact, API response, or test result: {criterion}"
@@ -189,6 +192,8 @@ class _CodingRepoContextExtractor:
     """Thin adapter over ``repo_auto_answer_context`` from ``repo_context.py``."""
 
     def extract(self, cwd: Path) -> dict[str, Any]:
+        from ouroboros.auto.repo_context import repo_auto_answer_context
+
         ctx = repo_auto_answer_context(cwd)
         return dict(ctx.repo_facts)
 
@@ -198,16 +203,36 @@ class _CodingRepoContextExtractor:
 # ---------------------------------------------------------------------------
 
 
-def _build_safe_defaults() -> MappingProxyType[str, Any]:
-    """Return an immutable mapping mirroring ``_SAFE_DEFAULTS``.
+class _LazySafeDefaults(Mapping[str, Any]):
+    """Read-only safe-defaults adapter that imports originals on demand."""
+
+    __domain_profile_frozen__ = True
+
+    @staticmethod
+    def _defaults() -> Mapping[str, Any]:
+        from ouroboros.auto.safe_defaults import _SAFE_DEFAULTS  # noqa: PLC2701
+
+        return _SAFE_DEFAULTS
+
+    def __getitem__(self, key: str) -> Any:
+        return self._defaults()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._defaults())
+
+    def __len__(self) -> int:
+        return len(self._defaults())
+
+
+def _build_safe_defaults() -> Mapping[str, Any]:
+    """Return an immutable mapping mirroring ``_SAFE_DEFAULTS`` lazily.
 
     ``_SAFE_DEFAULTS`` is ``dict[str, _DefaultSpec]`` where ``_DefaultSpec``
-    is a frozen dataclass with ``value`` and ``rationale`` fields.  We expose
-    a read-only copy so callers cannot mutate shared defaults on the module
-    singleton.  PR-5 will introduce a typed ``_DefaultSpec``-aware schema;
-    ``Any`` is intentional here.
+    is a frozen dataclass with ``value`` and ``rationale`` fields.  Importing
+    it is deferred until callers actually inspect safe defaults so merely
+    loading the built-in coding profile keeps the registry dependency-light.
     """
-    return MappingProxyType(dict(_SAFE_DEFAULTS))
+    return _LazySafeDefaults()
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +240,7 @@ def _build_safe_defaults() -> MappingProxyType[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-_CODING_MARKERS = (
+_CODING_FILE_MARKERS = (
     "pyproject.toml",
     "package.json",
     "go.mod",
@@ -226,11 +251,14 @@ _CODING_MARKERS = (
     "composer.json",
     "Gemfile",
 )
+_CODING_PATH_MARKERS = (".git", "src", "tests")
 
 
 def _coding_detector(cwd: Path) -> float:
     """Return 1.0 if the directory looks like a coding project, else 0.0."""
-    return 1.0 if any((cwd / marker).is_file() for marker in _CODING_MARKERS) else 0.0
+    if any((cwd / marker).is_file() for marker in _CODING_FILE_MARKERS):
+        return 1.0
+    return 1.0 if any((cwd / marker).exists() for marker in _CODING_PATH_MARKERS) else 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -248,7 +276,19 @@ CODING_PROFILE: DomainProfile = DomainProfile(
         _ObservableBehaviorPredicate(),
     ),
     intent_classifier=_CodingIntentClassifier(),
-    vague_terms=frozenset(VAGUE_TERMS),
+    vague_terms=frozenset(
+        {
+            "easy",
+            "intuitive",
+            "robust",
+            "scalable",
+            "better",
+            "improve",
+            "optimized",
+            "user-friendly",
+            "seamless",
+        }
+    ),
     safe_defaults=_build_safe_defaults(),
     detector=_coding_detector,
 )

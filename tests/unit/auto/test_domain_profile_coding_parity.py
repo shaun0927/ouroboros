@@ -9,7 +9,6 @@ refactored callers produce identical behaviour to the originals.
 from __future__ import annotations
 
 from pathlib import Path
-from types import MappingProxyType
 
 import pytest
 
@@ -64,7 +63,6 @@ def test_safe_defaults_values_match() -> None:
 
 def test_safe_defaults_mapping_is_immutable() -> None:
     """Callers must not be able to mutate shared singleton defaults."""
-    assert isinstance(CODING_PROFILE.safe_defaults, MappingProxyType)
     with pytest.raises(TypeError):
         CODING_PROFILE.safe_defaults["runtime_context"] = object()  # type: ignore[index]
 
@@ -221,8 +219,15 @@ def test_detector_returns_one_for_other_coding_markers(tmp_path: Path, marker: s
     assert CODING_PROFILE.detector(tmp_path) == 1.0
 
 
+@pytest.mark.parametrize("marker", [".git", "src", "tests"])
+def test_detector_returns_one_for_directory_markers(tmp_path: Path, marker: str) -> None:
+    """detector preserves existing directory-marker coding detection."""
+    (tmp_path / marker).mkdir()
+    assert CODING_PROFILE.detector(tmp_path) == 1.0
+
+
 def test_detector_returns_zero_for_empty_dir(tmp_path: Path) -> None:
-    """detector returns 0.0 when neither marker file is present."""
+    """detector returns 0.0 when no coding marker is present."""
     assert CODING_PROFILE.detector(tmp_path) == 0.0
 
 
