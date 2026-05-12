@@ -305,7 +305,7 @@ class HandlerRalphStarter:
         terminal_status = _optional_str(terminal_meta.get("status")) or "failed"
         stop_reason = _optional_str(terminal_meta.get("stop_reason"))
         current_generation = _current_generation_from_meta(terminal_meta)
-        result = {
+        terminal_result: dict[str, Any] = {
             "job_id": job_id,
             "lineage_id": _optional_str(meta.get("lineage_id")) or lineage_id,
             "dispatch_mode": "job",
@@ -322,8 +322,8 @@ class HandlerRalphStarter:
             # still be graded), so route through ``_artifact_text`` —
             # ``_optional_str`` would collapse the empty string to None and
             # silently skip EVALUATE.
-            result["result_text"] = artifact_text
-        return result
+            terminal_result["result_text"] = artifact_text
+        return terminal_result
 
 
 class HandlerRalphPoller:
