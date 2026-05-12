@@ -346,3 +346,27 @@ class TestBlockedEvidence:
     ) -> None:
         with pytest.raises(EvidenceError, match=message):
             validate_evidence(code_profile, EvidenceRecord(data=payload))
+
+    def test_blocked_record_still_surfaces_malformed_profile_rule(self, code_profile) -> None:
+        from ouroboros.orchestrator.profile_loader import EvidenceSchema
+
+        broken = code_profile.model_copy(
+            update={
+                "evidence_schema": EvidenceSchema(
+                    required=(),
+                    rejected_if=("len(tests_passed) < 1",),
+                )
+            }
+        )
+        record = EvidenceRecord(
+            data={
+                "status": "blocked",
+                "blocker": {
+                    "code": "MISSING_TOOL",
+                    "reason": "pytest is not installed",
+                },
+            }
+        )
+
+        with pytest.raises(EvidenceError, match="Unsupported rejected_if"):
+            validate_evidence(broken, record)

@@ -287,12 +287,12 @@ def validate_evidence(profile: ExecutionProfile, record: EvidenceRecord) -> Vali
     """
     schema = profile.evidence_schema
 
+    rejected = tuple(expr for expr in schema.rejected_if if _evaluate_rejection(expr, record.data))
     blocker = _parse_blocker(record.data)
     if blocker is not None:
         return ValidationResult(ok=False, blocker=blocker)
 
     missing = tuple(name for name in schema.required if name not in record.data)
-    rejected = tuple(expr for expr in schema.rejected_if if _evaluate_rejection(expr, record.data))
 
     return ValidationResult(
         ok=not missing and not rejected,
