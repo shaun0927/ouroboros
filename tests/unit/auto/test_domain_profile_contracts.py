@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+import subprocess
+import sys
 from typing import Any
 
 import pytest
@@ -218,9 +220,19 @@ def test_registry_union_predicates_applies_threshold() -> None:
     assert "wcag_contrast" not in codes
 
 
+def test_importing_contracts_module_does_not_import_builtin_profiles() -> None:
+    code = (
+        "import sys; "
+        "import ouroboros.auto.domain_profile; "
+        "assert 'ouroboros.auto.profiles.coding' not in sys.modules"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
 def test_default_registry_contains_coding_after_pr2(tmp_path: Path) -> None:
-    # DEFAULT_REGISTRY is a module-level singleton.  Importing domain_profile
-    # alone should expose built-in default profiles to callers.
+    # DEFAULT_REGISTRY is a module-level singleton.  Querying it should lazily
+    # expose built-in default profiles without importing them at contract-module
+    # import time.
     from ouroboros.auto.profiles.coding import CODING_PROFILE
 
     assert DEFAULT_REGISTRY.get("coding") is CODING_PROFILE

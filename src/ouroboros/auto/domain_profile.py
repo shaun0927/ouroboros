@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+import importlib
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -145,8 +146,18 @@ class DomainProfileRegistry:
         best = registry.detect_best(Path.cwd())
     """
 
-    def __init__(self) -> None:
+    def __init__(self, loader: Callable[[DomainProfileRegistry], None] | None = None) -> None:
         self._profiles: list[DomainProfile] = []
+        self._loader = loader
+        self._loaded = loader is None
+
+    def _ensure_loaded(self) -> None:
+        """Load built-in profiles on first read without coupling module imports."""
+        if self._loaded:
+            return
+        self._loaded = True
+        if self._loader is not None:
+            self._loader(self)
 
     def register(self, profile: DomainProfile) -> None:
         """Register *profile*.
@@ -162,6 +173,7 @@ class DomainProfileRegistry:
 
     def get(self, name: str) -> DomainProfile | None:
         """Return the profile registered under *name*, or None."""
+        self._ensure_loaded()
         for profile in self._profiles:
             if profile.name == name:
                 return profile
@@ -169,6 +181,7 @@ class DomainProfileRegistry:
 
     def all(self) -> tuple[DomainProfile, ...]:
         """Return all registered profiles in registration order."""
+        self._ensure_loaded()
         return tuple(self._profiles)
 
     def detect_best(self, cwd: Path) -> DomainProfile | None:
@@ -178,6 +191,7 @@ class DomainProfileRegistry:
         by registration order (earlier registration wins).  Returns ``None``
         when no profiles are registered or all detectors return 0.0.
         """
+        self._ensure_loaded()
         best_profile: DomainProfile | None = None
         best_confidence: float = 0.0
         for profile in self._profiles:
@@ -204,6 +218,7 @@ class DomainProfileRegistry:
             Minimum detector confidence required for a profile's predicates
             to be included.  Default is ``0.5``.
         """
+        self._ensure_loaded()
         seen_codes: set[str] = set()
         result: list[VerifiablePredicate] = []
         for profile in self._profiles:
@@ -215,13 +230,18 @@ class DomainProfileRegistry:
         return tuple(result)
 
 
-#: Module-level singleton registry.  Built-in profiles are imported below so
-#: callers that use ``DEFAULT_REGISTRY`` directly see the default registrations
-#: without needing an additional ``ouroboros.auto.profiles`` side-effect import.
-DEFAULT_REGISTRY: DomainProfileRegistry = DomainProfileRegistry()
+def _load_default_profiles(registry: DomainProfileRegistry) -> None:
+    """Register built-in profiles lazily.
 
-# Import built-ins after ``DEFAULT_REGISTRY`` exists.  The profile modules import
-# this module to access the registry and contracts, so keeping this at the end
-# avoids an incomplete-initialization cycle while still satisfying the public
-# default-registry contract.
-import ouroboros.auto.profiles  # noqa: E402,F401
+    ``domain_profile`` is the lightweight contracts module.  Importing it must
+    not drag in domain-specific adapters such as ``profiles.coding`` and their
+    transitive dependencies.  The default registry still exposes built-ins to
+    callers, but only when the registry is actually queried.
+    """
+    profiles = importlib.import_module("ouroboros.auto.profiles")
+    profiles.register_default_profiles(registry)
+
+
+#: Module-level singleton registry.  Built-in profiles are loaded lazily on
+#: first access so importing this contracts module remains dependency-light.
+DEFAULT_REGISTRY: DomainProfileRegistry = DomainProfileRegistry(loader=_load_default_profiles)

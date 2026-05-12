@@ -14,7 +14,7 @@ import re
 from types import MappingProxyType
 from typing import Any
 
-from ouroboros.auto.domain_profile import DEFAULT_REGISTRY, DomainProfile
+from ouroboros.auto.domain_profile import DomainProfile
 from ouroboros.auto.grading import VAGUE_TERMS, _is_observable  # noqa: PLC2701
 from ouroboros.auto.repo_context import repo_auto_answer_context
 from ouroboros.auto.safe_defaults import _SAFE_DEFAULTS  # noqa: PLC2701
@@ -250,9 +250,3 @@ CODING_PROFILE: DomainProfile = DomainProfile(
     safe_defaults=_build_safe_defaults(),
     detector=_coding_detector,
 )
-
-# Register with the module-level singleton so any caller that imports this
-# module benefits from auto-registration.  The guard prevents double-
-# registration on reimport (e.g. in pytest with importmode=importlib).
-if DEFAULT_REGISTRY.get("coding") is None:
-    DEFAULT_REGISTRY.register(CODING_PROFILE)

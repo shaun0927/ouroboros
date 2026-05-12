@@ -24,7 +24,7 @@ from ouroboros.auto.safe_defaults import _SAFE_DEFAULTS  # noqa: PLC2701
 
 
 def test_coding_profile_registered_in_default_registry() -> None:
-    """Importing the profile module must auto-register it."""
+    """Querying the default registry lazily registers the coding profile."""
     assert DEFAULT_REGISTRY.get("coding") is CODING_PROFILE
 
 
