@@ -217,6 +217,36 @@ def test_find_verifiable_predicate_returns_first_match() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_lazy_registry_register_loads_defaults_before_custom_profile() -> None:
+    calls: list[str] = []
+
+    def _loader(registry: DomainProfileRegistry) -> None:
+        calls.append("loaded")
+        registry.register(_make_profile(name="built-in"))
+
+    registry = DomainProfileRegistry(loader=_loader)
+    custom = _make_profile(name="custom")
+
+    registry.register(custom)
+
+    assert calls == ["loaded"]
+    assert [profile.name for profile in registry.all()] == ["built-in", "custom"]
+
+
+def test_lazy_registry_respects_replaced_profile_storage() -> None:
+    calls: list[str] = []
+
+    def _loader(registry: DomainProfileRegistry) -> None:
+        calls.append("loaded")
+        registry.register(_make_profile(name="built-in"))
+
+    registry = DomainProfileRegistry(loader=_loader)
+    registry._profiles = []  # type: ignore[attr-defined]  # test-only singleton isolation hook
+
+    assert registry.all() == ()
+    assert calls == []
+
+
 def test_registry_rejects_duplicate_name() -> None:
     registry = DomainProfileRegistry()
     registry.register(_make_profile(name="coding"))

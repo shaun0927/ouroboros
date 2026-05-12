@@ -190,12 +190,19 @@ class DomainProfileRegistry:
 
     def __init__(self, loader: Callable[[DomainProfileRegistry], None] | None = None) -> None:
         self._profiles: list[DomainProfile] = []
+        self._profile_storage = self._profiles
         self._loader = loader
         self._loaded = loader is None
 
     def _ensure_loaded(self) -> None:
         """Load built-in profiles on first read without coupling module imports."""
         if self._loaded:
+            return
+        if self._profiles is not self._profile_storage:
+            # Tests and callers may intentionally replace the private backing
+            # list to isolate the singleton registry.  Treat that replacement
+            # as an explicit opt-out from default lazy loading for this object.
+            self._loaded = True
             return
         self._loaded = True
         if self._loader is not None:
@@ -209,6 +216,7 @@ class DomainProfileRegistry:
         ValueError
             If a profile with the same ``name`` is already registered.
         """
+        self._ensure_loaded()
         if any(p.name == profile.name for p in self._profiles):
             raise ValueError(f"A DomainProfile named {profile.name!r} is already registered.")
         self._profiles.append(profile)
