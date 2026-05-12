@@ -747,3 +747,11 @@ def test_phase_timeout_env_override_applied(monkeypatch: pytest.MonkeyPatch) -> 
     assert merged[AutoPhase.INTERVIEW.value] == 900
     assert merged[AutoPhase.RUN.value] == 60  # invalid override silently ignored
     assert merged[AutoPhase.REVIEW.value] == 90  # invalid override silently ignored
+
+
+def test_state_rejects_malformed_recovery_plan() -> None:
+    state = AutoPipelineState(goal="Build a CLI", cwd="/tmp")
+    data = state.to_dict()
+    data["last_recovery_plan"] = {"action": "ralph_redispatch", "safe_to_redispatch": False}
+    with pytest.raises(ValueError, match="last_recovery_plan"):
+        AutoPipelineState.from_dict(data)

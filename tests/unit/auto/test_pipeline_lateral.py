@@ -351,6 +351,11 @@ async def test_pipeline_qa_fail_enters_unstuck_lateral_and_blocks_with_persona(t
     # MCP-facing result fields populated
     assert result.last_lateral_persona == "hacker"
     assert result.last_lateral_text is not None
+    assert state.last_recovery_plan is not None
+    assert state.last_recovery_plan["action"] == "ralph_redispatch"
+    assert state.last_recovery_plan["safe_to_redispatch"] is True
+    assert state.last_recovery_plan["persona"] == "hacker"
+    assert "Reframe the verification path" in state.last_recovery_plan["instruction"]
 
 
 @pytest.mark.asyncio
@@ -378,6 +383,9 @@ async def test_pipeline_qa_fail_without_lateral_thinker_falls_back_to_phase_2_1(
     result = await pipeline.run(state)
     assert result.status == "blocked"
     assert state.last_tool_name == "evaluator"  # NOT lateral_thinker
+    assert state.last_recovery_plan is not None
+    assert state.last_recovery_plan["action"] == "manual_intervention"
+    assert state.last_recovery_plan["safe_to_redispatch"] is False
     assert state.last_lateral_persona is None
 
 
@@ -819,6 +827,17 @@ def test_state_round_trips_lateral_fields(tmp_path) -> None:
     state.last_lateral_approach_summary = "Hacker: works around"
     state.last_lateral_text = "lateral prompt body"
     state.lateral_input_hash = "abc123"
+    state.last_recovery_plan = {
+        "action": "ralph_redispatch",
+        "safe_to_redispatch": True,
+        "reason": "QA failed and lateral advice is available",
+        "qa_score": 0.3,
+        "qa_verdict": "fail",
+        "differences": ["missing stdout"],
+        "suggestions": ["run cli"],
+        "persona": "hacker",
+        "instruction": "Run the CLI directly",
+    }
     store = AutoStore(tmp_path)
     store.save(state)
     reloaded = store.load(state.auto_session_id)
@@ -826,6 +845,8 @@ def test_state_round_trips_lateral_fields(tmp_path) -> None:
     assert reloaded.last_lateral_approach_summary == "Hacker: works around"
     assert reloaded.last_lateral_text == "lateral prompt body"
     assert reloaded.lateral_input_hash == "abc123"
+    assert reloaded.last_recovery_plan is not None
+    assert reloaded.last_recovery_plan["action"] == "ralph_redispatch"
 
 
 def test_state_loads_legacy_dump_without_lateral_fields(tmp_path) -> None:
@@ -837,6 +858,7 @@ def test_state_loads_legacy_dump_without_lateral_fields(tmp_path) -> None:
         "last_lateral_approach_summary",
         "last_lateral_text",
         "lateral_input_hash",
+        "last_recovery_plan",
     ):
         raw.pop(key, None)
     reloaded = AutoPipelineState.from_dict(raw)
@@ -844,6 +866,7 @@ def test_state_loads_legacy_dump_without_lateral_fields(tmp_path) -> None:
     assert reloaded.last_lateral_approach_summary is None
     assert reloaded.last_lateral_text is None
     assert reloaded.lateral_input_hash is None
+    assert reloaded.last_recovery_plan is None
 
 
 def test_resume_capability_lateral_with_cached_text_is_resumable(tmp_path) -> None:

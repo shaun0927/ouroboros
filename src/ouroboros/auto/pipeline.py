@@ -30,6 +30,10 @@ from ouroboros.auto.lateral_routing import select_persona_for_qa_failure
 from ouroboros.auto.ledger import SeedDraftLedger
 from ouroboros.auto.listeners import RALPH_CANCEL_BLOCKER_REASON, mirror_ralph_job_events
 from ouroboros.auto.progress import AutoProgressCallback, AutoProgressEvent
+from ouroboros.auto.recovery_plan import (
+    build_lateral_recovery_plan,
+    build_manual_recovery_plan,
+)
 from ouroboros.auto.seed_repairer import SeedRepairer
 from ouroboros.auto.seed_reviewer import SeedReview, SeedReviewer
 from ouroboros.auto.state import (
@@ -1566,6 +1570,7 @@ class AutoPipeline:
             state.last_lateral_approach_summary = None
             state.last_lateral_text = None
             state.lateral_input_hash = None
+            state.last_recovery_plan = None
         state.evaluate_artifact = artifact
         state.evaluate_artifact_hash = artifact_hash
 
@@ -1774,6 +1779,12 @@ class AutoPipeline:
                 run_subagent=run_subagent,
             )
 
+        state.last_recovery_plan = build_manual_recovery_plan(
+            qa_score=score,
+            qa_verdict=verdict,
+            differences=tuple(differences),
+            suggestions=tuple(suggestions),
+        ).to_dict()
         diff_preview = "; ".join(differences[:3]) if differences else ""
         sug_preview = "; ".join(suggestions[:3]) if suggestions else ""
         summary_parts = [f"evaluator did not pass: {verdict} (score {score:.2f}){cache_suffix}"]
@@ -2030,6 +2041,15 @@ class AutoPipeline:
         lateral_suffix = " [lateral cached]" if from_cache else ""
         persona_name = state.last_lateral_persona or "unknown"
         approach = state.last_lateral_approach_summary or ""
+        state.last_recovery_plan = build_lateral_recovery_plan(
+            qa_score=qa_score,
+            qa_verdict=qa_verdict,
+            differences=tuple(qa_differences),
+            suggestions=tuple(qa_suggestions),
+            persona=persona_name,
+            approach_summary=approach,
+            lateral_text=state.last_lateral_text or "",
+        ).to_dict()
         summary_parts = [
             f"evaluator did not pass: {qa_verdict} (score {qa_score:.2f}){cache_suffix}",
             f"lateral persona {persona_name}{lateral_suffix}: {approach}"

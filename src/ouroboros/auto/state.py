@@ -13,6 +13,8 @@ import time
 from typing import Any
 from uuid import uuid4
 
+from ouroboros.auto.recovery_plan import AutoRecoveryPlan
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -525,6 +527,9 @@ class AutoPipelineState:
     # fresh artifact reaching EVALUATE through a deliberate operator
     # workflow can start over with a clean budget.
     recovery_guard_tripped: str | None = None
+    # Typed artifact for the next automated recovery step. Current PRs persist
+    # this plan after QA/lateral failure; a follow-up redispatch PR consumes it.
+    last_recovery_plan: dict[str, Any] | None = None
 
     def phase_timeout_seconds(self, phase: AutoPhase) -> float:
         """Return the configured timeout for ``phase`` in seconds.
@@ -870,6 +875,7 @@ class AutoPipelineState:
         payload.setdefault("failure_fingerprints", [])
         payload.setdefault("personas_invoked", [])
         payload.setdefault("recovery_guard_tripped", None)
+        payload.setdefault("last_recovery_plan", None)
         # Convert the persisted ``deadline_at_epoch`` (epoch seconds) back into
         # a monotonic-clock value usable from this process. If the companion
         # epoch field is present, derive ``deadline_at`` from the offset
@@ -1118,6 +1124,12 @@ class AutoPipelineState:
                 f"({sorted(_VALID_RECOVERY_PERSONAS)})"
             )
             raise ValueError(msg)
+        if self.last_recovery_plan is not None:
+            try:
+                AutoRecoveryPlan.from_dict(self.last_recovery_plan)
+            except Exception as exc:
+                msg = "last_recovery_plan must be a valid AutoRecoveryPlan object or null"
+                raise ValueError(msg) from exc
         if self.recovery_guard_tripped is not None and (
             not isinstance(self.recovery_guard_tripped, str)
             or self.recovery_guard_tripped not in _VALID_RECOVERY_GUARD_TAGS
