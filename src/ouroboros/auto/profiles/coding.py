@@ -15,18 +15,37 @@ from types import MappingProxyType
 from typing import Any
 
 from ouroboros.auto.domain_profile import DomainProfile
-from ouroboros.auto.grading import VAGUE_TERMS, _is_observable  # noqa: PLC2701
-from ouroboros.auto.repo_context import repo_auto_answer_context
-from ouroboros.auto.safe_defaults import _SAFE_DEFAULTS  # noqa: PLC2701
+
+# Keep these lightweight constants local so importing/registering the built-in
+# coding profile does not import ``ouroboros.auto.grading`` and its pydantic
+# transitive dependencies. Parity tests pin these values against grading.py.
+VAGUE_TERMS = (
+    "easy",
+    "intuitive",
+    "robust",
+    "scalable",
+    "better",
+    "improve",
+    "optimized",
+    "user-friendly",
+    "seamless",
+)
 
 # ---------------------------------------------------------------------------
 # VerifiablePredicate implementations
 # ---------------------------------------------------------------------------
 
 
+def _is_observable_criterion(criterion: str) -> bool:
+    """Delegate to the existing grading gate only when predicate matching runs."""
+    from ouroboros.auto.grading import _is_observable  # noqa: PLC2701
+
+    return _is_observable(criterion)
+
+
 def _matches_observable_pattern(criterion: str, *patterns: str) -> bool:
     """Return True only for criteria accepted by the existing grading contract."""
-    if not _is_observable(criterion):
+    if not _is_observable_criterion(criterion):
         return False
     lowered = criterion.lower()
     return any(re.search(pattern, lowered) for pattern in patterns)
@@ -114,7 +133,7 @@ class _ObservableBehaviorPredicate:
     code = "observable_behavior"
 
     def matches(self, criterion: str) -> bool:
-        return _is_observable(criterion)
+        return _is_observable_criterion(criterion)
 
     def repair_template(self, criterion: str) -> str:
         return f"Mention command output, file/artifact, API response, or test result: {criterion}"
@@ -189,6 +208,8 @@ class _CodingRepoContextExtractor:
     """Thin adapter over ``repo_auto_answer_context`` from ``repo_context.py``."""
 
     def extract(self, cwd: Path) -> dict[str, Any]:
+        from ouroboros.auto.repo_context import repo_auto_answer_context
+
         ctx = repo_auto_answer_context(cwd)
         return dict(ctx.repo_facts)
 
@@ -207,6 +228,8 @@ def _build_safe_defaults() -> MappingProxyType[str, Any]:
     singleton.  PR-5 will introduce a typed ``_DefaultSpec``-aware schema;
     ``Any`` is intentional here.
     """
+    from ouroboros.auto.safe_defaults import _SAFE_DEFAULTS  # noqa: PLC2701
+
     return MappingProxyType(dict(_SAFE_DEFAULTS))
 
 
@@ -215,7 +238,7 @@ def _build_safe_defaults() -> MappingProxyType[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-_CODING_MARKERS = (
+_CODING_FILE_MARKERS = (
     "pyproject.toml",
     "package.json",
     "go.mod",
@@ -226,11 +249,14 @@ _CODING_MARKERS = (
     "composer.json",
     "Gemfile",
 )
+_CODING_DIR_MARKERS = (".git", "src", "tests")
 
 
 def _coding_detector(cwd: Path) -> float:
     """Return 1.0 if the directory looks like a coding project, else 0.0."""
-    return 1.0 if any((cwd / marker).is_file() for marker in _CODING_MARKERS) else 0.0
+    has_file_marker = any((cwd / marker).is_file() for marker in _CODING_FILE_MARKERS)
+    has_dir_marker = any((cwd / marker).is_dir() for marker in _CODING_DIR_MARKERS)
+    return 1.0 if has_file_marker or has_dir_marker else 0.0
 
 
 # ---------------------------------------------------------------------------

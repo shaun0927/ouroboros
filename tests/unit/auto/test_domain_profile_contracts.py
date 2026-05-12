@@ -464,3 +464,17 @@ def test_default_registry_contains_coding_after_pr2(tmp_path: Path) -> None:
     assert DEFAULT_REGISTRY.get("coding") is CODING_PROFILE
     (tmp_path / "pyproject.toml").write_text("[project]\nname='t'\n")
     assert DEFAULT_REGISTRY.detect_best(tmp_path) is CODING_PROFILE
+
+
+def test_default_registry_get_coding_does_not_import_grading_stack() -> None:
+    code = (
+        "import sys; "
+        "from ouroboros.auto.domain_profile import DEFAULT_REGISTRY; "
+        "profile = DEFAULT_REGISTRY.get('coding'); "
+        "assert profile is not None; "
+        "assert 'ouroboros.auto.grading' not in sys.modules; "
+        "assert 'ouroboros.core.seed' not in sys.modules; "
+        "assert 'pydantic' not in sys.modules; "
+        "assert 'ouroboros.auto.answerer' not in sys.modules"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)

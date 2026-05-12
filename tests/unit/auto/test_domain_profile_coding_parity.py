@@ -221,8 +221,15 @@ def test_detector_returns_one_for_other_coding_markers(tmp_path: Path, marker: s
     assert CODING_PROFILE.detector(tmp_path) == 1.0
 
 
+@pytest.mark.parametrize("marker", [".git", "src", "tests"])
+def test_detector_returns_one_for_directory_markers(tmp_path: Path, marker: str) -> None:
+    """detector preserves source/worktree directory markers used before PR #851."""
+    (tmp_path / marker).mkdir()
+    assert CODING_PROFILE.detector(tmp_path) == 1.0
+
+
 def test_detector_returns_zero_for_empty_dir(tmp_path: Path) -> None:
-    """detector returns 0.0 when neither marker file is present."""
+    """detector returns 0.0 when neither marker file nor marker directory is present."""
     assert CODING_PROFILE.detector(tmp_path) == 0.0
 
 
