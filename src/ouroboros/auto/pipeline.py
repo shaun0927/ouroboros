@@ -343,9 +343,17 @@ class AutoPipeline:
             if resume_phase is None:
                 return self._result(state, ledger, blocker=state.last_error)
             previous_phase = state.phase
+            has_ralph_checkpoint_to_reconcile = (
+                resume_phase is AutoPhase.RALPH_HANDOFF
+                and (
+                    state.ralph_dispatch_mode == "plugin"
+                    or (state.ralph_job_id is not None and self.ralph_resumer is not None)
+                )
+            )
             retry_ralph_handoff = (
                 resume_phase is AutoPhase.RALPH_HANDOFF
                 and state.last_error != RALPH_CANCEL_BLOCKER_REASON
+                and not has_ralph_checkpoint_to_reconcile
             )
             state.recover(
                 resume_phase,
@@ -584,6 +592,19 @@ class AutoPipeline:
             return self._result(state, ledger, blocker=state.last_error)
 
         if state.phase == AutoPhase.RALPH_HANDOFF:
+            if (
+                state.run_handoff_status == "ralph_retry_after_blocker"
+                and self.ralph_starter is not None
+            ):
+                return await self._handoff_to_ralph(
+                    state,
+                    ledger,
+                    seed,
+                    review,
+                    run_subagent=None,
+                    reattach_terminal=False,
+                    reuse_existing=False,
+                )
             return await self._resume_ralph_handoff(state, ledger, review=review, seed=seed)
 
         if state.phase == AutoPhase.EVALUATE:
@@ -1047,9 +1068,19 @@ class AutoPipeline:
         # Preserve a previously persisted lineage on resume so the re-dispatch
         # remains correlated with prior ``mcp.job.*`` events; only mint a fresh
         # one when this is the first handoff attempt for the session.
-        lineage_id = state.ralph_lineage_id or (
-            f"ralph-{seed.metadata.seed_id}-{state.auto_session_id[:8]}"
-        )
+        if state.ralph_lineage_id:
+            lineage_id = state.ralph_lineage_id
+        else:
+            lineage_id = f"ralph-{seed.metadata.seed_id}-{state.auto_session_id[:8]}"
+            if state.run_handoff_status == "ralph_retry_after_blocker":
+                # A resumable Ralph blocker (for example iteration_timeout)
+                # means the previous Ralph attempt has already produced a
+                # blocker for this auto session. Retrying must enqueue fresh
+                # Ralph work, not reattach to a still-running or terminal job
+                # with the original deterministic lineage. Persist the new
+                # retry lineage before dispatch so a crash after this point
+                # resumes the same retry attempt instead of minting another.
+                lineage_id = f"{lineage_id}-retry-{int(time.time() * 1000)}"
         state.ralph_lineage_id = lineage_id
         if state.phase != AutoPhase.RALPH_HANDOFF:
             state.transition(
@@ -1206,11 +1237,12 @@ class AutoPipeline:
         terminal_status = _optional_str(ralph_meta.get("terminal_status"))
         stop_reason = _optional_str(ralph_meta.get("stop_reason"))
         current_generation = _ralph_current_generation_from_meta(ralph_meta)
-        if terminal_status is not None:
+        mirror_terminal_status = state.run_handoff_status != "ralph_retry_after_blocker"
+        if mirror_terminal_status and terminal_status is not None:
             state.ralph_job_status = terminal_status
-        if stop_reason is not None:
+        if mirror_terminal_status and stop_reason is not None:
             state.ralph_stop_reason = stop_reason
-        if current_generation is not None:
+        if mirror_terminal_status and current_generation is not None:
             state.ralph_current_generation = current_generation
         # Plugin delegation: nothing to await, transition straight to
         # COMPLETE and surface the OpenCode Task widget guidance.

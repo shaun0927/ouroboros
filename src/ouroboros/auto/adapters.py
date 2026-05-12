@@ -339,11 +339,14 @@ class HandlerRalphStarter:
                     "dispatch_mode": "job",
                 }
             )
-        terminal_meta = await _wait_for_job_terminal(
-            job_manager,
-            job_id,
-            timeout_seconds=max_total_seconds,
-        )
+        if max_total_seconds is None:
+            terminal_meta = await _wait_for_job_terminal(job_manager, job_id)
+        else:
+            terminal_meta = await _wait_for_job_terminal(
+                job_manager,
+                job_id,
+                timeout_seconds=max_total_seconds,
+            )
         terminal_status = _optional_str(terminal_meta.get("status")) or "failed"
         stop_reason = _optional_str(terminal_meta.get("stop_reason"))
         current_generation = _current_generation_from_meta(terminal_meta)
@@ -392,13 +395,18 @@ class HandlerRalphPoller:
         job_manager = getattr(self.handler, "_job_manager", None)
         return getattr(job_manager, "_event_store", None)
 
-    async def __call__(self, *, job_id: str) -> dict[str, Any]:
+    async def __call__(
+        self, *, job_id: str, max_total_seconds: float | None = None
+    ) -> dict[str, Any]:
         job_manager = self.handler._job_manager  # noqa: SLF001
-        terminal_meta = await _wait_for_job_terminal(
-            job_manager,
-            job_id,
-            timeout_seconds=max_total_seconds,
-        )
+        if max_total_seconds is None:
+            terminal_meta = await _wait_for_job_terminal(job_manager, job_id)
+        else:
+            terminal_meta = await _wait_for_job_terminal(
+                job_manager,
+                job_id,
+                timeout_seconds=max_total_seconds,
+            )
         terminal_status = _optional_str(terminal_meta.get("status")) or "failed"
         stop_reason = _optional_str(terminal_meta.get("stop_reason"))
         current_generation = _current_generation_from_meta(terminal_meta)
