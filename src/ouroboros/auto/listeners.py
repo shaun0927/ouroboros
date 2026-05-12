@@ -119,6 +119,26 @@ def _optional_generation(value: object) -> int | None:
     return None
 
 
+def _last_generation(value: object) -> int | None:
+    if not isinstance(value, list):
+        return None
+    for item in reversed(value):
+        found = _optional_generation(item)
+        if found is not None:
+            return found
+    return None
+
+
+def _metadata_generation(meta: dict[str, Any]) -> int | None:
+    meta_generation = _optional_generation(meta.get("current_generation"))
+    if meta_generation is not None:
+        return meta_generation
+    meta_generation = _last_generation(meta.get("generations"))
+    if meta_generation is not None:
+        return meta_generation
+    return _optional_generation(meta.get("iterations"))
+
+
 def _project_event(event: BaseEvent) -> _RalphEventReading | None:
     """Project a ``BaseEvent`` into the mirror-relevant slice.
 
@@ -163,12 +183,12 @@ def _coerce_generation(payload: dict[str, Any]) -> int | None:
     older ``"Generation N | <phase>"`` parser as the fallback.
     """
     meta = _result_meta(payload)
-    meta_generation = _optional_generation(meta.get("current_generation"))
+    meta_generation = _metadata_generation(meta)
     if meta_generation is not None:
         return meta_generation
-    meta_iterations = _optional_generation(meta.get("iterations"))
-    if meta_iterations is not None:
-        return meta_iterations
+    payload_generation = _metadata_generation(payload)
+    if payload_generation is not None:
+        return payload_generation
     message = payload.get("message")
     if not isinstance(message, str) or not message:
         return None

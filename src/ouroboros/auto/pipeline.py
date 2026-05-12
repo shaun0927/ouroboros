@@ -1041,9 +1041,7 @@ class AutoPipeline:
         state.ralph_dispatch_mode = _optional_str(ralph_meta.get("dispatch_mode"))
         terminal_status = _optional_str(ralph_meta.get("terminal_status"))
         stop_reason = _optional_str(ralph_meta.get("stop_reason"))
-        current_generation = _optional_int(ralph_meta.get("current_generation")) or _optional_int(
-            ralph_meta.get("iterations")
-        )
+        current_generation = _ralph_current_generation_from_meta(ralph_meta)
         if terminal_status is not None:
             state.ralph_job_status = terminal_status
         if stop_reason is not None:
@@ -1278,9 +1276,7 @@ class AutoPipeline:
             return self._result(state, ledger, review=review, blocker=state.last_error)
         terminal_status = _optional_str(ralph_meta.get("terminal_status"))
         stop_reason = _optional_str(ralph_meta.get("stop_reason"))
-        current_generation = _optional_int(ralph_meta.get("current_generation")) or _optional_int(
-            ralph_meta.get("iterations")
-        )
+        current_generation = _ralph_current_generation_from_meta(ralph_meta)
         if terminal_status is not None:
             state.ralph_job_status = terminal_status
         if stop_reason is not None:
@@ -1408,7 +1404,7 @@ class AutoPipeline:
             return self._result(state, ledger, blocker=state.last_error)
         terminal_status = _optional_str(ralph_meta.get("terminal_status"))
         stop_reason = _optional_str(ralph_meta.get("stop_reason"))
-        current_generation = _optional_int(ralph_meta.get("current_generation"))
+        current_generation = _ralph_current_generation_from_meta(ralph_meta)
         if terminal_status is not None:
             state.ralph_job_status = terminal_status
         if stop_reason is not None:
@@ -1828,6 +1824,26 @@ def _optional_str(value: object) -> str | None:
 
 def _optional_int(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _last_int(value: object) -> int | None:
+    if not isinstance(value, list):
+        return None
+    for item in reversed(value):
+        found = _optional_int(item)
+        if found is not None:
+            return found
+    return None
+
+
+def _ralph_current_generation_from_meta(meta: dict[str, Any]) -> int | None:
+    current_generation = _optional_int(meta.get("current_generation"))
+    if current_generation is not None:
+        return current_generation
+    generations_generation = _last_int(meta.get("generations"))
+    if generations_generation is not None:
+        return generations_generation
+    return _optional_int(meta.get("iterations"))
 
 
 async def _drain_ralph_status_mirror(task: asyncio.Task[None] | None) -> None:

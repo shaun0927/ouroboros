@@ -829,6 +829,42 @@ async def test_ralph_handoff_resume_polls_persisted_job_to_complete(tmp_path) ->
     assert state.phase is AutoPhase.COMPLETE
 
 
+@pytest.mark.asyncio
+async def test_ralph_handoff_resume_prefers_generations_over_iterations(tmp_path) -> None:
+    """Resumed poller metadata must preserve lineage generation over iteration count."""
+    state = _state_in_ralph_handoff(tmp_path)
+
+    async def ralph_resumer(*, job_id: str) -> dict[str, Any]:
+        return {
+            "job_id": job_id,
+            "lineage_id": state.ralph_lineage_id,
+            "dispatch_mode": "job",
+            "terminal_status": "completed",
+            "stop_reason": "qa passed",
+            "iterations": 2,
+            "generations": [9, 10],
+        }
+
+    async def ralph_starter(*_args: Any, **_kwargs: Any) -> dict[str, Any]:  # pragma: no cover
+        raise AssertionError("resume must not start a duplicate Ralph handoff")
+
+    pipeline = AutoPipeline(
+        _StubInterviewDriver(),
+        _seed_generator_unused,
+        run_starter=_run_starter_ok,
+        reviewer=_PassReviewer(),
+        ralph_starter=ralph_starter,
+        ralph_resumer=ralph_resumer,
+        complete_product=True,
+    )
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    assert state.phase is AutoPhase.COMPLETE
+    assert state.ralph_current_generation == 10
+
+
 class _ResumeMirrorEventStore:
     """Deterministic job-event source for resume mirror lifecycle tests."""
 

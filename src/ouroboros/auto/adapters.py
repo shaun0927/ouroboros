@@ -291,9 +291,7 @@ class HandlerRalphStarter:
         terminal_meta = await _wait_for_job_terminal(job_manager, job_id)
         terminal_status = _optional_str(terminal_meta.get("status")) or "failed"
         stop_reason = _optional_str(terminal_meta.get("stop_reason"))
-        current_generation = _optional_int(terminal_meta.get("current_generation"))
-        if current_generation is None:
-            current_generation = _last_int(terminal_meta.get("generations"))
+        current_generation = _current_generation_from_meta(terminal_meta)
         return {
             "job_id": job_id,
             "lineage_id": _optional_str(meta.get("lineage_id")) or lineage_id,
@@ -333,11 +331,7 @@ class HandlerRalphPoller:
         terminal_meta = await _wait_for_job_terminal(job_manager, job_id)
         terminal_status = _optional_str(terminal_meta.get("status")) or "failed"
         stop_reason = _optional_str(terminal_meta.get("stop_reason"))
-        current_generation = _optional_int(terminal_meta.get("current_generation"))
-        if current_generation is None:
-            current_generation = _optional_int(terminal_meta.get("iterations"))
-        if current_generation is None:
-            current_generation = _last_int(terminal_meta.get("generations"))
+        current_generation = _current_generation_from_meta(terminal_meta)
         return {
             "job_id": job_id,
             "lineage_id": _optional_str(terminal_meta.get("lineage_id")),
@@ -442,3 +436,13 @@ def _last_int(value: object) -> int | None:
         if found is not None:
             return found
     return None
+
+
+def _current_generation_from_meta(meta: dict[str, Any]) -> int | None:
+    current_generation = _optional_int(meta.get("current_generation"))
+    if current_generation is not None:
+        return current_generation
+    generations_generation = _last_int(meta.get("generations"))
+    if generations_generation is not None:
+        return generations_generation
+    return _optional_int(meta.get("iterations"))

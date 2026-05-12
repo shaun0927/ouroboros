@@ -50,3 +50,28 @@ async def test_handler_ralph_poller_propagates_terminal_generation_metadata(
         "stop_reason": "qa passed",
         "current_generation": 7,
     }
+
+
+@pytest.mark.asyncio
+async def test_handler_ralph_poller_prefers_generations_over_iterations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resume metadata must preserve lineage generation, not loop iteration count."""
+    handler = _FakeRalphHandler()
+    poller = HandlerRalphPoller(handler)  # type: ignore[arg-type]
+
+    async def wait_for_terminal(_job_manager: Any, job_id: str) -> dict[str, Any]:
+        assert job_id == "job_ralph_existing"
+        return {
+            "status": "completed",
+            "stop_reason": "qa passed",
+            "lineage_id": "lineage-1",
+            "iterations": 2,
+            "generations": [9, 10],
+        }
+
+    monkeypatch.setattr(adapters, "_wait_for_job_terminal", wait_for_terminal)
+
+    result = await poller(job_id="job_ralph_existing")
+
+    assert result["current_generation"] == 10

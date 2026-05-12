@@ -147,6 +147,27 @@ def test_happy_path_qa_passed_completes_auto(tmp_path) -> None:
     assert ralph["lineage_id"] == state.ralph_lineage_id
 
 
+def test_listener_prefers_terminal_generations_over_iterations(tmp_path) -> None:
+    """Terminal metadata must mirror lineage generation, not loop iteration count."""
+    state = _state_at_ralph_handoff(tmp_path)
+
+    completed_event = _make_job_event(
+        "mcp.job.completed",
+        job_id=state.ralph_job_id,
+        lineage_id=state.ralph_lineage_id,
+        status=JobStatus.COMPLETED.value,
+        result_meta={
+            "status": "completed",
+            "stop_reason": "qa passed",
+            "iterations": 2,
+            "generations": [9, 10],
+        },
+    )
+
+    assert apply_event(state, completed_event) is True
+    assert state.ralph_current_generation == 10
+
+
 # ---------------------------------------------------------------------------
 # 2. Cancel propagation — cancel within one simulated event tick.
 # ---------------------------------------------------------------------------
