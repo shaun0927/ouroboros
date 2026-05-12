@@ -3,7 +3,6 @@
 Check system status and execution history.
 """
 
-import asyncio
 from typing import Annotated
 
 import typer
@@ -11,7 +10,6 @@ import typer
 from ouroboros.auto.state import AutoPhase, AutoStore
 from ouroboros.cli.formatters.panels import print_error, print_info
 from ouroboros.cli.formatters.tables import create_status_table, print_table
-from ouroboros.persistence.event_store import EventStore
 
 app = typer.Typer(
     name="status",

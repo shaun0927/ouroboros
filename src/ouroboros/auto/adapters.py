@@ -13,7 +13,7 @@ import yaml
 from ouroboros.auto.interview_driver import InterviewBackend, InterviewTurn
 from ouroboros.core.seed import Seed
 from ouroboros.mcp.errors import MCPServerError
-from ouroboros.mcp.job_manager import JobManager
+from ouroboros.mcp.job_manager import JobManager, JobStatus
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
 from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
 from ouroboros.mcp.tools.execution_handlers import StartExecuteSeedHandler

@@ -17,10 +17,8 @@ from typing import Any
 import pytest
 
 from ouroboros.auto import pipeline as pipeline_module
-from ouroboros.auto.adapters import HandlerRalphPoller, HandlerRalphStarter
 from ouroboros.auto.grading import GradeResult, SeedGrade
 from ouroboros.auto.interview_driver import AutoInterviewResult
-from ouroboros.auto.listeners import RALPH_CANCEL_BLOCKER_REASON
 from ouroboros.auto.pipeline import (
     _RALPH_BLOCKED_STOP_REASONS,
     PIPELINE_DEADLINE_TOOL_NAME,
