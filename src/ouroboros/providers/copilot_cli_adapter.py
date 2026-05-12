@@ -423,10 +423,12 @@ class CopilotCliLLMAdapter:
     ) -> str:
         if not preserve_structured_json:
             return last_content or fallback_content
-        if not self._has_copilot_stream_context(stdout_lines):
-            return fallback_content or last_content
         fallback_is_structured = self._is_structured_json_payload(fallback_content)
         last_is_structured = self._is_structured_json_payload(last_content)
+        if not self._has_copilot_stream_context(stdout_lines):
+            if last_is_structured:
+                return last_content
+            return fallback_content or last_content
         if fallback_is_structured and not last_is_structured:
             return fallback_content
         return last_content or fallback_content

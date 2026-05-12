@@ -622,6 +622,29 @@ class TestComplete:
         assert result.value.content == json.dumps(answer)
 
     @pytest.mark.asyncio
+    async def test_single_structured_completion_event_returns_assistant_payload(self) -> None:
+        adapter = CopilotCliLLMAdapter(cli_path="copilot", cwd=os.getcwd())
+        stdout = json.dumps({"type": "message", "content": '{"answer":"ok"}'})
+
+        async def fake_create_subprocess_exec(*command: str, **kwargs: Any) -> _FakeProcess:
+            return _FakeProcess(stdout=stdout, returncode=0)
+
+        with patch(
+            "ouroboros.providers.copilot_cli_adapter.asyncio.create_subprocess_exec",
+            side_effect=fake_create_subprocess_exec,
+        ):
+            result = await adapter.complete(
+                [Message(role=MessageRole.USER, content="Return JSON")],
+                CompletionConfig(
+                    model="default",
+                    response_format={"type": "json_object"},
+                ),
+            )
+
+        assert result.is_ok
+        assert result.value.content == '{"answer":"ok"}'
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "answer",
         [
