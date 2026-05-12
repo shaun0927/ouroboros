@@ -18,6 +18,7 @@ Usage:
 
 from __future__ import annotations
 
+from enum import StrEnum
 from pathlib import Path
 from typing import Final
 
@@ -25,6 +26,13 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 import yaml
 
 _PROFILES_DIR: Final[Path] = Path(__file__).resolve().parent.parent / "profiles"
+
+
+class VerifierCapability(StrEnum):
+    """Structured verifier envelope required by an execution profile."""
+
+    READ_ONLY_DISCOVERY = "read_only_discovery"
+    SUBPROCESS_TEST_RUNNER = "subprocess_test_runner"
 
 
 class EvidenceSchema(BaseModel):
@@ -83,6 +91,14 @@ class ExecutionProfile(BaseModel):
         ...,
         min_length=1,
         description="Instruction passed to the external verifier subagent (H1).",
+    )
+    verifier_capability: VerifierCapability = Field(
+        VerifierCapability.READ_ONLY_DISCOVERY,
+        description=(
+            "Structured verifier execution envelope. READ_ONLY_DISCOVERY "
+            "may inspect files only; SUBPROCESS_TEST_RUNNER may also run "
+            "bounded test/check commands without mutating the workspace."
+        ),
     )
     suggested_tools: tuple[str, ...] = Field(
         default=(),
@@ -167,6 +183,7 @@ __all__ = [
     "EvidenceSchema",
     "ExecutionProfile",
     "ProfileError",
+    "VerifierCapability",
     "available_profiles",
     "load_profile",
 ]

@@ -10,6 +10,7 @@ evidence_schema:
   rejected_if:
     - "external_sources == []"
     - "triangulated_sources == []"
+verifier_capability: read_only_discovery
 verifier_focus: >
   Confirm each claim is anchored to at least one external source URL or
   document. Reject claims that cite no source or that rely on a single

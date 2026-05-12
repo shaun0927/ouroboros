@@ -9,6 +9,7 @@ import pytest
 from ouroboros.orchestrator.profile_loader import (
     ExecutionProfile,
     ProfileError,
+    VerifierCapability,
     available_profiles,
     load_profile,
 )
@@ -27,6 +28,7 @@ class TestBuiltinProfiles:
         assert profile.axis
         assert profile.min_unit
         assert profile.verifier_focus
+        assert isinstance(profile.verifier_capability, VerifierCapability)
 
     def test_available_lists_all_builtins(self) -> None:
         discovered = available_profiles()
@@ -37,14 +39,17 @@ class TestBuiltinProfiles:
         profile = load_profile("code")
         assert "tests_passed" in profile.evidence_schema.required
         assert "Read" in profile.suggested_tools
+        assert profile.verifier_capability is VerifierCapability.SUBPROCESS_TEST_RUNNER
 
     def test_research_profile_requires_triangulation(self) -> None:
         profile = load_profile("research")
         assert "triangulated_sources" in profile.evidence_schema.required
+        assert profile.verifier_capability is VerifierCapability.READ_ONLY_DISCOVERY
 
     def test_analysis_profile_requires_perspectives(self) -> None:
         profile = load_profile("analysis")
         assert "perspectives_compared" in profile.evidence_schema.required
+        assert profile.verifier_capability is VerifierCapability.READ_ONLY_DISCOVERY
 
 
 class TestSchemaValidation:

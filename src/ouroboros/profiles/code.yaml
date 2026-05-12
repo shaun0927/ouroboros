@@ -9,6 +9,7 @@ evidence_schema:
     - tests_passed
   rejected_if:
     - "tests_passed == []"
+verifier_capability: subprocess_test_runner
 verifier_focus: >
   Run the project's test command. Confirm tests_passed list matches reality.
   Reject claims about files or symbols that do not exist on disk.

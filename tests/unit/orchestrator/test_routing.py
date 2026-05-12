@@ -66,26 +66,32 @@ class TestExecutorRoute:
 
 
 class TestVerifierRoute:
-    @pytest.mark.parametrize("profile_name", ["code", "research", "analysis"])
-    def test_verifier_routing_unimplemented(self, profile_name: str) -> None:
-        # Bot finding on #889 r5: without a structured
-        # verifier_capability field on ExecutionProfile, the router
-        # cannot honestly say what envelope each profile needs.
-        # Earlier rounds tried hard-fixed tools (wrong for code) and
-        # substring detection on verifier_focus prose (fragile). The
-        # honest answer is "not implemented" — fail fast so callers
-        # know to add the capability flag or plumb a custom verifier
-        # dispatcher before routing.
+    def test_code_profile_gets_test_runner_tools(self, code_profile: ExecutionProfile) -> None:
+        route = decide_route(role=DispatchRole.VERIFIER, profile=code_profile)
+        assert route.tier == ModelTier.OPUS
+        assert route.tools == ("Read", "Glob", "Grep", "Bash")
+        assert "subprocess test runner" in route.rationale
+
+    @pytest.mark.parametrize("profile_name", ["research", "analysis"])
+    def test_read_only_profiles_exclude_bash(self, profile_name: str) -> None:
         profile = load_profile(profile_name)
-        with pytest.raises(NotImplementedError, match="verifier_capability"):
-            decide_route(role=DispatchRole.VERIFIER, profile=profile)
+        route = decide_route(role=DispatchRole.VERIFIER, profile=profile)
+        assert route.tier == ModelTier.OPUS
+        assert route.tools == ("Read", "Glob", "Grep")
+        assert "read-only" in route.rationale
+
+    def test_fabrication_retry_caps_verifier_at_opus(self, code_profile: ExecutionProfile) -> None:
+        route = decide_route(
+            role=DispatchRole.VERIFIER,
+            profile=code_profile,
+            fabrication_retry=True,
+        )
+        assert route.tier == ModelTier.OPUS
 
 
 class TestRationaleStrings:
     def test_decomposer_and_executor_have_rationale(self, code_profile: ExecutionProfile) -> None:
-        # VERIFIER is intentionally unimplemented (see above), so only
-        # the two routes that return a RouteDecision are exercised.
-        for role in (DispatchRole.DECOMPOSER, DispatchRole.EXECUTOR):
+        for role in DispatchRole:
             route = decide_route(role=role, profile=code_profile)
             assert route.rationale, f"{role} returned empty rationale"
 

@@ -8,6 +8,7 @@ evidence_schema:
     - perspectives_compared
   rejected_if:
     - "perspectives_compared == []"
+verifier_capability: read_only_discovery
 verifier_focus: >
   Confirm every conclusion is supported by an explicit comparison of
   perspectives. Reject one-sided analyses that omit contrasting views or

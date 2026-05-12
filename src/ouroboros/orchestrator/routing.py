@@ -22,20 +22,11 @@ Implementation status at this PR:
     `fabrication_retry=True` per the H7 ESCALATE_MODEL hook.
     Tools come from `profile.suggested_tools` verbatim.
 
-  VERIFIER (intentionally NOT implemented — raises NotImplementedError)
-    Routing verifier dispatches requires a structured capability flag
-    on ExecutionProfile (read-only-discovery vs subprocess-test-runner)
-    that does not yet exist on the #881 schema. Earlier rounds of #889
-    review tried two approximations and both were rejected:
-      - hard-fixing the verifier tools to (Read, Glob, Grep) silently
-        breaks the code profile, whose verifier_focus needs subprocess
-        execution.
-      - substring-matching `verifier_focus` prose for subprocess markers
-        is fragile (innocuous wording changes flip runtime behavior).
-    The seam therefore refuses to guess and raises NotImplementedError
-    with a clear pointer: add `verifier_capability` to ExecutionProfile
-    (a #881 follow-up) or plumb a custom verifier dispatcher before
-    using `DispatchRole.VERIFIER`.
+  VERIFIER (implemented)
+    Routing verifier dispatches is based on the structured
+    `ExecutionProfile.verifier_capability` field. Read-only discovery
+    verifiers receive file-discovery tools only; subprocess-test-runner
+    verifiers additionally receive Bash so they can run bounded tests.
 
 This module is wiring-only. `parallel_executor` still uses its current
 hardcoded adapter call. `decide_route()` takes role + profile + retry
@@ -47,7 +38,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-from ouroboros.orchestrator.profile_loader import ExecutionProfile
+from ouroboros.orchestrator.profile_loader import ExecutionProfile, VerifierCapability
 
 
 class DispatchRole(StrEnum):
@@ -68,14 +59,9 @@ class ModelTier(StrEnum):
 
 _TIER_ORDER: tuple[ModelTier, ...] = (ModelTier.HAIKU, ModelTier.SONNET, ModelTier.OPUS)
 
-# Tools available to a verifier at the routing layer. Strictly read-only
-# discovery tools — the H1 contract is that a verifier cannot mutate the
-# workspace, and the router cannot inspect Bash command text to enforce
-# that, so Bash is excluded structurally rather than delegated to prompt
-# obedience (bot finding on PR #889 r3 reversed r2's keep-Bash position).
-# Profiles whose verifier_focus needs subprocess test execution must
-# route through a dedicated read-only test runner — see module docstring.
-_VERIFIER_TOOLS: tuple[str, ...] = ("Read", "Glob", "Grep")
+# Tools available to verifier envelopes at the routing layer.
+_VERIFIER_READ_ONLY_TOOLS: tuple[str, ...] = ("Read", "Glob", "Grep")
+_VERIFIER_TEST_RUNNER_TOOLS: tuple[str, ...] = ("Read", "Glob", "Grep", "Bash")
 
 
 @dataclass(frozen=True)
@@ -133,15 +119,6 @@ def decide_route(
             routing seam fails fast on unknown inputs (e.g. a raw
             string from config/JSON) rather than silently falling
             through to the verifier branch with the wrong tools.
-        NotImplementedError: For DispatchRole.VERIFIER. Routing
-            verifier dispatches requires a structured capability flag
-            on ExecutionProfile (read-only-discovery vs subprocess-
-            test-runner) that does not yet exist. Earlier rounds tried
-            substring-matching `verifier_focus` text — that was
-            rejected as fragile. The seam intentionally refuses to
-            guess; add a `verifier_capability` field to
-            ExecutionProfile (#881 follow-up) or plumb a custom
-            verifier dispatcher before using VERIFIER routing.
     """
     if not isinstance(role, DispatchRole):
         msg = (
@@ -175,31 +152,27 @@ def decide_route(
         )
 
     if role is DispatchRole.VERIFIER:
-        # ExecutionProfile does not yet expose a structured capability
-        # flag describing what verifier envelope each profile actually
-        # needs (read-only discovery vs subprocess test runner). The
-        # earlier rounds tried two approximations:
-        #   r3 — silently return (Read, Glob, Grep) for every profile.
-        #        Wrong for code profile whose verifier_focus needs
-        #        `pytest`.
-        #   r4 — substring-match `verifier_focus` for subprocess markers.
-        #        Fragile: prose changes break runtime behavior.
-        # Until ExecutionProfile carries a structured `verifier_capability`
-        # field, the honest answer at this seam is "I don't know what
-        # this profile needs". Fail fast so the caller (#891 wiring
-        # follow-ups) cannot accidentally route a verifier through an
-        # envelope that may not match the profile's contract
-        # (bot finding on #889 r5).
-        msg = (
-            f"DispatchRole.VERIFIER routing for profile "
-            f"{profile.profile!r} is not implemented: ExecutionProfile "
-            "does not yet expose a structured capability flag "
-            "(read-only-discovery vs subprocess-test-runner), and the "
-            "router will not infer it from free-form verifier_focus "
-            "text. Add a `verifier_capability` field to ExecutionProfile "
-            "(follow-up to #881) before wiring the verifier seam, or "
-            "plumb a custom verifier dispatcher for this profile."
-        )
+        executor_tier = _executor_tier(profile, fabrication_retry=fabrication_retry)
+        tier = _bump_tier(executor_tier)
+        if profile.verifier_capability is VerifierCapability.READ_ONLY_DISCOVERY:
+            return RouteDecision(
+                tier=tier,
+                tools=_VERIFIER_READ_ONLY_TOOLS,
+                rationale=(
+                    "Verifier: one tier above executor with read-only "
+                    "discovery tools from verifier_capability."
+                ),
+            )
+        if profile.verifier_capability is VerifierCapability.SUBPROCESS_TEST_RUNNER:
+            return RouteDecision(
+                tier=tier,
+                tools=_VERIFIER_TEST_RUNNER_TOOLS,
+                rationale=(
+                    "Verifier: one tier above executor with subprocess test "
+                    "runner capability from verifier_capability."
+                ),
+            )
+        msg = f"Unhandled verifier_capability: {profile.verifier_capability!r}"
         raise NotImplementedError(msg)
 
     # Exhaustive — every DispatchRole member handled above. Reached only
