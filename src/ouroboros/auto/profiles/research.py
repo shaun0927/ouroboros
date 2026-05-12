@@ -21,9 +21,12 @@ __all__ = ["RESEARCH_PROFILE"]
 
 class _SourceCountPredicate:
     code = "source_count"
+    _SOURCE_COUNT_RE = re.compile(r"(?<![-\w])(?:sources?|citations?|references?)\b", re.I)
 
     def matches(self, criterion: str) -> bool:
-        return "source" in criterion.lower() and any(d in criterion for d in "0123456789")
+        return bool(self._SOURCE_COUNT_RE.search(criterion)) and any(
+            d in criterion for d in "0123456789"
+        )
 
     def repair_template(self, criterion: str) -> str:
         return "Verify by counting cited sources; AC must specify a numeric minimum."

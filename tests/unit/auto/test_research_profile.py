@@ -59,8 +59,16 @@ def test_intent_classifier_returns_none_for_unmatched_question() -> None:
 def test_source_count_predicate_matches_numeric_criterion() -> None:
     pred = _SourceCountPredicate()
     assert pred.matches("must cite at least 5 sources")
+    assert pred.matches("include 3 citations")
+    assert pred.matches("list 4 references")
     assert not pred.matches("no numbers here")
     assert not pred.matches("source without digit")
+
+
+def test_source_count_predicate_ignores_source_substrings() -> None:
+    pred = _SourceCountPredicate()
+    assert not pred.matches("resource limit must stay under 512MB")
+    assert not pred.matches("support 3 open-source formats")
 
 
 def test_citation_format_predicate_matches_citation_keyword() -> None:
