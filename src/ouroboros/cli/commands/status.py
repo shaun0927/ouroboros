@@ -8,7 +8,6 @@ from typing import Annotated
 
 import typer
 
-from ouroboros.auto.listeners import replay_ralph_job_events
 from ouroboros.auto.state import AutoPhase, AutoStore
 from ouroboros.cli.formatters.panels import print_error, print_info
 from ouroboros.cli.formatters.tables import create_status_table, print_table
@@ -46,16 +45,25 @@ def _format_auto_status(state) -> str:
     lines.append(f"Last progress: {state.last_progress_message}")
 
     is_gap_window = (
-        state.ralph_lineage_id is not None
+        state.phase is AutoPhase.RALPH_HANDOFF
+        and state.ralph_lineage_id is not None
         and state.ralph_job_id is None
-        and state.ralph_dispatch_mode != "plugin"
-        and not is_terminal
+        and state.ralph_dispatch_mode not in {"plugin", "plugin_pending"}
+    )
+    is_plugin_pending = (
+        state.phase is AutoPhase.RALPH_HANDOFF and state.ralph_dispatch_mode == "plugin_pending"
     )
 
     if state.ralph_dispatch_mode == "plugin":
         lines.append("Ralph (plugin):")
         lines.append("  dispatch_mode: plugin")
         lines.append("  guidance: ralph delegated to OpenCode Task widget; follow that lifecycle")
+    elif is_plugin_pending:
+        lines.append("Ralph (plugin pending):")
+        lines.append("  dispatch_mode: plugin_pending")
+        lines.append(f"  lineage_id: {state.ralph_lineage_id}")
+        lines.append("  status: interrupted plugin dispatch")
+        lines.append("  guidance: plugin dispatch unconfirmed; resume will retry or block")
     elif state.ralph_job_id is not None:
         lines.append("Ralph (job):")
         lines.append(f"  job_id: {state.ralph_job_id}")
@@ -74,34 +82,6 @@ def _format_auto_status(state) -> str:
     return "\n".join(lines) + "\n"
 
 
-async def _load_auto_status_state(
-    auto_session_id: str,
-    *,
-    auto_store: AutoStore | None = None,
-    event_store: EventStore | None = None,
-):
-    """Load an auto state and mirror linked Ralph job events before rendering."""
-    store = auto_store or AutoStore()
-    state = store.load(auto_session_id)
-    if state.ralph_dispatch_mode == "plugin":
-        return state
-    if state.ralph_job_id is None and state.ralph_lineage_id is None:
-        return state
-
-    owns_event_store = event_store is None
-    events = event_store or EventStore()
-    try:
-        await events.initialize()
-        previous_job_id = state.ralph_job_id
-        applied = await replay_ralph_job_events(state, events)
-        if applied or state.ralph_job_id != previous_job_id:
-            store.save(state)
-    finally:
-        if owns_event_store:
-            await events.close()
-    return state
-
-
 @app.command()
 def auto(
     auto_session_id: Annotated[
@@ -118,7 +98,7 @@ def auto(
         print_error("auto_session_id must start with auto_")
         raise typer.Exit(1)
     try:
-        state = asyncio.run(_load_auto_status_state(auto_session_id))
+        state = AutoStore().load(auto_session_id)
     except ValueError as exc:
         print_error(f"Auto status failed: {exc}")
         raise typer.Exit(1) from exc

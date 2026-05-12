@@ -7,7 +7,7 @@ This module exists so the unified status surface (Q00/ouroboros#782) can answer
 incremental query API and updates four mirror fields on ``AutoPipelineState``:
 
 - ``ralph_job_status`` — last-seen ``JobStatus`` value
-- ``ralph_last_event_at`` — ISO timestamp of the last event
+- ``ralph_last_event_at`` — ``time.monotonic()`` seconds of the last event
 - ``ralph_stop_reason`` — populated when the ralph job reaches a terminal status
 - ``ralph_current_generation`` — last reported lineage generation index
 
@@ -17,24 +17,28 @@ state ``BLOCKED("ralph cancelled by user")`` — but only if the auto session is
 not already in a terminal phase, otherwise we would clobber a successful
 ``COMPLETE`` with a noisy blocker.
 
-Status readers call :func:`replay_ralph_job_events` before rendering so the
-persisted auto snapshot reflects already-written ``mcp.job.*`` events even
-when no background subscriber is running.
+The listener is **best-effort**: the production bridge polls the job event
+store while the Ralph job is running and persists mirror updates as they arrive.
+The acceptance tests also exercise the pure apply step directly so the parsing
+contract stays testable without tying every test to an asyncio loop.
 """
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+import time
 from typing import Any
 
 from ouroboros.auto.state import (
     TERMINAL_PHASES,
     AutoPhase,
     AutoPipelineState,
+    AutoStore,
 )
 from ouroboros.events.base import BaseEvent
+from ouroboros.persistence.event_store import EventStore
 
 # Job event types we mirror onto the auto state. Anything outside this set is
 # ignored so an unrelated mcp.* topic cannot scribble across the mirror fields.
@@ -76,37 +80,6 @@ class _RalphEventReading:
     is_terminal: bool
 
 
-def _coerce_event_timestamp(event: BaseEvent, payload: dict[str, Any]) -> str:
-    """Return a timezone-aware ISO timestamp for the mirrored event.
-
-    Prefer the JobManager payload timestamp because persisted event rows may be
-    rehydrated from SQLite as naive datetimes. Fall back to the BaseEvent
-    timestamp and attach UTC when older rows lack tzinfo.
-    """
-    raw_payload_timestamp = payload.get("timestamp")
-    if isinstance(raw_payload_timestamp, str) and raw_payload_timestamp:
-        try:
-            parsed = datetime.fromisoformat(raw_payload_timestamp)
-        except ValueError:
-            parsed = None
-        if parsed is not None:
-            if parsed.tzinfo is None or parsed.utcoffset() is None:
-                parsed = parsed.replace(tzinfo=UTC)
-            return parsed.isoformat()
-
-    timestamp = event.timestamp
-    if isinstance(timestamp, str):
-        try:
-            parsed = datetime.fromisoformat(timestamp)
-        except ValueError:
-            parsed = datetime.now(UTC)
-    else:
-        parsed = timestamp
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed.isoformat()
-
-
 def _coerce_lineage_id(payload: dict[str, Any]) -> str | None:
     """Return the lineage id embedded in a ``mcp.job.*`` payload, if any.
 
@@ -125,6 +98,47 @@ def _coerce_lineage_id(payload: dict[str, Any]) -> str | None:
     return None
 
 
+def _result_meta(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return sanitized terminal ``result_meta`` when JobManager provides it."""
+    value = payload.get("result_meta")
+    return value if isinstance(value, dict) else {}
+
+
+def _optional_nonempty_str(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _optional_generation(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, str) and value.isdigit():
+        parsed = int(value)
+        return parsed if parsed >= 0 else None
+    return None
+
+
+def _last_generation(value: object) -> int | None:
+    if not isinstance(value, list):
+        return None
+    for item in reversed(value):
+        found = _optional_generation(item)
+        if found is not None:
+            return found
+    return None
+
+
+def _metadata_generation(meta: dict[str, Any]) -> int | None:
+    meta_generation = _optional_generation(meta.get("current_generation"))
+    if meta_generation is not None:
+        return meta_generation
+    meta_generation = _last_generation(meta.get("generations"))
+    if meta_generation is not None:
+        return meta_generation
+    return _optional_generation(meta.get("iterations"))
+
+
 def _project_event(event: BaseEvent) -> _RalphEventReading | None:
     """Project a ``BaseEvent`` into the mirror-relevant slice.
 
@@ -136,23 +150,16 @@ def _project_event(event: BaseEvent) -> _RalphEventReading | None:
     if event.type not in _RALPH_JOB_EVENT_TYPES:
         return None
     payload = event.data if isinstance(event.data, dict) else {}
-    raw_status = payload.get("status")
-    status = raw_status if isinstance(raw_status, str) and raw_status else None
-    result_meta = payload.get("result_meta")
-    if not isinstance(result_meta, dict):
-        result_meta = {}
-    stop_reason: str | None = None
-    meta_stop_reason = result_meta.get("stop_reason")
-    if isinstance(meta_stop_reason, str) and meta_stop_reason:
-        stop_reason = meta_stop_reason
-    elif isinstance(payload.get("stop_reason"), str) and payload["stop_reason"]:
-        stop_reason = payload["stop_reason"]
-    error: str | None = None
-    meta_error = result_meta.get("error")
-    if isinstance(meta_error, str) and meta_error:
-        error = meta_error
-    elif isinstance(payload.get("error"), str) and payload["error"]:
-        error = payload["error"]
+    meta = _result_meta(payload)
+    status = _optional_nonempty_str(payload.get("status")) or _optional_nonempty_str(
+        meta.get("status")
+    )
+    stop_reason = _optional_nonempty_str(payload.get("stop_reason")) or _optional_nonempty_str(
+        meta.get("stop_reason")
+    )
+    error = _optional_nonempty_str(payload.get("error")) or _optional_nonempty_str(
+        meta.get("error")
+    )
     is_terminal = event.type in {
         "mcp.job.completed",
         "mcp.job.failed",
@@ -169,13 +176,19 @@ def _project_event(event: BaseEvent) -> _RalphEventReading | None:
 
 
 def _coerce_generation(payload: dict[str, Any]) -> int | None:
-    """Return ``current_generation`` from a job payload's ``message`` if present.
+    """Return ``current_generation`` from job payload metadata or message.
 
-    JobManager's ``_derive_status_message`` stringifies lineage progress as
-    ``"Generation N | <phase>"``; we cheaply extract ``N`` so the unified
-    status surface can render "ralph generation 4 of 10" without a second
-    event-store query. Bails out cleanly on any unexpected shape.
+    Terminal ``JobManager`` events carry Ralph details under ``result_meta``.
+    Progress updates may only carry the derived status message, so keep the
+    older ``"Generation N | <phase>"`` parser as the fallback.
     """
+    meta = _result_meta(payload)
+    meta_generation = _metadata_generation(meta)
+    if meta_generation is not None:
+        return meta_generation
+    payload_generation = _metadata_generation(payload)
+    if payload_generation is not None:
+        return payload_generation
     message = payload.get("message")
     if not isinstance(message, str) or not message:
         return None
@@ -192,6 +205,11 @@ def _coerce_generation(payload: dict[str, Any]) -> int | None:
     if value < 0:
         return None
     return value
+
+
+def _event_is_terminal(event: BaseEvent) -> bool:
+    reading = _project_event(event)
+    return bool(reading and reading.is_terminal)
 
 
 def apply_event(state: AutoPipelineState, event: BaseEvent) -> bool:
@@ -233,8 +251,7 @@ def apply_event(state: AutoPipelineState, event: BaseEvent) -> bool:
     if not (matches_lineage or matches_job_id):
         return False
 
-    payload = event.data if isinstance(event.data, dict) else {}
-    state.ralph_last_event_at = _coerce_event_timestamp(event, payload)
+    state.ralph_last_event_at = time.monotonic()
     if reading.status is not None:
         state.ralph_job_status = reading.status
     if reading.is_terminal:
@@ -242,6 +259,7 @@ def apply_event(state: AutoPipelineState, event: BaseEvent) -> bool:
         # ``mcp.job.failed`` so the unified status surface always has *some*
         # blocker text to render.
         state.ralph_stop_reason = reading.stop_reason or reading.error or reading.status
+    payload = event.data if isinstance(event.data, dict) else {}
     generation = _coerce_generation(payload)
     if generation is not None:
         state.ralph_current_generation = generation
@@ -282,47 +300,36 @@ def apply_events(state: AutoPipelineState, events: Iterable[BaseEvent]) -> int:
     return applied
 
 
-async def replay_ralph_job_events(
+async def mirror_ralph_job_events(
     state: AutoPipelineState,
-    event_store: Any,
+    store: AutoStore,
+    event_store: EventStore,
+    job_id: str,
     *,
-    job_manager: Any | None = None,
-) -> int:
-    """Replay the linked Ralph job history into ``state`` and return apply count.
+    poll_interval: float = 0.05,
+) -> None:
+    """Persist mirrored Ralph job events until the linked job is terminal.
 
-    Production status paths use this as an on-demand listener pass: the job
-    event log remains the source of truth, and the auto JSON record is refreshed
-    before CLI/MCP surfaces render it. Plugin delegations intentionally skip the
-    replay because there is no in-process job lifecycle to mirror.
+    This is the production bridge from real ``JobManager`` ``mcp.job.*`` events
+    into the auto state mirror. It starts at cursor 0 so a listener created
+    just after job dispatch still observes the initial and terminal events.
     """
-    if state.ralph_dispatch_mode == "plugin":
-        return 0
-    if state.ralph_job_id is None:
-        if state.ralph_lineage_id is None:
-            return 0
-        manager = job_manager
-        if manager is None:
-            from ouroboros.mcp.job_manager import JobManager  # noqa: PLC0415
-
-            manager = JobManager(event_store)
-        recovered = await manager.find_active_job_by_lineage(
-            state.ralph_lineage_id,
-            job_type="ralph",
-            include_terminal=True,
-        )
-        if recovered is None:
-            return 0
-        state.ralph_job_id = recovered.job_id
-        state.ralph_dispatch_mode = state.ralph_dispatch_mode or "job"
-    events = await event_store.replay("job", state.ralph_job_id)
-    return apply_events(state, events)
+    cursor = 0
+    while True:
+        events, cursor = await event_store.get_events_after("job", job_id, last_row_id=cursor)
+        applied = apply_events(state, events)
+        if applied:
+            store.save(state)
+        if any(_event_is_terminal(event) for event in events):
+            return
+        await asyncio.sleep(poll_interval)
 
 
 __all__ = [
     "RALPH_CANCEL_BLOCKER_REASON",
     "apply_event",
     "apply_events",
-    "replay_ralph_job_events",
+    "mirror_ralph_job_events",
 ]
 
 

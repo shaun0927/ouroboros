@@ -11,7 +11,6 @@ from typing import Any
 
 import structlog
 
-from ouroboros.auto.listeners import replay_ralph_job_events
 from ouroboros.auto.state import AutoPhase, AutoStore
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
@@ -106,6 +105,13 @@ class SessionStatusHandler:
                 "dispatch_mode": "plugin",
                 "guidance": ("ralph delegated to OpenCode Task widget; follow that lifecycle"),
             }
+        if state.phase is AutoPhase.RALPH_HANDOFF and state.ralph_dispatch_mode == "plugin_pending":
+            return {
+                "dispatch_mode": "plugin_pending",
+                "lineage_id": state.ralph_lineage_id,
+                "status": "interrupted_plugin_dispatch",
+                "guidance": "plugin dispatch unconfirmed; resume will retry or block",
+            }
         if state.ralph_job_id is not None:
             return {
                 "job_id": state.ralph_job_id,
@@ -118,19 +124,7 @@ class SessionStatusHandler:
             }
         return None
 
-    async def _refresh_auto_ralph_mirror(self, state: Any) -> None:
-        """Replay linked Ralph job events into the persisted auto snapshot."""
-        if state.ralph_dispatch_mode == "plugin":
-            return
-        if state.ralph_job_id is None and state.ralph_lineage_id is None:
-            return
-        await self._ensure_initialized()
-        previous_job_id = state.ralph_job_id
-        applied = await replay_ralph_job_events(state, self._event_store)
-        if applied or state.ralph_job_id != previous_job_id:
-            self._auto_store.save(state)
-
-    async def _handle_auto_session(
+    def _handle_auto_session(
         self,
         session_id: str,
     ) -> Result[MCPToolResult, MCPServerError]:
@@ -151,24 +145,22 @@ class SessionStatusHandler:
                 )
             )
 
-        await self._refresh_auto_ralph_mirror(state)
-
         # Gap window per the issue contract: between RUN's run_handoff_status
         # transitioning to "started" and the RALPH_HANDOFF entry persisting a
         # job_id, the session phase is reported as ``ralph_handoff`` with a
         # ``pending`` marker so the operator never sees a missing-status hole.
+        is_gap_window = (
+            state.phase is AutoPhase.RALPH_HANDOFF
+            and state.ralph_lineage_id is not None
+            and state.ralph_job_id is None
+            and state.ralph_dispatch_mode not in {"plugin", "plugin_pending"}
+        )
+        phase_value = "ralph_handoff" if is_gap_window else state.phase.value
         is_terminal = state.phase in {
             AutoPhase.COMPLETE,
             AutoPhase.BLOCKED,
             AutoPhase.FAILED,
         }
-        is_gap_window = (
-            state.ralph_lineage_id is not None
-            and state.ralph_job_id is None
-            and state.ralph_dispatch_mode != "plugin"
-            and not is_terminal
-        )
-        phase_value = "ralph_handoff" if is_gap_window else state.phase.value
         ralph_block = self._build_ralph_block(state)
 
         # Render a short text block; the structured detail lives in ``meta``
@@ -256,7 +248,7 @@ class SessionStatusHandler:
         # linked or is being prepared.
         if isinstance(session_id, str) and session_id.startswith("auto_"):
             try:
-                return await self._handle_auto_session(session_id)
+                return self._handle_auto_session(session_id)
             except Exception as e:  # pragma: no cover - defensive
                 log.error("mcp.tool.session_status.auto_error", error=str(e))
                 return Result.err(
@@ -265,9 +257,6 @@ class SessionStatusHandler:
                         tool_name="ouroboros_session_status",
                     )
                 )
-            finally:
-                if self._owns_event_store:
-                    await self.close()
 
         try:
             # Ensure event store is initialized
