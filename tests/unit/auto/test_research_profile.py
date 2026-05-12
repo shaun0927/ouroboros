@@ -71,6 +71,14 @@ def test_source_count_predicate_ignores_source_substrings() -> None:
     assert not pred.matches("support 3 open-source formats")
 
 
+def test_source_count_predicate_ignores_non_count_numbers() -> None:
+    pred = _SourceCountPredicate()
+    assert not pred.matches("references must use APA 7 style")
+    assert not pred.matches("cite sources published after 2020")
+    assert not pred.matches("include DOI 10.1234 references")
+    assert not pred.matches("source map v3 must work")
+
+
 def test_citation_format_predicate_matches_citation_keyword() -> None:
     pred = _CitationFormatPredicate()
     assert pred.matches("citation style must be APA")

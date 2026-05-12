@@ -21,12 +21,18 @@ __all__ = ["RESEARCH_PROFILE"]
 
 class _SourceCountPredicate:
     code = "source_count"
-    _SOURCE_COUNT_RE = re.compile(r"(?<![-\w])(?:sources?|citations?|references?)\b", re.I)
+    _SOURCE_COUNT_RE = re.compile(
+        r"""
+        (?:\b(?:at\s+least|minimum(?:\s+of)?|no\s+fewer\s+than)\s+\d+(?![\w.])\s+
+            (?:sources?|citations?|references?)\b)
+        |
+        (?:(?<![\w.])\d+(?![\w.])\s+(?:sources?|citations?|references?)\b)
+        """,
+        re.I | re.X,
+    )
 
     def matches(self, criterion: str) -> bool:
-        return bool(self._SOURCE_COUNT_RE.search(criterion)) and any(
-            d in criterion for d in "0123456789"
-        )
+        return bool(self._SOURCE_COUNT_RE.search(criterion))
 
     def repair_template(self, criterion: str) -> str:
         return "Verify by counting cited sources; AC must specify a numeric minimum."
