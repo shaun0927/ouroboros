@@ -286,12 +286,13 @@ _INTERVIEW_EVENT_ERROR_DETAIL_KEYS = (
     "depth",
 )
 
-_INTERVIEW_EVENT_ABSOLUTE_PATH_RE = re.compile(
-    r"(?<!:)"
+_INTERVIEW_EVENT_WINDOWS_PATH_RE = re.compile(
+    r"[A-Za-z]:\\.*?(?=(?:\s+(?:and|or|from|in|at|with|to)\b)|[,;:'\")\]}]|$)"
+)
+_INTERVIEW_EVENT_POSIX_PATH_RE = re.compile(
     r"(?:"
     r"~[/\\][^\s,;:'\")\]}]+"
-    r"|/(?:[A-Za-z0-9._ -]+)(?:/[A-Za-z0-9._ -]+)*"
-    r"|[A-Za-z]:\\[^\r\n,;:'\")\]}]+"
+    r"|/(?:[^\s,;'\"\]}]+)"
     r")"
 )
 _INTERVIEW_EVENT_URL_RE = re.compile(r"https?://[^\s,;:'\")\]}]+")
@@ -306,7 +307,8 @@ def _redact_interview_event_error_text(text: str) -> str:
         return f"__INTERVIEW_EVENT_URL_{len(urls) - 1}__"
 
     protected = _INTERVIEW_EVENT_URL_RE.sub(protect_url, text)
-    redacted = _INTERVIEW_EVENT_ABSOLUTE_PATH_RE.sub("[redacted path]", protected)
+    redacted = _INTERVIEW_EVENT_WINDOWS_PATH_RE.sub("[redacted path]", protected)
+    redacted = _INTERVIEW_EVENT_POSIX_PATH_RE.sub("[redacted path]", redacted)
     for index, url in enumerate(urls):
         redacted = redacted.replace(f"__INTERVIEW_EVENT_URL_{index}__", url)
     return redacted
