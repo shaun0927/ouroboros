@@ -221,16 +221,23 @@ def test_detector_returns_one_for_other_coding_markers(tmp_path: Path, marker: s
     assert CODING_PROFILE.detector(tmp_path) == 1.0
 
 
-@pytest.mark.parametrize("marker", [".git", "src", "tests"])
+@pytest.mark.parametrize("marker", ["src", "tests"])
 def test_detector_returns_one_for_directory_markers(tmp_path: Path, marker: str) -> None:
     """detector preserves source/worktree directory markers used before PR #851."""
     (tmp_path / marker).mkdir()
     assert 0.0 < CODING_PROFILE.detector(tmp_path) < 0.6
 
 
-def test_detector_returns_weak_signal_for_git_file_marker(tmp_path: Path) -> None:
-    """linked worktree roots expose .git as a file, not a directory."""
+def test_detector_ignores_git_file_without_source_markers(tmp_path: Path) -> None:
+    """Git metadata alone is not a domain signal for automatic coding activation."""
     (tmp_path / ".git").write_text("gitdir: ../.git/worktrees/example\n")
+    assert CODING_PROFILE.detector(tmp_path) == 0.0
+
+
+def test_detector_scores_linked_worktree_when_source_layout_exists(tmp_path: Path) -> None:
+    """linked worktrees are covered by source-layout markers, not by .git alone."""
+    (tmp_path / ".git").write_text("gitdir: ../.git/worktrees/example\n")
+    (tmp_path / "src").mkdir()
     assert 0.0 < CODING_PROFILE.detector(tmp_path) < 0.6
 
 
