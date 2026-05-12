@@ -91,6 +91,7 @@ class GenerationProgressWatchdog:
     _material_event_count: int = 0
     _last_event_type: str | None = None
     _last_event_aggregate: str | None = None
+    _last_generation_phase: str | None = None
     _last_material_event_type: str | None = None
     _workflow_fingerprint: tuple[Any, ...] | None = None
     _subtask_statuses: dict[str, str] = field(default_factory=dict)
@@ -268,10 +269,9 @@ class GenerationProgressWatchdog:
             return {"watchdog_decision_event_id": decision_event.id}
 
         timeout_kind = merged.get("timeout_kind")
-        phase = merged.get("phase") if isinstance(merged.get("phase"), str) else "executing"
+        phase = self._directive_phase(merged)
         idempotency_key = (
-            f"generation.watchdog:{self.lineage_id}:"
-            f"{self.generation_number}:{timeout_kind}:{decision_event.id}"
+            f"generation.watchdog:{self.lineage_id}:{self.generation_number}:{timeout_kind}:{phase}"
         )
         is_terminal = is_terminal_directive(directive)
         merged["watchdog_decision_event_id"] = decision_event.id
@@ -315,6 +315,13 @@ class GenerationProgressWatchdog:
         self._activity_event_count += 1
         self._last_event_type = event.type
         self._last_event_aggregate = f"{event.aggregate_type}/{event.aggregate_id}"
+        if self._event_matches_generation(event) and event.type in {
+            "lineage.generation.phase_changed",
+            "lineage.generation.started",
+        }:
+            phase = event.data.get("phase")
+            if isinstance(phase, str) and phase:
+                self._last_generation_phase = phase
 
         if self._is_material_progress(event):
             self._last_material_progress_at = now
@@ -342,6 +349,15 @@ class GenerationProgressWatchdog:
             return self._subtask_status_changed(event.data)
 
         return False
+
+    def _directive_phase(self, details: dict[str, Any]) -> str:
+        """Return the best-known generation phase for a watchdog directive."""
+        phase = details.get("phase")
+        if isinstance(phase, str) and phase:
+            return phase
+        if self._last_generation_phase:
+            return self._last_generation_phase
+        return "executing"
 
     async def initialize_baseline(self) -> None:
         """Prime cursors so only events from this watchdog attempt count."""

@@ -14,7 +14,7 @@ import pytest
 from ouroboros.config.models import RuntimeControlsConfig
 from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
-from ouroboros.events.lineage import lineage_generation_failed
+from ouroboros.events.lineage import lineage_generation_failed, lineage_generation_phase_changed
 import ouroboros.evolution.watchdog as watchdog_module
 from ouroboros.evolution.watchdog import (
     WATCHDOG_CANCELLATION_MODE,
@@ -295,6 +295,7 @@ async def test_no_progress_timeout_emits_retry_directive() -> None:
     )
 
     async def busy_work() -> str:
+        await event_store.append(lineage_generation_phase_changed(lineage_id, 1, "reflecting"))
         await event_store.append(_workflow_progress(execution_id, completed_count=0))
         try:
             while True:
@@ -319,8 +320,10 @@ async def test_no_progress_timeout_emits_retry_directive() -> None:
     assert decision_details.get("cancellation_mode") == WATCHDOG_CANCELLATION_MODE
     assert decision_details.get("watchdog_decision_event_id") == decision_events[0].id
     idempotency_key = decision_details.get("watchdog_directive_idempotency_key")
-    assert isinstance(idempotency_key, str)
-    assert idempotency_key.startswith("generation.watchdog:")
+    assert idempotency_key == (
+        f"generation.watchdog:{lineage_id}:1:no_material_progress_timeout:reflecting"
+    )
+    assert decision_events[0].id not in idempotency_key
 
     # Dedicated control-plane event lands on the lineage aggregate.
     directive_events = [e for e in events if e.type == "control.directive.emitted"]
@@ -332,7 +335,7 @@ async def test_no_progress_timeout_emits_retry_directive() -> None:
     assert directive_event.data["target_id"] == lineage_id
     assert directive_event.data["emitted_by"] == "generation.watchdog"
     assert directive_event.data["directive"] == "retry"
-    assert directive_event.data["phase"] == "executing"
+    assert directive_event.data["phase"] == "reflecting"
     assert directive_event.data["idempotency_key"] == idempotency_key
     # Watchdog correlation fields propagate so a projector filtering
     # by execution / generation does not have to join back to the
