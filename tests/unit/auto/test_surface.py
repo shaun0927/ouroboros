@@ -2067,6 +2067,29 @@ def test_auto_save_seed_bounds_long_unicode_seed_id_filename_without_metadata_dr
     assert load_seed(path).metadata.seed_id == seed_id
 
 
+def test_auto_save_seed_bounds_long_ascii_seed_id_filename_without_metadata_drift(
+    tmp_path: Path,
+) -> None:
+    from ouroboros.auto.adapters import load_seed, save_seed
+    from ouroboros.core.seed import OntologySchema, Seed, SeedMetadata
+
+    seeds_dir = tmp_path / "seeds"
+    seed_id = "seed_" + ("a" * 300)
+    seed = Seed(
+        goal="Demo goal",
+        ontology_schema=OntologySchema(name="demo", description="demo ontology"),
+        metadata=SeedMetadata(seed_id=seed_id),
+    )
+
+    path = Path(save_seed(seed, seeds_dir=seeds_dir)).resolve()
+
+    assert path.parent == seeds_dir.resolve()
+    assert path.exists()
+    assert len(path.name.encode("utf-8")) <= 255
+    assert "--%TRUNC%" in path.stem
+    assert load_seed(path).metadata.seed_id == seed_id
+
+
 def test_auto_save_seed_long_unicode_filename_digest_avoids_prefix_collision(
     tmp_path: Path,
 ) -> None:
