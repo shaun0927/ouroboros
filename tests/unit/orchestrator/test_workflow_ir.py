@@ -310,6 +310,97 @@ class TestFanOutFanInRepresentation:
         assert result.ok is True, result.errors
 
 
+class TestMetadataIsRuntimeImmutable:
+    """``metadata`` / ``runtime_hints`` / ``condition`` must reject
+    in-place mutation so cached projections cannot silently drift."""
+
+    def test_node_metadata_blocks_setitem(self) -> None:
+        node = _make_task("node_a")
+        with pytest.raises(TypeError):
+            node.metadata["k"] = "v"  # type: ignore[index]
+
+    def test_node_runtime_hints_blocks_setitem(self) -> None:
+        node = WorkflowNode(
+            node_id="node_a",
+            kind=NodeKind.TASK,
+            owner=NodeOwner.HARNESS,
+            runtime_hints={"timeout": 30},
+        )
+        with pytest.raises(TypeError):
+            node.runtime_hints["timeout"] = 60  # type: ignore[index]
+
+    def test_edge_metadata_blocks_setitem(self) -> None:
+        edge = _edge("a", "b")
+        with pytest.raises(TypeError):
+            edge.metadata["k"] = "v"  # type: ignore[index]
+
+    def test_edge_condition_blocks_setitem(self) -> None:
+        edge = WorkflowEdge(
+            edge_id="edge_x",
+            source="a",
+            target="b",
+            kind=EdgeKind.CONDITIONAL,
+            condition={"op": "eq", "field": "status"},
+        )
+        assert edge.condition is not None
+        with pytest.raises(TypeError):
+            edge.condition["op"] = "ne"  # type: ignore[index]
+
+    def test_spec_metadata_blocks_setitem(self) -> None:
+        spec = WorkflowSpec(
+            source=SourceKind.SYNTHETIC,
+            nodes=(_make_task("a"), _make_terminal("end")),
+            edges=(_edge("a", "end", kind=EdgeKind.TERMINAL),),
+            metadata={"origin": "test"},
+        )
+        with pytest.raises(TypeError):
+            spec.metadata["origin"] = "tampered"  # type: ignore[index]
+
+    def test_metadata_round_trips_through_model_dump(self) -> None:
+        node = WorkflowNode(
+            node_id="node_a",
+            kind=NodeKind.TASK,
+            owner=NodeOwner.HARNESS,
+            metadata={"k": "v", "n": 1},
+        )
+        dumped = node.model_dump()
+        assert isinstance(dumped["metadata"], dict)
+        assert dumped["metadata"] == {"k": "v", "n": 1}
+
+
+class TestCapabilityEnvelopeHygiene:
+    """``capability_envelope`` must reject blank or whitespace-only
+    entries so the dispatch policy cannot accept silently empty tokens.
+    """
+
+    def test_blank_capability_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            WorkflowNode(
+                node_id="node_a",
+                kind=NodeKind.TASK,
+                owner=NodeOwner.HARNESS,
+                capability_envelope=("",),
+            )
+
+    def test_whitespace_capability_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            WorkflowNode(
+                node_id="node_a",
+                kind=NodeKind.TASK,
+                owner=NodeOwner.HARNESS,
+                capability_envelope=("   ",),
+            )
+
+    def test_capability_envelope_strips_whitespace(self) -> None:
+        node = WorkflowNode(
+            node_id="node_a",
+            kind=NodeKind.TASK,
+            owner=NodeOwner.HARNESS,
+            capability_envelope=("  read  ", "write"),
+        )
+        assert node.capability_envelope == ("read", "write")
+
+
 class TestNoExternalFrameworkDependency:
     """Smoke-test that the IR module does not import MAF / DurableTask /
     Azure workflow SDKs at runtime. Acceptance criterion #6 of #956."""

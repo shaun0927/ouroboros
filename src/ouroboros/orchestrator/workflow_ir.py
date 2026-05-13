@@ -28,14 +28,89 @@ independently. See issue #956 for the full design context.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import StrEnum
-from typing import Any, Literal
+from types import MappingProxyType
+from typing import Annotated, Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    BeforeValidator,
+    Field,
+    PlainSerializer,
+    field_validator,
+    model_validator,
+)
 
 WORKFLOW_IR_SCHEMA_VERSION = 1
 """Initial schema version for the Workflow IR."""
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers — immutable metadata / hints + identifier hygiene
+# ---------------------------------------------------------------------------
+
+
+def _coerce_to_mapping(value: Any) -> Mapping[str, Any]:
+    """Normalize incoming mapping-shaped input into a fresh proxy view."""
+    if value is None:
+        return MappingProxyType({})
+    if isinstance(value, MappingProxyType):
+        return value
+    if isinstance(value, Mapping):
+        return MappingProxyType(dict(value))
+    msg = f"mapping field must be a mapping, got {type(value).__name__}"
+    raise ValueError(msg)
+
+
+def _ensure_frozen_after(value: Any) -> Mapping[str, Any]:
+    """Final-stage wrapper guaranteeing ``MappingProxyType`` identity."""
+    if isinstance(value, MappingProxyType):
+        return value
+    if isinstance(value, Mapping):
+        return MappingProxyType(dict(value))
+    msg = f"mapping field must be a mapping, got {type(value).__name__}"
+    raise ValueError(msg)
+
+
+def _empty_frozen_mapping() -> Mapping[str, Any]:
+    """Default factory that returns an empty read-only mapping."""
+    return MappingProxyType({})
+
+
+FrozenMapping = Annotated[
+    Mapping[str, Any],
+    BeforeValidator(_coerce_to_mapping),
+    AfterValidator(_ensure_frozen_after),
+    PlainSerializer(lambda value: dict(value), return_type=dict, when_used="always"),
+]
+"""Mapping field that blocks top-level mutation (``__setitem__`` etc.)."""
+
+
+def _normalize_capability_tuple(values: tuple[str, ...]) -> tuple[str, ...]:
+    """Reject blank capability names while trimming surrounding whitespace."""
+    normalized: list[str] = []
+    for index, value in enumerate(values):
+        if not isinstance(value, str):
+            msg = (
+                f"capability name at index {index} must be a string; "
+                f"got {type(value).__name__}"
+            )
+            raise TypeError(msg)
+        stripped = value.strip()
+        if not stripped:
+            msg = (
+                f"capability name at index {index} is empty or whitespace-only"
+            )
+            raise ValueError(msg)
+        normalized.append(stripped)
+    return tuple(normalized)
+
+
+CapabilityTuple = Annotated[tuple[str, ...], AfterValidator(_normalize_capability_tuple)]
+"""Capability-envelope tuple type that rejects blank entries."""
 
 
 # ---------------------------------------------------------------------------
@@ -128,9 +203,9 @@ class WorkflowNode(BaseModel, frozen=True):
     name: str = Field(default="", description="Short human-readable label")
     input_schema_ref: str | None = Field(default=None)
     evidence_schema_ref: str | None = Field(default=None)
-    capability_envelope: tuple[str, ...] = Field(default_factory=tuple)
-    runtime_hints: dict[str, Any] = Field(default_factory=dict)
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    capability_envelope: CapabilityTuple = Field(default_factory=tuple)
+    runtime_hints: FrozenMapping = Field(default_factory=_empty_frozen_mapping)
+    metadata: FrozenMapping = Field(default_factory=_empty_frozen_mapping)
 
     @model_validator(mode="after")
     def _validate_evidence_requirement(self) -> WorkflowNode:
@@ -168,8 +243,8 @@ class WorkflowEdge(BaseModel, frozen=True):
     source: str = Field(..., min_length=1)
     target: str = Field(..., min_length=1)
     kind: EdgeKind = Field(default=EdgeKind.DIRECT)
-    condition: dict[str, Any] | None = Field(default=None)
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    condition: FrozenMapping | None = Field(default=None)
+    metadata: FrozenMapping = Field(default_factory=_empty_frozen_mapping)
 
     @field_validator("source", "target")
     @classmethod
@@ -212,7 +287,7 @@ class WorkflowSpec(BaseModel, frozen=True):
     source_ref: str | None = Field(default=None)
     nodes: tuple[WorkflowNode, ...] = Field(default_factory=tuple)
     edges: tuple[WorkflowEdge, ...] = Field(default_factory=tuple)
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    metadata: FrozenMapping = Field(default_factory=_empty_frozen_mapping)
 
 
 # ---------------------------------------------------------------------------
@@ -438,7 +513,9 @@ def _compute_reachable(spec: WorkflowSpec) -> set[str]:
 
 __all__ = [
     "WORKFLOW_IR_SCHEMA_VERSION",
+    "CapabilityTuple",
     "EdgeKind",
+    "FrozenMapping",
     "NodeKind",
     "NodeOwner",
     "SourceKind",
