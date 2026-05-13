@@ -30,7 +30,6 @@ slices.
 
 from __future__ import annotations
 
-from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -59,26 +58,38 @@ JOURNAL_SCHEMA_VERSION = 1
 # ---------------------------------------------------------------------------
 
 
+def _deep_freeze(value: Any) -> Any:
+    """Recursively convert mappings/lists into immutable views.
+
+    Bare :class:`types.MappingProxyType` only blocks top-level
+    ``__setitem__``; nested ``dict``/``list`` values remain mutable and
+    can be reached through the proxy. To honour the "cached projections
+    cannot silently drift" contract we deep-copy + freeze every layer,
+    converting dicts to ``MappingProxyType`` views and lists to tuples.
+    """
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _deep_freeze(item) for key, item in value.items()})
+    if isinstance(value, list | tuple):
+        return tuple(_deep_freeze(item) for item in value)
+    return value
+
+
 def _coerce_to_mapping(value: Any) -> Mapping[str, Any]:
-    """Normalize mapping-shaped input into a fresh proxy view."""
+    """Normalize mapping-shaped input into a freshly deep-frozen view."""
     if value is None:
         return MappingProxyType({})
-    if isinstance(value, MappingProxyType):
-        return value
-    if isinstance(value, Mapping):
-        return MappingProxyType(dict(value))
-    msg = f"mapping field must be a mapping, got {type(value).__name__}"
-    raise ValueError(msg)
+    if not isinstance(value, Mapping):
+        msg = f"mapping field must be a mapping, got {type(value).__name__}"
+        raise ValueError(msg)
+    return _deep_freeze(value)
 
 
 def _ensure_frozen_after(value: Any) -> Mapping[str, Any]:
-    """Final-stage wrapper guaranteeing ``MappingProxyType`` identity."""
-    if isinstance(value, MappingProxyType):
-        return value
-    if isinstance(value, Mapping):
-        return MappingProxyType(dict(value))
-    msg = f"mapping field must be a mapping, got {type(value).__name__}"
-    raise ValueError(msg)
+    """Final-stage deep-freeze guaranteeing nested immutability."""
+    if not isinstance(value, Mapping):
+        msg = f"mapping field must be a mapping, got {type(value).__name__}"
+        raise ValueError(msg)
+    return _deep_freeze(value)
 
 
 def _empty_frozen_mapping() -> Mapping[str, Any]:
@@ -340,9 +351,16 @@ def normalize_events(
         msg = "normalize_events requires a non-blank ac_id"
         raise ValueError(msg)
 
-    tool_started: OrderedDict[str, BaseEvent] = OrderedDict()
-    llm_started: OrderedDict[str, BaseEvent] = OrderedDict()
-    entries: list[EvidenceEntry] = []
+    # ``slots`` preserves observation order: a started event reserves a
+    # slot at its observed index, and the matching returned event fills
+    # that slot in place. Returned-only events append a new slot. Slots
+    # left as :class:`BaseEvent` at the end are finalized as pending /
+    # dangling entries. This stops unmatched start events from being
+    # shuffled to the tail of the manifest after later pairs complete
+    # (the previous append-pending-at-end strategy reordered the trace).
+    slots: list[BaseEvent | EvidenceEntry | None] = []
+    tool_slot_index: dict[str, int] = {}
+    llm_slot_index: dict[str, int] = {}
 
     for event in events:
         # Skip events that carry explicit scope tokens but none of them
@@ -355,37 +373,68 @@ def normalize_events(
         if event.type == _TOOL_STARTED:
             call_id = event.data.get("call_id") if isinstance(event.data, dict) else None
             if isinstance(call_id, str) and call_id.strip():
-                tool_started[call_id.strip()] = event
+                tool_slot_index[call_id.strip()] = len(slots)
+                slots.append(event)
             continue
 
         if event.type == _TOOL_RETURNED:
-            entry = _build_tool_entry_from_pair(tool_started, event)
-            if entry is not None:
-                entries.append(entry)
+            call_id_raw = event.data.get("call_id") if isinstance(event.data, dict) else None
+            call_id = call_id_raw.strip() if isinstance(call_id_raw, str) else ""
+            slot = tool_slot_index.pop(call_id, None) if call_id else None
+            start_event: BaseEvent | None = None
+            if slot is not None:
+                start_event = slots[slot]  # type: ignore[assignment]
+            entry = _build_tool_entry_for_returned(start_event, event)
+            if entry is None:
+                continue
+            if slot is not None:
+                slots[slot] = entry
+            else:
+                slots.append(entry)
             continue
 
         if event.type == _LLM_REQUESTED:
             call_id = event.data.get("call_id") if isinstance(event.data, dict) else None
             if isinstance(call_id, str) and call_id.strip():
-                llm_started[call_id.strip()] = event
+                llm_slot_index[call_id.strip()] = len(slots)
+                slots.append(event)
             continue
 
         if event.type == _LLM_RETURNED:
-            entry = _build_llm_entry_from_pair(llm_started, event)
-            if entry is not None:
-                entries.append(entry)
+            call_id_raw = event.data.get("call_id") if isinstance(event.data, dict) else None
+            call_id = call_id_raw.strip() if isinstance(call_id_raw, str) else ""
+            slot = llm_slot_index.pop(call_id, None) if call_id else None
+            requested_event: BaseEvent | None = None
+            if slot is not None:
+                requested_event = slots[slot]  # type: ignore[assignment]
+            entry = _build_llm_entry_for_returned(requested_event, event)
+            if entry is None:
+                continue
+            if slot is not None:
+                slots[slot] = entry
+            else:
+                slots.append(entry)
             continue
 
-    # Surface unmatched start events as "still running" entries so the
-    # caller can detect dangling work.
-    for call_id, start_event in tool_started.items():
-        entry = _build_tool_entry_from_start_only(call_id, start_event)
-        if entry is not None:
-            entries.append(entry)
-    for call_id, start_event in llm_started.items():
-        entry = _build_llm_entry_from_start_only(call_id, start_event)
-        if entry is not None:
-            entries.append(entry)
+    # Finalize: every remaining slot is either an already-built
+    # EvidenceEntry or a dangling start/requested BaseEvent that we
+    # surface as a still-running entry so the caller can detect
+    # incomplete work.
+    entries: list[EvidenceEntry] = []
+    for slot in slots:
+        if slot is None:
+            continue
+        if isinstance(slot, EvidenceEntry):
+            entries.append(slot)
+            continue
+        if slot.type == _TOOL_STARTED:
+            pending = _build_tool_entry_from_start_only(_slot_call_id(slot), slot)
+            if pending is not None:
+                entries.append(pending)
+        elif slot.type == _LLM_REQUESTED:
+            pending = _build_llm_entry_from_start_only(_slot_call_id(slot), slot)
+            if pending is not None:
+                entries.append(pending)
 
     return EvidenceManifest(
         ac_id=normalized_ac_id,
@@ -393,17 +442,19 @@ def normalize_events(
     )
 
 
-def _build_tool_entry_from_pair(
-    started: OrderedDict[str, BaseEvent],
+def _slot_call_id(event: BaseEvent) -> str:
+    if not isinstance(event.data, dict):
+        return ""
+    call_id = event.data.get("call_id")
+    return call_id.strip() if isinstance(call_id, str) else ""
+
+
+def _build_tool_entry_for_returned(
+    start_event: BaseEvent | None,
     returned_event: BaseEvent,
 ) -> EvidenceEntry | None:
     if not isinstance(returned_event.data, dict):
         return None
-    call_id = returned_event.data.get("call_id")
-    if not isinstance(call_id, str) or not call_id.strip():
-        return None
-    call_id = call_id.strip()
-    start_event = started.pop(call_id, None)
 
     tool_name = returned_event.data.get("tool_name") or (
         start_event.data.get("tool_name") if start_event else None
@@ -493,17 +544,12 @@ def _llm_payload(
     return payload
 
 
-def _build_llm_entry_from_pair(
-    started: OrderedDict[str, BaseEvent],
+def _build_llm_entry_for_returned(
+    start_event: BaseEvent | None,
     returned_event: BaseEvent,
 ) -> EvidenceEntry | None:
     if not isinstance(returned_event.data, dict):
         return None
-    call_id = returned_event.data.get("call_id")
-    if not isinstance(call_id, str) or not call_id.strip():
-        return None
-    call_id = call_id.strip()
-    start_event = started.pop(call_id, None)
 
     model_id = returned_event.data.get("model_id") or (
         start_event.data.get("model_id") if start_event else None

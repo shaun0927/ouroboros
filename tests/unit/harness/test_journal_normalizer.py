@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
+from typing import Any
 
 from pydantic import ValidationError
 import pytest
@@ -495,3 +496,65 @@ class TestEnumerations:
             "file_modified",
             "llm_call",
         }
+
+
+class TestObservationOrdering:
+    def test_pending_start_keeps_observed_position(self) -> None:
+        """``start(A)``, ``start(B)``, ``return(B)`` must yield ``[A, B]``.
+
+        Regression for PR #982 review: the previous implementation
+        appended unmatched start events at the end of the manifest,
+        flipping the visible order to ``[B, A]`` and distorting
+        partial-trace consumers.
+        """
+        base = datetime.now(UTC)
+        events = [
+            _tool_started(call_id="cA", tool_name="Bash", when=base),
+            _tool_started(call_id="cB", tool_name="Edit", when=base + timedelta(milliseconds=1)),
+            _tool_returned(call_id="cB", tool_name="Edit", when=base + timedelta(milliseconds=2)),
+        ]
+        manifest = normalize_events(events, ac_id="ac_1")
+        kinds = [entry.payload["tool_name"] for entry in manifest.entries]
+        assert kinds == ["Bash", "Edit"], (
+            "manifest entries must reflect observation order even when a "
+            "later call completes before an earlier one"
+        )
+        # First entry is dangling (started only); second is paired.
+        assert manifest.entries[0].ok is None
+        assert manifest.entries[0].ended_at is None
+        assert manifest.entries[1].ok is True
+
+
+class TestDeepImmutability:
+    def test_external_dict_mutation_does_not_leak_into_payload(self) -> None:
+        """Mutating an externally-held dict after construction must not
+        change ``EvidenceEntry.payload``. This guards the contract that
+        cached projections cannot silently drift."""
+        outer: dict[str, Any] = {"tool_name": "Bash", "nested": {"k": "v"}}
+        entry = EvidenceEntry(
+            kind=EvidenceKind.COMMAND_EXECUTED,
+            started_at=datetime.now(UTC),
+            payload=outer,
+            source_event_ids=("evt_1",),
+        )
+        outer["tool_name"] = "Tampered"
+        outer["nested"]["k"] = "tampered"
+        assert entry.payload["tool_name"] == "Bash"
+        assert entry.payload["nested"]["k"] == "v"
+
+    def test_proxy_wrapping_mutable_dict_is_deep_frozen(self) -> None:
+        from types import MappingProxyType
+
+        inner: dict[str, Any] = {"tool_name": "Bash", "nested": {"k": "v"}}
+        proxy = MappingProxyType(inner)
+        entry = EvidenceEntry(
+            kind=EvidenceKind.COMMAND_EXECUTED,
+            started_at=datetime.now(UTC),
+            payload=proxy,
+            source_event_ids=("evt_1",),
+        )
+        # Mutating the original underlying dict must not bleed through.
+        inner["tool_name"] = "Tampered"
+        inner["nested"]["k"] = "tampered"
+        assert entry.payload["tool_name"] == "Bash"
+        assert entry.payload["nested"]["k"] == "v"
