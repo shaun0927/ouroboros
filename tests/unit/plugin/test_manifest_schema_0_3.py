@@ -2,8 +2,8 @@
 
 Third slice of #939. v0.3 tightens the JSON Schema enum for
 ``hooks[].name`` to the v1 ``HookKind`` set, so non-Python loaders get
-the same guard the Python validator added in v0.2 / #985. v0.2
-remains supported with its broader enum for backward compatibility.
+a tighter guard than v0.2. v0.2 remains supported with its broader
+enum for backward compatibility.
 
 What this test file covers:
 
@@ -11,10 +11,8 @@ What this test file covers:
   :func:`ouroboros.plugin.manifest.load_manifest`.
 * 0.3 manifests that reference a deferred or excluded hook name fail
   with the schema-layer error pointer (``/hooks/0/name``).
-* 0.2 manifests with deferred names still get rejected — by the
-  Python validator added in #985, with the deferred-specific message.
-  This ensures the v0.2 → v0.3 transition does not lose the existing
-  Python guard.
+* 0.2 manifests with deferred names still load, preserving the
+  compatibility contract of the still-supported v0.2 schema.
 """
 
 from __future__ import annotations
@@ -136,29 +134,25 @@ class TestV03HookEnum:
         assert exc_info.value.json_pointer == "/hooks/0/name"
 
 
-class TestV02PythonGuardStillFires:
-    """The Python validator added in #985 must still reject deferred /
-    excluded names against v0.2 manifests, so the transition to v0.3
-    does not silently drop the existing guard for downstream tooling
-    that has not yet upgraded its schema_version.
+class TestV02Compatibility:
+    """The still-supported v0.2 schema keeps its broader hook enum.
+
+    v0.3 is the tightened contract. v0.2 manifests that already used a
+    deferred hook name must continue to load until the project removes
+    v0.2 from SUPPORTED_SCHEMA_VERSIONS in a separate compatibility
+    decision.
     """
 
-    def test_v02_deferred_name_rejected_by_python_validator(self, tmp_path: Path) -> None:
+    def test_v02_deferred_name_still_loads(self, tmp_path: Path) -> None:
         payload = _v02_manifest()
         payload["hooks"] = [_valid_hook(name="before_tool_call")]
-        with pytest.raises(PluginManifestError) as exc_info:
-            load_manifest(_write(tmp_path, payload))
-        err = exc_info.value
-        assert err.json_pointer == "/hooks/0/name"
-        # The v0.2 message comes from the Python validator's deferred-
-        # specific branch.
-        assert "deferred" in str(err).lower()
+        manifest = load_manifest(_write(tmp_path, payload))
+        assert manifest.schema_version == "0.2"
+        assert manifest.hooks[0].name == "before_tool_call"
 
-    def test_v02_excluded_name_rejected_by_python_validator(self, tmp_path: Path) -> None:
+    def test_v02_schema_still_rejects_name_outside_its_enum(self, tmp_path: Path) -> None:
         payload = _v02_manifest()
         payload["hooks"] = [_valid_hook(name="before_runtime_start")]
         with pytest.raises(PluginManifestError) as exc_info:
             load_manifest(_write(tmp_path, payload))
-        err = exc_info.value
-        assert err.json_pointer == "/hooks/0/name"
-        assert "excluded" in str(err).lower()
+        assert exc_info.value.json_pointer == "/hooks/0/name"

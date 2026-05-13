@@ -142,7 +142,7 @@ HOOK_AUDIT_EVENTS: Final[frozenset[str]] = frozenset({HOOK_BLOCKED_EVENT, HOOK_F
 #: existing ``plugin.permission_used`` emission rule covers it without
 #: a separate event family. Stronger lifecycle scopes for policy
 #: decisions are deferred to a follow-up RFC slice.
-HOOK_LIFECYCLE_READ_SCOPE: Final[str] = "plugin.lifecycle.read"
+HOOK_LIFECYCLE_READ_SCOPE: Final[str] = "plugin:lifecycle:read"
 
 #: Frozen set of v1 hook permission scopes. Validators and manifest
 #: authors reference this set rather than the bare string so the

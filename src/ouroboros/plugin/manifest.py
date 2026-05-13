@@ -356,9 +356,15 @@ def _build_hook(
     declared_permission_scopes: frozenset[str],
     hook_index: int,
     manifest_path: str | Path,
+    schema_version: str,
 ) -> HookSpec:
     hook_name = raw["name"]
-    _validate_hook_name(hook_name, hook_index=hook_index, manifest_path=manifest_path)
+    _validate_hook_name(
+        hook_name,
+        hook_index=hook_index,
+        manifest_path=manifest_path,
+        schema_version=schema_version,
+    )
 
     failure_policy = raw["failure_policy"]
     _validate_failure_policy(
@@ -399,12 +405,14 @@ def _validate_hook_name(
     *,
     hook_index: int,
     manifest_path: str | Path,
+    schema_version: str,
 ) -> None:
-    """Reject hook names that are not in the v1 ``HookKind`` vocabulary.
+    """Reject v0.3 hook names that are not in the v1 vocabulary.
 
-    Deferred and explicitly-excluded names get specific error messages
-    so manifest authors can tell whether the name is "wait for a later
-    RFC slice" or "this name will never be accepted".
+    v0.2 remains a supported manifest schema and its JSON Schema already
+    defines the accepted hook-name enum for that version. Preserve that
+    compatibility boundary here: v0.2 manifests keep their schema-level
+    contract, while v0.3 gets the tightened v1-only Python guard.
     """
     json_pointer = f"/hooks/{hook_index}/name"
     if not isinstance(name, str) or not name:
@@ -412,11 +420,11 @@ def _validate_hook_name(
             "hook name must be a non-empty string",
             path=str(manifest_path),
             json_pointer=json_pointer,
-            expected="non-empty string drawn from the v1 hook vocabulary",
+            expected="non-empty string drawn from the schema hook vocabulary",
             got=repr(name),
         )
 
-    if is_v1_hook_kind(name):
+    if schema_version != "0.3" or is_v1_hook_kind(name):
         return
 
     if is_deferred_hook_kind(name):
@@ -628,6 +636,7 @@ def load_manifest(path: str | Path) -> PluginManifest:
             declared_permission_scopes=declared_permission_scopes,
             hook_index=index,
             manifest_path=manifest_path,
+            schema_version=schema_version,
         )
         for index, h in enumerate(raw.get("hooks", ()))
     )

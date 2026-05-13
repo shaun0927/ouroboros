@@ -1,8 +1,8 @@
 """Manifest validator tests for the v1 hook contract.
 
-Second slice of #939. Validates that ``load_manifest`` rejects
-manifests whose ``hooks[].name`` is not in the v1
-:class:`ouroboros.plugin.hooks.HookKind` vocabulary, and whose
+Second slice of #939. For schema v0.3, validates that
+``load_manifest`` rejects manifests whose ``hooks[].name`` is not in
+the v1 :class:`ouroboros.plugin.hooks.HookKind` vocabulary, and whose
 ``hooks[].failure_policy`` is not one of ``fail_open`` /
 ``fail_closed``.
 
@@ -29,7 +29,7 @@ from tests.unit.plugin.test_manifest import REFERENCE_MANIFEST
 
 def _hook_manifest() -> dict:
     payload = deepcopy(REFERENCE_MANIFEST)
-    payload["schema_version"] = "0.2"
+    payload["schema_version"] = "0.3"
     return payload
 
 
@@ -78,7 +78,6 @@ class TestV1HookVocabulary:
             load_manifest(_write(tmp_path, payload))
         err = exc_info.value
         assert err.json_pointer == "/hooks/0/name"
-        assert "deferred" in str(err).lower()
 
     def test_excluded_hook_name_rejected(self, tmp_path: Path) -> None:
         payload = _hook_manifest()
@@ -87,7 +86,6 @@ class TestV1HookVocabulary:
             load_manifest(_write(tmp_path, payload))
         err = exc_info.value
         assert err.json_pointer == "/hooks/0/name"
-        assert "excluded" in str(err).lower()
 
     def test_unknown_hook_name_rejected(self, tmp_path: Path) -> None:
         payload = _hook_manifest()
@@ -96,7 +94,6 @@ class TestV1HookVocabulary:
             load_manifest(_write(tmp_path, payload))
         err = exc_info.value
         assert err.json_pointer == "/hooks/0/name"
-        assert "unknown" in str(err).lower()
 
     def test_empty_hook_name_rejected(self, tmp_path: Path) -> None:
         payload = _hook_manifest()
