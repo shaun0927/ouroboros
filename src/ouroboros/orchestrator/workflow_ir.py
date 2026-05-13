@@ -160,6 +160,13 @@ def _normalize_identifier(value: str) -> str:
     return stripped
 
 
+def _canonical_identifier(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
 Identifier = Annotated[str, AfterValidator(_normalize_identifier)]
 """Workflow identifier field type that trims and rejects blank values."""
 
@@ -385,6 +392,8 @@ class WorkflowValidationError(BaseModel, frozen=True):
         "missing_evidence_schema",
         "missing_input_schema",
         "missing_condition",
+        "self_loop",
+        "invalid_identifier",
         "isolated_node",
     ]
     message: str
@@ -437,19 +446,30 @@ def validate_workflow(spec: WorkflowSpec) -> WorkflowValidationResult:
     errors: list[WorkflowValidationError] = []
     warnings: list[WorkflowValidationError] = []
 
-    # 1. Duplicate node ids.
+    # 1. Duplicate node ids. Canonicalize here as a safety net for
+    # specs loaded through model_construct or other untrusted paths.
     seen_node_ids: set[str] = set()
     for node in spec.nodes:
-        if node.node_id in seen_node_ids:
+        node_id = _canonical_identifier(node.node_id)
+        if node_id is None:
+            errors.append(
+                WorkflowValidationError(
+                    code="invalid_identifier",
+                    message=f"Node id '{node.node_id}' is not a usable identifier.",
+                    node_id=str(node.node_id),
+                )
+            )
+            continue
+        if node_id in seen_node_ids:
             errors.append(
                 WorkflowValidationError(
                     code="duplicate_node_id",
-                    message=f"Duplicate node id '{node.node_id}'.",
-                    node_id=node.node_id,
+                    message=f"Duplicate node id '{node_id}'.",
+                    node_id=node_id,
                 )
             )
         else:
-            seen_node_ids.add(node.node_id)
+            seen_node_ids.add(node_id)
 
     # 2. Missing evidence/input schemas (idempotent with per-node validator).
     evidence_owners = {NodeOwner.AGENT, NodeOwner.PLUGIN, NodeOwner.VERIFIER}
@@ -479,19 +499,49 @@ def validate_workflow(spec: WorkflowSpec) -> WorkflowValidationResult:
                 )
             )
 
-    # 3. Edges: duplicate ids, dangling endpoints.
+    # 3. Edges: duplicate ids, dangling endpoints, and model-level
+    # invariants rechecked for model_construct/untrusted loads.
     seen_edge_ids: set[str] = set()
     for edge in spec.edges:
-        if edge.edge_id in seen_edge_ids:
+        edge_id = _canonical_identifier(edge.edge_id)
+        source = _canonical_identifier(edge.source)
+        target = _canonical_identifier(edge.target)
+        if edge_id is None:
+            errors.append(
+                WorkflowValidationError(
+                    code="invalid_identifier",
+                    message=f"Edge id '{edge.edge_id}' is not a usable identifier.",
+                    edge_id=str(edge.edge_id),
+                )
+            )
+        elif edge_id in seen_edge_ids:
             errors.append(
                 WorkflowValidationError(
                     code="duplicate_edge_id",
-                    message=f"Duplicate edge id '{edge.edge_id}'.",
-                    edge_id=edge.edge_id,
+                    message=f"Duplicate edge id '{edge_id}'.",
+                    edge_id=edge_id,
                 )
             )
         else:
-            seen_edge_ids.add(edge.edge_id)
+            seen_edge_ids.add(edge_id)
+        if source is None or target is None:
+            errors.append(
+                WorkflowValidationError(
+                    code="invalid_identifier",
+                    message=f"Edge '{edge.edge_id}' has an unusable endpoint identifier.",
+                    edge_id=str(edge.edge_id),
+                )
+            )
+            continue
+        if source == target:
+            errors.append(
+                WorkflowValidationError(
+                    code="self_loop",
+                    message=f"Edge '{edge.edge_id}' forms a self-loop ({source} -> {target}).",
+                    edge_id=str(edge.edge_id),
+                    node_id=source,
+                )
+            )
         if edge.kind is EdgeKind.CONDITIONAL and not edge.condition:
             errors.append(
                 WorkflowValidationError(
@@ -499,10 +549,10 @@ def validate_workflow(spec: WorkflowSpec) -> WorkflowValidationResult:
                     message=(
                         f"Conditional edge '{edge.edge_id}' must include a condition payload."
                     ),
-                    edge_id=edge.edge_id,
+                    edge_id=str(edge.edge_id),
                 )
             )
-        for endpoint, role in ((edge.source, "source"), (edge.target, "target")):
+        for endpoint, role in ((source, "source"), (target, "target")):
             if endpoint not in seen_node_ids:
                 errors.append(
                     WorkflowValidationError(
@@ -510,7 +560,7 @@ def validate_workflow(spec: WorkflowSpec) -> WorkflowValidationResult:
                         message=(
                             f"Edge '{edge.edge_id}' references unknown {role} node '{endpoint}'."
                         ),
-                        edge_id=edge.edge_id,
+                        edge_id=str(edge.edge_id),
                         node_id=endpoint,
                     )
                 )
@@ -527,50 +577,57 @@ def validate_workflow(spec: WorkflowSpec) -> WorkflowValidationResult:
     else:
         reachable = _compute_reachable(spec)
         for terminal in terminal_nodes:
-            if terminal.node_id not in reachable:
+            terminal_id = _canonical_identifier(terminal.node_id)
+            if terminal_id is not None and terminal_id not in reachable:
                 errors.append(
                     WorkflowValidationError(
                         code="unreachable_terminal",
                         message=(
-                            f"Terminal node '{terminal.node_id}' is unreachable "
+                            f"Terminal node '{terminal_id}' is unreachable "
                             "from any non-terminal node."
                         ),
-                        node_id=terminal.node_id,
+                        node_id=terminal_id,
                     )
                 )
         terminal_reachable_from = _compute_nodes_that_can_reach_terminal(spec)
         for node in spec.nodes:
             if node.kind is NodeKind.TERMINAL:
                 continue
-            if node.node_id not in terminal_reachable_from:
+            node_id = _canonical_identifier(node.node_id)
+            if node_id is not None and node_id not in terminal_reachable_from:
                 errors.append(
                     WorkflowValidationError(
                         code="unreachable_terminal",
                         message=(
-                            f"Node '{node.node_id}' has no path to a terminal node; "
+                            f"Node '{node_id}' has no path to a terminal node; "
                             "all executable branches must be able to terminate."
                         ),
-                        node_id=node.node_id,
+                        node_id=node_id,
                     )
                 )
 
     # 5. Warnings — isolated non-terminal nodes (degree 0).
     incident_nodes: set[str] = set()
     for edge in spec.edges:
-        incident_nodes.add(edge.source)
-        incident_nodes.add(edge.target)
+        source = _canonical_identifier(edge.source)
+        target = _canonical_identifier(edge.target)
+        if source is not None:
+            incident_nodes.add(source)
+        if target is not None:
+            incident_nodes.add(target)
     for node in spec.nodes:
         if node.kind is NodeKind.TERMINAL:
             continue
         if len(spec.nodes) == 1:
             # no_terminal_node is already emitted for this degenerate stub.
             continue
-        if node.node_id not in incident_nodes:
+        node_id = _canonical_identifier(node.node_id)
+        if node_id is not None and node_id not in incident_nodes:
             warnings.append(
                 WorkflowValidationError(
                     code="isolated_node",
-                    message=(f"Node '{node.node_id}' is isolated (no incident edges)."),
-                    node_id=node.node_id,
+                    message=(f"Node '{node_id}' is isolated (no incident edges)."),
+                    node_id=node_id,
                 )
             )
 
@@ -591,16 +648,26 @@ def _compute_reachable(spec: WorkflowSpec) -> set[str]:
     when no terminals exist; a sole terminal is treated as reachable.
     """
     non_terminal_starts = {
-        node.node_id for node in spec.nodes if node.kind is not NodeKind.TERMINAL
+        node_id
+        for node in spec.nodes
+        if node.kind is not NodeKind.TERMINAL
+        for node_id in (_canonical_identifier(node.node_id),)
+        if node_id is not None
     }
     if not non_terminal_starts:
-        # Sole-terminal degenerate case: treat the terminal as reachable so
-        # we do not over-flag minimal stubs used by tests.
-        return {node.node_id for node in spec.nodes}
+        # Only a single terminal-only stub is considered reachable. Multiple
+        # isolated terminals are invalid because there is no execution path.
+        if len(spec.nodes) == 1 and spec.nodes[0].kind is NodeKind.TERMINAL:
+            node_id = _canonical_identifier(spec.nodes[0].node_id)
+            return {node_id} if node_id is not None else set()
+        return set()
 
     adjacency: dict[str, list[str]] = {}
     for edge in spec.edges:
-        adjacency.setdefault(edge.source, []).append(edge.target)
+        source = _canonical_identifier(edge.source)
+        target = _canonical_identifier(edge.target)
+        if source is not None and target is not None:
+            adjacency.setdefault(source, []).append(target)
 
     visited: set[str] = set()
     stack = list(non_terminal_starts)
@@ -617,10 +684,19 @@ def _compute_reachable(spec: WorkflowSpec) -> set[str]:
 
 def _compute_nodes_that_can_reach_terminal(spec: WorkflowSpec) -> set[str]:
     """Return nodes with at least one directed path to a terminal node."""
-    terminal_ids = {node.node_id for node in spec.nodes if node.kind is NodeKind.TERMINAL}
+    terminal_ids = {
+        node_id
+        for node in spec.nodes
+        if node.kind is NodeKind.TERMINAL
+        for node_id in (_canonical_identifier(node.node_id),)
+        if node_id is not None
+    }
     reverse_adjacency: dict[str, list[str]] = {}
     for edge in spec.edges:
-        reverse_adjacency.setdefault(edge.target, []).append(edge.source)
+        source = _canonical_identifier(edge.source)
+        target = _canonical_identifier(edge.target)
+        if source is not None and target is not None:
+            reverse_adjacency.setdefault(target, []).append(source)
 
     visited: set[str] = set()
     stack = list(terminal_ids)

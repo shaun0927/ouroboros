@@ -266,6 +266,44 @@ class TestValidateWorkflow:
         codes = {e.code for e in result.errors}
         assert "duplicate_node_id" in codes
 
+    def test_model_construct_identifier_whitespace_is_canonicalized(self) -> None:
+        node_a = WorkflowNode.model_construct(
+            schema_version=WORKFLOW_IR_SCHEMA_VERSION,
+            node_id=" a ",
+            kind=NodeKind.TASK,
+            owner=NodeOwner.HARNESS,
+            input_schema_ref=None,
+            evidence_schema_ref=None,
+            capability_envelope=(),
+            runtime_hints={},
+            metadata={},
+            name="",
+        )
+        node_dup = WorkflowNode.model_construct(
+            schema_version=WORKFLOW_IR_SCHEMA_VERSION,
+            node_id="a",
+            kind=NodeKind.TASK,
+            owner=NodeOwner.HARNESS,
+            input_schema_ref=None,
+            evidence_schema_ref=None,
+            capability_envelope=(),
+            runtime_hints={},
+            metadata={},
+            name="",
+        )
+        spec = WorkflowSpec.model_construct(
+            schema_version=WORKFLOW_IR_SCHEMA_VERSION,
+            spec_id="wfspec_test",
+            source=SourceKind.SYNTHETIC,
+            source_ref=None,
+            nodes=(node_a, node_dup, _make_terminal("end")),
+            edges=(_edge("a", "end"),),
+            metadata={},
+        )
+        result = validate_workflow(spec)
+        assert any(e.code == "duplicate_node_id" for e in result.errors)
+        assert not any(e.code == "dangling_edge" and e.node_id == "a" for e in result.errors)
+
     def test_duplicate_edge_id(self) -> None:
         spec = WorkflowSpec(
             source=SourceKind.SYNTHETIC,
@@ -326,6 +364,38 @@ class TestValidateWorkflow:
             e.code == "unreachable_terminal" and e.node_id == "orphan" for e in result.errors
         )
         assert any(w.code == "isolated_node" for w in result.warnings)
+
+    def test_self_loop_detected_by_validator(self) -> None:
+        bad_edge = WorkflowEdge.model_construct(
+            schema_version=WORKFLOW_IR_SCHEMA_VERSION,
+            edge_id="edge_loop",
+            source="a",
+            target=" a ",
+            kind=EdgeKind.DIRECT,
+            condition=None,
+            metadata={},
+        )
+        spec = WorkflowSpec.model_construct(
+            schema_version=WORKFLOW_IR_SCHEMA_VERSION,
+            spec_id="wfspec_test",
+            source=SourceKind.SYNTHETIC,
+            source_ref=None,
+            nodes=(_make_task("a"), _make_terminal("end")),
+            edges=(bad_edge, _edge("a", "end")),
+            metadata={},
+        )
+        result = validate_workflow(spec)
+        assert any(e.code == "self_loop" for e in result.errors)
+
+    def test_all_terminal_multi_node_spec_is_invalid(self) -> None:
+        spec = WorkflowSpec(
+            source=SourceKind.SYNTHETIC,
+            nodes=(_make_terminal("done_a"), _make_terminal("done_b")),
+            edges=(),
+        )
+        result = validate_workflow(spec)
+        assert result.ok is False
+        assert any(e.code == "unreachable_terminal" for e in result.errors)
 
     def test_missing_condition_detected_by_validator(self) -> None:
         bad_edge = WorkflowEdge.model_construct(
