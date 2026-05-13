@@ -98,6 +98,7 @@ class ProjectionBuilder:
         self._tool_started: OrderedDict[str, BaseEvent] = OrderedDict()
         self._llm_started: OrderedDict[str, BaseEvent] = OrderedDict()
         self._steps: OrderedDict[str, StepRecord] = OrderedDict()
+        self._idle_started_at = datetime.now(UTC)
         self._first_event_at: datetime | None = None
         self._last_event_at: datetime | None = None
 
@@ -168,7 +169,7 @@ class ProjectionBuilder:
         run_id = self._run_id
         stage_id = self._stage_id
 
-        started_at = self._first_event_at or datetime.now(UTC)
+        started_at = self._first_event_at or self._idle_started_at
         ended_at = self._last_event_at
 
         steps_for_stage = tuple(

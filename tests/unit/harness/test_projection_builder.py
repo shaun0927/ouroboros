@@ -132,6 +132,14 @@ class TestProjectionBuilderConstruction:
         assert result.stages[0].kind is StageKind.EXECUTE
         assert result.steps == ()
 
+    def test_empty_build_timestamps_are_stable(self) -> None:
+        builder = ProjectionBuilder(seed_id="seed_abc")
+        first = builder.build()
+        second = builder.build()
+
+        assert first.run.started_at == second.run.started_at
+        assert first.stages[0].started_at == second.stages[0].started_at
+
 
 class TestToolProjection:
     def test_paired_tool_emits_one_step(self) -> None:
