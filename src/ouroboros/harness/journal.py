@@ -79,6 +79,17 @@ def _deep_freeze(value: Any) -> Any:
     return value
 
 
+def _deep_thaw(value: Any) -> Any:
+    """Convert frozen containers back to JSON-native containers for dumps."""
+    if isinstance(value, Mapping):
+        return {key: _deep_thaw(item) for key, item in value.items()}
+    if isinstance(value, tuple | frozenset):
+        return [_deep_thaw(item) for item in value]
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
 def _coerce_to_mapping(value: Any) -> Mapping[str, Any]:
     """Normalize mapping-shaped input into a freshly deep-frozen view."""
     if value is None:
@@ -105,7 +116,7 @@ FrozenMapping = Annotated[
     Mapping[str, Any],
     BeforeValidator(_coerce_to_mapping),
     AfterValidator(_ensure_frozen_after),
-    PlainSerializer(lambda value: dict(value), return_type=dict, when_used="always"),
+    PlainSerializer(lambda value: _deep_thaw(value), return_type=dict, when_used="always"),
 ]
 
 

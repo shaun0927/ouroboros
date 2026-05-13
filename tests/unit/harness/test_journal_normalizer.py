@@ -580,3 +580,23 @@ def test_manifest_metadata_freezes_sets() -> None:
     manifest = EvidenceManifest(ac_id="AC-1", metadata={"tags": {"x"}})
 
     assert manifest.metadata["tags"] == frozenset({"x"})
+
+
+def test_free_form_payload_model_dump_thaws_nested_containers() -> None:
+    entry = EvidenceEntry(
+        handle="ev_1",
+        kind=EvidenceKind.TOOL_INVOCATION,
+        source_event_ids=("evt_1",),
+        started_at=datetime.now(UTC),
+        payload={"nested": {"tags": {"a"}}, "blob": bytearray(b"abc")},
+    )
+
+    dumped = entry.model_dump()
+
+    assert dumped["payload"] == {"nested": {"tags": ["a"]}, "blob": "abc"}
+
+
+def test_manifest_metadata_model_dump_thaws_nested_containers() -> None:
+    manifest = EvidenceManifest(ac_id="AC-1", metadata={"nested": {"tags": {"x"}}})
+
+    assert manifest.model_dump()["metadata"] == {"nested": {"tags": ["x"]}}
