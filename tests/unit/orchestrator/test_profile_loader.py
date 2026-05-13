@@ -41,6 +41,22 @@ class TestBuiltinProfiles:
         assert "Read" in profile.suggested_tools
         assert profile.verifier_capability is VerifierCapability.SUBPROCESS_TEST_RUNNER
 
+    @pytest.mark.parametrize("name", BUILTIN_PROFILES)
+    def test_builtin_profiles_declare_rfc_v2_structured_knobs(self, name: str) -> None:
+        """The thin YAML card must carry every knob the harness consumes.
+
+        Issue #830's accepted v2 contract names these as structured profile
+        fields, not prose. Keeping them on the schema makes the RFC example
+        representable even while downstream PRs wire individual consumers.
+        """
+        profile = load_profile(name)
+
+        assert profile.schema_version == 1
+        assert profile.max_branching >= 2
+        assert profile.must_produce
+        assert set(profile.must_produce).issubset(profile.evidence_schema.required)
+        assert profile.suggested_model_tier == "medium"
+
     def test_research_profile_requires_triangulation(self) -> None:
         profile = load_profile("research")
         assert "triangulated_sources" in profile.evidence_schema.required
@@ -60,20 +76,68 @@ class TestSchemaValidation:
         path.write_text(body, encoding="utf-8")
         return path
 
+    def _valid_body(self, name: str, *, extra: str = "") -> str:
+        return f"""
+profile: {name}
+schema_version: 1
+axis: source
+min_unit: claim
+max_branching: 3
+must_produce: [claims]
+evidence_schema:
+  required: [claims]
+verifier_capability: read_only_discovery
+verifier_focus: "Check claims."
+suggested_model_tier: medium
+{extra}
+"""
+
     def test_missing_required_field(self, tmp_path: Path) -> None:
         self._write(
             tmp_path,
             "broken",
-            "profile: broken\naxis: x\nmin_unit: y\n",  # no verifier_focus
+            self._valid_body("broken").replace('verifier_focus: "Check claims."\n', ""),
         )
         with pytest.raises(ProfileError, match="schema validation"):
             load_profile("broken", profiles_dir=tmp_path)
+
+    @pytest.mark.parametrize(
+        ("knob", "expected_default"),
+        (
+            ("schema_version", 1),
+            ("max_branching", 5),
+            ("must_produce", ()),
+            ("suggested_model_tier", "medium"),
+        ),
+    )
+    def test_structured_profile_knobs_fall_back_to_schema_defaults(
+        self, tmp_path: Path, knob: str, expected_default: object
+    ) -> None:
+        """Legacy/out-of-tree YAML cards that omit RFC v2 knobs still load.
+
+        Hard-failing on a missing optional knob would be a backwards-incompatible
+        loader regression — the schema already supplies sensible defaults, and
+        the Literal[1] schema_version still rejects unsupported versions. Built-in
+        cards declare every knob explicitly (covered by
+        ``test_builtin_profiles_declare_rfc_v2_structured_knobs``).
+        """
+        # must_produce defaults to (), so when removed we must also drop the
+        # paired evidence_schema row that exists only to satisfy the subset
+        # invariant; otherwise the profile is unchanged.
+        body = self._valid_body("missing_knob")
+        lines = [line for line in body.splitlines() if not line.startswith(f"{knob}:")]
+        self._write(tmp_path, "missing_knob", "\n".join(lines))
+
+        profile = load_profile("missing_knob", profiles_dir=tmp_path)
+        assert getattr(profile, knob) == expected_default
 
     def test_verifier_capability_is_required(self, tmp_path: Path) -> None:
         self._write(
             tmp_path,
             "missing_capability",
-            "profile: missing_capability\naxis: x\nmin_unit: y\nverifier_focus: z\n",
+            self._valid_body("missing_capability").replace(
+                "verifier_capability: read_only_discovery\n", ""
+            ),
         )
         with pytest.raises(ProfileError, match="verifier_capability"):
             load_profile("missing_capability", profiles_dir=tmp_path)
@@ -82,18 +146,111 @@ class TestSchemaValidation:
         self._write(
             tmp_path,
             "extra",
-            (
-                "profile: extra\naxis: x\nmin_unit: y\nverifier_capability: read_only_discovery\nverifier_focus: z\nunknown_field: oops\n"
-            ),
+            self._valid_body("extra", extra="unknown_field: oops\n"),
         )
         with pytest.raises(ProfileError, match="schema validation"):
             load_profile("extra", profiles_dir=tmp_path)
+
+    def test_rfc_v2_example_profile_shape_loads(self, tmp_path: Path) -> None:
+        self._write(
+            tmp_path,
+            "code",
+            """
+profile: code
+schema_version: 1
+axis: testable_unit
+min_unit: "single function with at least one test"
+cut_signal: "sub-AC produces an independently runnable test"
+max_branching: 4
+must_produce:
+  - tests_passed
+  - files_touched
+evidence_schema:
+  required: [files_touched, commands_run, tests_passed]
+  rejected_if:
+    - "tests_passed == []"
+verifier_capability: subprocess_test_runner
+verifier_focus: "Run the project's test command."
+suggested_tools: [Read, Edit, Write, Bash, Glob, Grep]
+suggested_model_tier: medium
+""",
+        )
+
+        profile = load_profile("code", profiles_dir=tmp_path)
+
+        assert profile.schema_version == 1
+        assert profile.max_branching == 4
+        assert profile.must_produce == ("tests_passed", "files_touched")
+        assert profile.suggested_model_tier == "medium"
+
+    def test_unsupported_schema_version_rejected(self, tmp_path: Path) -> None:
+        self._write(
+            tmp_path,
+            "future",
+            """
+profile: future
+schema_version: 2
+axis: source
+min_unit: claim
+max_branching: 3
+must_produce: [claims]
+evidence_schema:
+  required: [claims]
+verifier_capability: read_only_discovery
+verifier_focus: "Check claims."
+suggested_model_tier: medium
+""",
+        )
+        with pytest.raises(ProfileError, match="schema_version"):
+            load_profile("future", profiles_dir=tmp_path)
+
+    def test_max_branching_must_leave_room_to_split(self, tmp_path: Path) -> None:
+        self._write(
+            tmp_path,
+            "too_narrow",
+            """
+profile: too_narrow
+schema_version: 1
+axis: source
+min_unit: claim
+max_branching: 1
+must_produce: [claims]
+evidence_schema:
+  required: [claims]
+verifier_capability: read_only_discovery
+verifier_focus: "Check claims."
+suggested_model_tier: medium
+""",
+        )
+        with pytest.raises(ProfileError, match="max_branching"):
+            load_profile("too_narrow", profiles_dir=tmp_path)
+
+    def test_must_produce_must_be_required_evidence(self, tmp_path: Path) -> None:
+        self._write(
+            tmp_path,
+            "mismatch",
+            """
+profile: mismatch
+schema_version: 1
+axis: source
+min_unit: claim
+max_branching: 3
+must_produce: [citations]
+evidence_schema:
+  required: [claims]
+verifier_capability: read_only_discovery
+verifier_focus: "Check claims."
+suggested_model_tier: medium
+""",
+        )
+        with pytest.raises(ProfileError, match="must_produce"):
+            load_profile("mismatch", profiles_dir=tmp_path)
 
     def test_filename_must_match_profile_field(self, tmp_path: Path) -> None:
         self._write(
             tmp_path,
             "alpha",
-            "profile: beta\naxis: x\nmin_unit: y\nverifier_capability: read_only_discovery\nverifier_focus: z\n",
+            self._valid_body("beta"),
         )
         with pytest.raises(ProfileError, match="name mismatch"):
             load_profile("alpha", profiles_dir=tmp_path)
