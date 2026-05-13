@@ -809,6 +809,12 @@ class TestSessionRelatedEvents:
                 aggregate_id="other-execution-child",
                 data={"parent_execution_id": "other-execution"},
             ),
+            BaseEvent(
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id="sess-related-only",
+                data={"execution_id": execution_id, "seed_id": "seed-related-only"},
+            ),
         ]
         for event in events:
             await event_store.append(event)
@@ -822,6 +828,7 @@ class TestSessionRelatedEvents:
         assert execution_id in aggregate_ids
         assert "exec-related-only-child" in aggregate_ids
         assert "other-execution-child" not in aggregate_ids
+        assert "sess-related-only" not in aggregate_ids
 
     async def test_session_related_events_do_not_join_on_lossy_normalized_scope(
         self,

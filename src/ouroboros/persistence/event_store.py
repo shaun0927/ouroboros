@@ -883,6 +883,7 @@ class EventStore:
             async with self._engine.begin() as conn:
                 query = (
                     select(events_table)
+                    .where(events_table.c.aggregate_type == "execution")
                     .where(or_(*conditions))
                     .order_by(events_table.c.timestamp.desc())
                 )
