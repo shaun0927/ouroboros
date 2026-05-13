@@ -1,0 +1,249 @@
+"""Typed human-in-the-loop contracts for WAIT/RESUME flows.
+
+The HITL contract is the stable payload shape behind ``hitl.*`` events.
+It intentionally models request/response correlation and persistence-safe
+payloads without choosing a renderer (CLI, MCP, TUI, or structured question).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from enum import StrEnum
+from typing import Any, ClassVar
+
+HITL_CONTRACT_SCHEMA_VERSION = 1
+MAX_HITL_PAYLOAD_BYTES = 8192
+_SECRET_MARKERS = ("password", "passwd", "secret", "token", "api_key", "apikey", "credential")
+
+
+class HumanInputKind(StrEnum):
+    FREE_TEXT = "free_text"
+    SINGLE_SELECT = "single_select"
+    MULTI_SELECT = "multi_select"
+    APPROVAL = "approval"
+    DESTRUCTIVE_CONFIRMATION = "destructive_confirmation"
+
+
+class HumanInputSource(StrEnum):
+    INTERVIEW = "interview"
+    PLUGIN_FIREWALL = "plugin_firewall"
+    CONTROL_PLANE = "control_plane"
+    PLAN_APPROVAL = "plan_approval"
+    RUNTIME_POLICY = "runtime_policy"
+
+
+class HumanInputRiskClass(StrEnum):
+    LOW = "low"
+    MATERIAL_BRANCH = "material_branch"
+    CREDENTIAL_GATED = "credential_gated"
+    EXTERNAL_PRODUCTION = "external_production"
+    DESTRUCTIVE = "destructive"
+
+
+class HumanInputTimeoutAction(StrEnum):
+    STAY_WAITING = "stay_waiting"
+    CANCEL = "cancel"
+    EXPIRE_BLOCKED = "expire_blocked"
+
+
+class HumanInputResponseKind(StrEnum):
+    TEXT = "text"
+    SELECTION = "selection"
+    APPROVAL = "approval"
+    CANCEL = "cancel"
+    TIMEOUT = "timeout"
+
+
+def _require_non_empty(name: str, value: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        raise ValueError(f"HumanInput {name} must be non-empty")
+    return normalized
+
+
+def _ensure_json_safe_payload(name: str, value: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise TypeError(f"HumanInput {name} must be a dict")
+    text = repr(value)
+    if len(text.encode("utf-8")) > MAX_HITL_PAYLOAD_BYTES:
+        raise ValueError(f"HumanInput {name} exceeds {MAX_HITL_PAYLOAD_BYTES} bytes")
+    lowered = text.lower()
+    if any(marker in lowered for marker in _SECRET_MARKERS):
+        raise ValueError(f"HumanInput {name} must not persist secret-like content")
+    return dict(value)
+
+
+@dataclass(frozen=True, slots=True)
+class HumanInputRequest:
+    request_id: str
+    session_id: str
+    created_by: str
+    kind: HumanInputKind
+    source: HumanInputSource
+    risk_class: HumanInputRiskClass
+    question: str
+    resume_target: str
+    schema_version: int = HITL_CONTRACT_SCHEMA_VERSION
+    run_id: str | None = None
+    invocation_id: str | None = None
+    title: str | None = None
+    body: str | None = None
+    options: tuple[str, ...] = ()
+    required_permission: str | None = None
+    timeout_seconds: int | None = None
+    timeout_action: HumanInputTimeoutAction = HumanInputTimeoutAction.STAY_WAITING
+    surface: str | None = None
+    payload: dict[str, Any] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+    REQUESTED_EVENT_TYPE: ClassVar[str] = "hitl.requested"
+    TIMED_OUT_EVENT_TYPE: ClassVar[str] = "hitl.timed_out"
+    CANCELLED_EVENT_TYPE: ClassVar[str] = "hitl.cancelled"
+
+    def __post_init__(self) -> None:
+        if self.schema_version < 1:
+            raise ValueError("HumanInputRequest schema_version must be >= 1")
+        if not isinstance(self.kind, HumanInputKind):
+            raise TypeError("HumanInputRequest kind must be a HumanInputKind")
+        if not isinstance(self.source, HumanInputSource):
+            raise TypeError("HumanInputRequest source must be a HumanInputSource")
+        if not isinstance(self.risk_class, HumanInputRiskClass):
+            raise TypeError("HumanInputRequest risk_class must be a HumanInputRiskClass")
+        if not isinstance(self.timeout_action, HumanInputTimeoutAction):
+            raise TypeError("HumanInputRequest timeout_action must be a HumanInputTimeoutAction")
+
+        for field_name in ("request_id", "session_id", "created_by", "question", "resume_target"):
+            object.__setattr__(
+                self, field_name, _require_non_empty(field_name, getattr(self, field_name))
+            )
+        for field_name in (
+            "run_id",
+            "invocation_id",
+            "title",
+            "body",
+            "required_permission",
+            "surface",
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(self, field_name, _require_non_empty(field_name, value))
+        if self.timeout_seconds is not None and self.timeout_seconds < 1:
+            raise ValueError("HumanInputRequest timeout_seconds must be >= 1 when provided")
+        if (
+            self.kind in {HumanInputKind.SINGLE_SELECT, HumanInputKind.MULTI_SELECT}
+            and not self.options
+        ):
+            raise ValueError("select HumanInputRequest requires at least one option")
+        if any(not option.strip() for option in self.options):
+            raise ValueError("HumanInputRequest options must be non-empty")
+        object.__setattr__(self, "options", tuple(self.options))
+        object.__setattr__(self, "payload", _ensure_json_safe_payload("payload", self.payload))
+
+    @property
+    def aggregate_id(self) -> str:
+        return self.run_id or self.invocation_id or self.session_id
+
+    def to_event_data(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "schema_version": self.schema_version,
+            "request_id": self.request_id,
+            "session_id": self.session_id,
+            "kind": self.kind.value,
+            "source": self.source.value,
+            "risk_class": self.risk_class.value,
+            "question": self.question,
+            "resume_target": self.resume_target,
+            "created_by": self.created_by,
+            "timeout_action": self.timeout_action.value,
+            "created_at": self.created_at.isoformat(),
+        }
+        if self.run_id is not None:
+            data["run_id"] = self.run_id
+        if self.invocation_id is not None:
+            data["invocation_id"] = self.invocation_id
+        if self.title is not None:
+            data["title"] = self.title
+        if self.body is not None:
+            data["body"] = self.body
+        if self.options:
+            data["options"] = list(self.options)
+        if self.required_permission is not None:
+            data["required_permission"] = self.required_permission
+        if self.timeout_seconds is not None:
+            data["timeout_seconds"] = self.timeout_seconds
+        if self.surface is not None:
+            data["surface"] = self.surface
+        if self.payload:
+            data["payload"] = dict(self.payload)
+        return data
+
+
+@dataclass(frozen=True, slots=True)
+class HumanInputResponse:
+    request_id: str
+    actor: str
+    response_kind: HumanInputResponseKind
+    schema_version: int = HITL_CONTRACT_SCHEMA_VERSION
+    session_id: str | None = None
+    run_id: str | None = None
+    invocation_id: str | None = None
+    selected_values: tuple[str, ...] = ()
+    text: str | None = None
+    approval_decision: bool | None = None
+    surface: str | None = None
+    payload: dict[str, Any] = field(default_factory=dict)
+    received_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+    ANSWERED_EVENT_TYPE: ClassVar[str] = "hitl.answered"
+
+    def __post_init__(self) -> None:
+        if self.schema_version < 1:
+            raise ValueError("HumanInputResponse schema_version must be >= 1")
+        if not isinstance(self.response_kind, HumanInputResponseKind):
+            raise TypeError("HumanInputResponse response_kind must be a HumanInputResponseKind")
+        object.__setattr__(self, "request_id", _require_non_empty("request_id", self.request_id))
+        object.__setattr__(self, "actor", _require_non_empty("actor", self.actor))
+        for field_name in ("session_id", "run_id", "invocation_id", "text", "surface"):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(self, field_name, _require_non_empty(field_name, value))
+        if any(not value.strip() for value in self.selected_values):
+            raise ValueError("HumanInputResponse selected_values must be non-empty")
+        if (
+            self.approval_decision is not None
+            and self.response_kind is not HumanInputResponseKind.APPROVAL
+        ):
+            raise ValueError("approval_decision is only valid for approval responses")
+        object.__setattr__(self, "selected_values", tuple(self.selected_values))
+        object.__setattr__(self, "payload", _ensure_json_safe_payload("payload", self.payload))
+
+    @property
+    def aggregate_id(self) -> str:
+        return self.run_id or self.invocation_id or self.session_id or self.request_id
+
+    def to_event_data(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "schema_version": self.schema_version,
+            "request_id": self.request_id,
+            "actor": self.actor,
+            "response_kind": self.response_kind.value,
+            "received_at": self.received_at.isoformat(),
+        }
+        if self.session_id is not None:
+            data["session_id"] = self.session_id
+        if self.run_id is not None:
+            data["run_id"] = self.run_id
+        if self.invocation_id is not None:
+            data["invocation_id"] = self.invocation_id
+        if self.selected_values:
+            data["selected_values"] = list(self.selected_values)
+        if self.text is not None:
+            data["text"] = self.text
+        if self.approval_decision is not None:
+            data["approval_decision"] = self.approval_decision
+        if self.surface is not None:
+            data["surface"] = self.surface
+        if self.payload:
+            data["payload"] = dict(self.payload)
+        return data

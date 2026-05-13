@@ -1,0 +1,70 @@
+from __future__ import annotations
+
+from ouroboros.core.hitl_contract import (
+    HumanInputKind,
+    HumanInputRequest,
+    HumanInputResponse,
+    HumanInputResponseKind,
+    HumanInputRiskClass,
+    HumanInputSource,
+)
+from ouroboros.events.hitl import (
+    create_hitl_answered_event,
+    create_hitl_cancelled_event,
+    create_hitl_requested_event,
+    create_hitl_timed_out_event,
+)
+
+
+def _request() -> HumanInputRequest:
+    return HumanInputRequest(
+        request_id="hitl-1",
+        session_id="session-1",
+        run_id="run-1",
+        created_by="plan",
+        kind=HumanInputKind.APPROVAL,
+        source=HumanInputSource.PLAN_APPROVAL,
+        risk_class=HumanInputRiskClass.MATERIAL_BRANCH,
+        question="Approve the plan?",
+        resume_target="ralplan:approval",
+    )
+
+
+def test_requested_event_uses_hitl_event_type_and_run_aggregate() -> None:
+    event = create_hitl_requested_event(_request())
+
+    assert event.type == "hitl.requested"
+    assert event.aggregate_type == "hitl"
+    assert event.aggregate_id == "run-1"
+    assert event.data["request_id"] == "hitl-1"
+    assert event.data["resume_target"] == "ralplan:approval"
+
+
+def test_answered_event_preserves_request_correlation() -> None:
+    response = HumanInputResponse(
+        request_id="hitl-1",
+        session_id="session-1",
+        run_id="run-1",
+        actor="local-user",
+        response_kind=HumanInputResponseKind.APPROVAL,
+        approval_decision=True,
+    )
+
+    event = create_hitl_answered_event(response)
+
+    assert event.type == "hitl.answered"
+    assert event.aggregate_id == "run-1"
+    assert event.data["request_id"] == "hitl-1"
+    assert event.data["approval_decision"] is True
+
+
+def test_timeout_and_cancel_events_reuse_request_payload() -> None:
+    request = _request()
+
+    timed_out = create_hitl_timed_out_event(request, reason="deadline elapsed")
+    cancelled = create_hitl_cancelled_event(request, reason="user aborted", actor="local-user")
+
+    assert timed_out.type == "hitl.timed_out"
+    assert timed_out.data["reason"] == "deadline elapsed"
+    assert cancelled.type == "hitl.cancelled"
+    assert cancelled.data["actor"] == "local-user"
