@@ -25,8 +25,6 @@ from ouroboros.persistence.event_store import EventStore
 
 log = structlog.get_logger(__name__)
 
-_DEFAULT_LIMIT = 1000
-
 
 @dataclass
 class ProjectionQueryHandler:
@@ -77,10 +75,11 @@ class ProjectionQueryHandler:
                     name="limit",
                     type=ToolInputType.INTEGER,
                     description=(
-                        "Maximum related events to inspect for session queries. Default: 1000."
+                        "Optional safety cap for related events. If the run has "
+                        "more events than this cap, the tool fails instead of "
+                        "returning a partial projection."
                     ),
                     required=False,
-                    default=_DEFAULT_LIMIT,
                 ),
             ),
         )
@@ -93,7 +92,8 @@ class ProjectionQueryHandler:
         session_id = _string_argument(arguments, "session_id")
         execution_id = _string_argument(arguments, "execution_id")
         seed_id_override = _string_argument(arguments, "seed_id")
-        limit = _positive_int_argument(arguments.get("limit", _DEFAULT_LIMIT))
+        raw_limit = arguments.get("limit")
+        limit = _optional_positive_int_argument(raw_limit)
 
         if session_id is None and execution_id is None:
             return Result.err(
@@ -102,7 +102,7 @@ class ProjectionQueryHandler:
                     tool_name="ouroboros_query_projection",
                 )
             )
-        if limit is None:
+        if raw_limit is not None and limit is None:
             return Result.err(
                 MCPToolError(
                     "limit must be a positive integer",
@@ -130,7 +130,6 @@ class ProjectionQueryHandler:
                 store,
                 session_id=session_id,
                 execution_id=execution_id,
-                limit=limit,
             )
             ordered_events = tuple(
                 sorted(
@@ -138,6 +137,16 @@ class ProjectionQueryHandler:
                     key=lambda event: (event.timestamp, event.id),
                 )
             )
+            if limit is not None and len(ordered_events) > limit:
+                return Result.err(
+                    MCPToolError(
+                        (
+                            f"Projection event count {len(ordered_events)} exceeds "
+                            f"limit {limit}; rerun without limit for a complete projection."
+                        ),
+                        tool_name="ouroboros_query_projection",
+                    )
+                )
             seed_id = seed_id_override or _derive_seed_id(ordered_events, session_id, execution_id)
             goal = _derive_goal(ordered_events)
             projection = build_projection(ordered_events, seed_id=seed_id, goal=goal)
@@ -179,18 +188,17 @@ async def _load_projection_events(
     *,
     session_id: str | None,
     execution_id: str | None,
-    limit: int,
 ) -> list[BaseEvent]:
     if session_id is not None:
         return await store.query_session_related_events(
             session_id=session_id,
             execution_id=execution_id,
-            limit=limit,
+            limit=None,
         )
     if execution_id is not None:
         return await store.query_execution_related_events(
             execution_id=execution_id,
-            limit=limit,
+            limit=None,
         )
     return []
 
@@ -202,7 +210,7 @@ def _projection_meta(
     execution_id: str | None,
     seed_id: str,
     event_count: int,
-    limit: int,
+    limit: int | None,
 ) -> dict[str, Any]:
     return {
         "session_id": session_id,
@@ -260,7 +268,7 @@ def _derive_goal(events: Sequence[BaseEvent]) -> str:
     for event in events:
         if not isinstance(event.data, dict):
             continue
-        for key in ("goal", "objective"):
+        for key in ("seed_goal", "goal", "objective"):
             value = event.data.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
@@ -274,7 +282,9 @@ def _string_argument(arguments: dict[str, Any], name: str) -> str | None:
     return None
 
 
-def _positive_int_argument(value: Any) -> int | None:
+def _optional_positive_int_argument(value: Any) -> int | None:
+    if value is None:
+        return None
     if isinstance(value, int) and value > 0:
         return value
     return None

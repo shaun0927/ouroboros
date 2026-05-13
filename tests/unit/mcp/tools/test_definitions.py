@@ -621,7 +621,7 @@ class TestProjectionQueryHandler:
                 data={
                     "execution_id": "exec_projection_456",
                     "seed_id": "seed_projection_456",
-                    "goal": "Project session",
+                    "seed_goal": "Project session",
                 },
             )
         )
@@ -646,8 +646,41 @@ class TestProjectionQueryHandler:
         assert result.is_ok
         assert result.value.meta["session_id"] == "orch_projection_123"
         assert result.value.meta["seed_id"] == "seed_projection_456"
+        assert result.value.meta["run"]["goal"] == "Project session"
         assert result.value.meta["event_count"] == 2
         assert result.value.meta["steps"][0]["name"] == "Read"
+
+    async def test_handle_limit_is_fail_closed_safety_cap(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
+        """Projection queries reject caps that would create partial projections."""
+        from ouroboros.events.base import BaseEvent
+
+        await memory_event_store.append(
+            BaseEvent(
+                id="evt_cap_1",
+                type="tool.call.started",
+                aggregate_type="execution",
+                aggregate_id="exec_projection_cap",
+                data={"call_id": "cap_1", "tool_name": "Bash"},
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                id="evt_cap_2",
+                type="tool.call.returned",
+                aggregate_type="execution",
+                aggregate_id="exec_projection_cap",
+                data={"call_id": "cap_1", "tool_name": "Bash", "is_error": False},
+            )
+        )
+
+        handler = ProjectionQueryHandler(event_store=memory_event_store)
+        result = await handler.handle({"execution_id": "exec_projection_cap", "limit": 1})
+
+        assert result.is_err
+        assert "exceeds limit 1" in str(result.error)
 
 
 class TestOuroborosTools:
