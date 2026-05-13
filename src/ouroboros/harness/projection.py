@@ -42,6 +42,7 @@ from pydantic import (
     AfterValidator,
     BaseModel,
     BeforeValidator,
+    ConfigDict,
     Field,
     PlainSerializer,
     field_validator,
@@ -222,12 +223,23 @@ class VerdictOutcome(StrEnum):
 # ---------------------------------------------------------------------------
 
 
+def _require_aware_datetime(field_name: str, value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None or value.utcoffset() is None:
+        msg = f"{field_name} must be timezone-aware"
+        raise ValueError(msg)
+    return value
+
+
 def _new_id(prefix: str) -> str:
     """Return a stable, prefixed identifier suitable for projection records."""
     return f"{prefix}_{uuid4().hex[:12]}"
 
 
 class ArtifactRecord(BaseModel, frozen=True):
+    model_config = ConfigDict(extra="forbid")
+
     """A produced artifact attached to a single step.
 
     Artifacts are owner-agnostic — plugins and core harness modules use the
@@ -277,6 +289,8 @@ class ArtifactRecord(BaseModel, frozen=True):
 
 
 class StepRecord(BaseModel, frozen=True):
+    model_config = ConfigDict(extra="forbid")
+
     """One bounded unit of work observed by the harness.
 
     A step is the projection equivalent of a single model call, tool call,
@@ -325,6 +339,11 @@ class StepRecord(BaseModel, frozen=True):
     artifact_ids: IdentifierTuple = Field(default_factory=tuple)
     metadata: FrozenMetadata = Field(default_factory=_empty_frozen_metadata)
 
+    @field_validator("started_at", "ended_at")
+    @classmethod
+    def _timestamps_must_be_aware(cls, value: datetime | None, info: Any) -> datetime | None:
+        return _require_aware_datetime(info.field_name, value)
+
     @field_validator("ac_id")
     @classmethod
     def _ac_id_not_blank(cls, value: str | None) -> str | None:
@@ -354,6 +373,8 @@ class StepRecord(BaseModel, frozen=True):
 
 
 class StageRecord(BaseModel, frozen=True):
+    model_config = ConfigDict(extra="forbid")
+
     """A named harness phase that groups related step records.
 
     Stages mirror the user-visible workflow phases (``interview``,
@@ -382,6 +403,11 @@ class StageRecord(BaseModel, frozen=True):
     step_ids: IdentifierTuple = Field(default_factory=tuple)
     metadata: FrozenMetadata = Field(default_factory=_empty_frozen_metadata)
 
+    @field_validator("started_at", "ended_at")
+    @classmethod
+    def _timestamps_must_be_aware(cls, value: datetime | None, info: Any) -> datetime | None:
+        return _require_aware_datetime(info.field_name, value)
+
     @model_validator(mode="after")
     def _validate_timestamps(self) -> StageRecord:
         if self.ended_at is not None and self.ended_at < self.started_at:
@@ -391,6 +417,8 @@ class StageRecord(BaseModel, frozen=True):
 
 
 class VerdictRecord(BaseModel, frozen=True):
+    model_config = ConfigDict(extra="forbid")
+
     """Run- or AC-level verdict with explicit evidence links.
 
     Verdicts are the harness-owned terminal judgment over either an entire
@@ -428,6 +456,13 @@ class VerdictRecord(BaseModel, frozen=True):
     recorded_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     metadata: FrozenMetadata = Field(default_factory=_empty_frozen_metadata)
 
+    @field_validator("recorded_at")
+    @classmethod
+    def _recorded_at_must_be_aware(cls, value: datetime | None, info: Any) -> datetime | None:
+        checked = _require_aware_datetime(info.field_name, value)
+        assert checked is not None
+        return checked
+
     @field_validator("ac_id")
     @classmethod
     def _ac_id_not_blank(cls, value: str | None) -> str | None:
@@ -451,6 +486,8 @@ class VerdictRecord(BaseModel, frozen=True):
 
 
 class RunRecord(BaseModel, frozen=True):
+    model_config = ConfigDict(extra="forbid")
+
     """A single user-goal / Seed execution envelope.
 
     A run is the top-level projection unit. It carries the goal, the seed
@@ -480,6 +517,11 @@ class RunRecord(BaseModel, frozen=True):
     stage_ids: IdentifierTuple = Field(default_factory=tuple)
     verdict_id: Identifier | None = Field(default=None)
     metadata: FrozenMetadata = Field(default_factory=_empty_frozen_metadata)
+
+    @field_validator("started_at", "ended_at")
+    @classmethod
+    def _timestamps_must_be_aware(cls, value: datetime | None, info: Any) -> datetime | None:
+        return _require_aware_datetime(info.field_name, value)
 
     @field_validator("verdict_id")
     @classmethod

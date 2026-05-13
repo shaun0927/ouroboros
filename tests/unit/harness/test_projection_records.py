@@ -527,3 +527,53 @@ class TestScalarIdentifiersRejectBlanks:
         )
         assert record.run_id == "run_1"
         assert record.stage_id == "stage_1"
+
+
+class TestProjectionRecordSchemaStrictness:
+    """Public projection records should reject malformed v1 payloads."""
+
+    def test_extra_fields_are_forbidden(self) -> None:
+        with pytest.raises(ValidationError):
+            RunRecord(seed_id="seed_abc", typo_field=True)  # type: ignore[call-arg]
+
+    def test_step_rejects_naive_started_at(self) -> None:
+        with pytest.raises(ValidationError):
+            StepRecord(
+                run_id="run_1",
+                stage_id="stage_1",
+                kind=StepKind.TOOL_CALL,
+                source_event_ids=("evt_1",),
+                started_at=datetime(2026, 1, 1),
+            )
+
+    def test_step_rejects_mixed_naive_ended_at_cleanly(self) -> None:
+        with pytest.raises(ValidationError, match="ended_at must be timezone-aware"):
+            StepRecord(
+                run_id="run_1",
+                stage_id="stage_1",
+                kind=StepKind.TOOL_CALL,
+                source_event_ids=("evt_1",),
+                started_at=datetime.now(UTC),
+                ended_at=datetime(2026, 1, 1),
+            )
+
+    def test_stage_rejects_naive_timestamp(self) -> None:
+        with pytest.raises(ValidationError):
+            StageRecord(
+                run_id="run_1",
+                kind=StageKind.EXECUTE,
+                started_at=datetime(2026, 1, 1),
+            )
+
+    def test_run_rejects_naive_timestamp(self) -> None:
+        with pytest.raises(ValidationError):
+            RunRecord(seed_id="seed_abc", started_at=datetime(2026, 1, 1))
+
+    def test_verdict_rejects_naive_recorded_at(self) -> None:
+        with pytest.raises(ValidationError):
+            VerdictRecord(
+                run_id="run_1",
+                scope="run",
+                outcome=VerdictOutcome.PASS,
+                recorded_at=datetime(2026, 1, 1),
+            )
