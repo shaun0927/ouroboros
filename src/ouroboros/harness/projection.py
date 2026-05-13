@@ -129,10 +129,7 @@ def _normalize_id_tuple(values: tuple[str, ...]) -> tuple[str, ...]:
     normalized: list[str] = []
     for index, value in enumerate(values):
         if not isinstance(value, str):
-            msg = (
-                f"identifier at index {index} must be a string; "
-                f"got {type(value).__name__}"
-            )
+            msg = f"identifier at index {index} must be a string; got {type(value).__name__}"
             raise TypeError(msg)
         stripped = value.strip()
         if not stripped:
@@ -412,9 +409,7 @@ class VerdictRecord(BaseModel, frozen=True):
             return None
         stripped = value.strip()
         if not stripped:
-            msg = (
-                "VerdictRecord.ac_id must be None or a non-blank identifier"
-            )
+            msg = "VerdictRecord.ac_id must be None or a non-blank identifier"
             raise ValueError(msg)
         return stripped
 
