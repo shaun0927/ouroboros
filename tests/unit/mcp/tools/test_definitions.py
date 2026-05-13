@@ -527,6 +527,16 @@ class TestProjectionQueryHandler:
         assert result.is_err
         assert "session_id or execution_id is required" in str(result.error)
 
+    async def test_handle_rejects_empty_event_set(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
+        handler = ProjectionQueryHandler(event_store=memory_event_store)
+        result = await handler.handle({"execution_id": "exec_missing_projection"})
+
+        assert result.is_err
+        assert "No events found" in str(result.error)
+
     async def test_handle_projects_execution_events(
         self,
         memory_event_store: EventStore,
@@ -649,6 +659,46 @@ class TestProjectionQueryHandler:
         assert result.value.meta["run"]["goal"] == "Project session"
         assert result.value.meta["event_count"] == 2
         assert result.value.meta["steps"][0]["name"] == "Read"
+
+    async def test_handle_rejects_mismatched_session_execution(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
+        """Explicit execution_id must belong to the requested session."""
+        from ouroboros.events.base import BaseEvent
+
+        await memory_event_store.append(
+            BaseEvent(
+                id="evt_session_declares_a",
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id="orch_projection_mismatch",
+                data={
+                    "execution_id": "exec_projection_a",
+                    "seed_id": "seed_projection_a",
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                id="evt_unrelated_exec_b",
+                type="tool.call.started",
+                aggregate_type="execution",
+                aggregate_id="exec_projection_b",
+                data={"execution_id": "exec_projection_b", "call_id": "b", "tool_name": "Bash"},
+            )
+        )
+
+        handler = ProjectionQueryHandler(event_store=memory_event_store)
+        result = await handler.handle(
+            {
+                "session_id": "orch_projection_mismatch",
+                "execution_id": "exec_projection_b",
+            }
+        )
+
+        assert result.is_err
+        assert "does not belong" in str(result.error)
 
     async def test_handle_limit_is_fail_closed_safety_cap(
         self,

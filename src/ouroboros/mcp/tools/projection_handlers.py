@@ -137,6 +137,13 @@ class ProjectionQueryHandler:
                     key=lambda event: (event.timestamp, event.id),
                 )
             )
+            if not ordered_events:
+                return Result.err(
+                    MCPToolError(
+                        "No events found for projection query",
+                        tool_name="ouroboros_query_projection",
+                    )
+                )
             if limit is not None and len(ordered_events) > limit:
                 return Result.err(
                     MCPToolError(
@@ -190,11 +197,21 @@ async def _load_projection_events(
     execution_id: str | None,
 ) -> list[BaseEvent]:
     if session_id is not None:
-        return await store.query_session_related_events(
+        events = await store.query_session_related_events(
             session_id=session_id,
-            execution_id=execution_id,
             limit=None,
         )
+        if execution_id is None:
+            return events
+        if not _session_declares_execution(events, session_id, execution_id):
+            msg = f"execution_id {execution_id!r} does not belong to session_id {session_id!r}"
+            raise ValueError(msg)
+        return [
+            event
+            for event in events
+            if _is_session_metadata_event(event, session_id)
+            or _event_links_execution(event, execution_id)
+        ]
     if execution_id is not None:
         return await store.query_execution_related_events(
             execution_id=execution_id,
@@ -262,6 +279,36 @@ def _ensure_aware_timestamp(event: BaseEvent) -> BaseEvent:
     if event.timestamp.tzinfo is not None:
         return event
     return event.model_copy(update={"timestamp": event.timestamp.replace(tzinfo=UTC)})
+
+
+def _session_declares_execution(
+    events: Sequence[BaseEvent],
+    session_id: str,
+    execution_id: str,
+) -> bool:
+    for event in events:
+        if not _is_session_metadata_event(event, session_id):
+            continue
+        value = event.data.get("execution_id") if isinstance(event.data, dict) else None
+        if isinstance(value, str) and value.strip() == execution_id:
+            return True
+    return False
+
+
+def _is_session_metadata_event(event: BaseEvent, session_id: str) -> bool:
+    return event.aggregate_type == "session" and event.aggregate_id == session_id
+
+
+def _event_links_execution(event: BaseEvent, execution_id: str) -> bool:
+    if event.aggregate_type == "execution" and event.aggregate_id == execution_id:
+        return True
+    if not isinstance(event.data, dict):
+        return False
+    for key in ("execution_id", "parent_execution_id"):
+        value = event.data.get(key)
+        if isinstance(value, str) and value.strip() == execution_id:
+            return True
+    return False
 
 
 def _derive_goal(events: Sequence[BaseEvent]) -> str:
