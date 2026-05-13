@@ -91,7 +91,7 @@ class TestRenderBaselineReport:
         for label in (
             "one_shot_pass_rate",
             "k_recovery_rate",
-            "fabrication_per_100_acs",
+            "fabrication_incidents_per_100_acs",
             "median_chars_per_ac",
             "new_domain_loc_delta",
             "new_domain_yaml_delta",

@@ -84,7 +84,7 @@ def _render_metric_summary(report: FatHarnessMetricsReport) -> list[str]:
     return [
         f"  one_shot_pass_rate                  : {_format_value(report.one_shot_pass_rate)}",
         f"  k_recovery_rate                     : {_format_value(report.k_recovery_rate)}",
-        f"  fabrication_per_100_acs             : {_format_value(report.fabrication_incidents_per_100_acs)}",
+        f"  fabrication_incidents_per_100_acs             : {_format_value(report.fabrication_incidents_per_100_acs)}",
         f"  median_chars_per_ac                 : {_format_value(report.median_chars_per_ac)}",
         f"  new_domain_loc_delta                : {report.new_domain_loc_delta}",
         f"  new_domain_yaml_delta               : {report.new_domain_yaml_delta}",
