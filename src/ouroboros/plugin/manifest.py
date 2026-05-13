@@ -30,6 +30,13 @@ import json
 from pathlib import Path
 from typing import Any
 
+from ouroboros.plugin.hooks import (
+    is_deferred_hook_kind,
+    is_excluded_hook_kind,
+    is_v1_failure_policy,
+    is_v1_hook_kind,
+)
+
 try:
     from jsonschema import Draft202012Validator
 except ImportError as exc:  # pragma: no cover
@@ -349,6 +356,16 @@ def _build_hook(
     hook_index: int,
     manifest_path: str | Path,
 ) -> HookSpec:
+    hook_name = raw["name"]
+    _validate_hook_name(hook_name, hook_index=hook_index, manifest_path=manifest_path)
+
+    failure_policy = raw["failure_policy"]
+    _validate_failure_policy(
+        failure_policy,
+        hook_index=hook_index,
+        manifest_path=manifest_path,
+    )
+
     for permission_index, scope in enumerate(raw.get("permissions", ())):
         if scope not in declared_permission_scopes:
             raise PluginManifestError(
@@ -364,15 +381,85 @@ def _build_hook(
 
     entrypoint_raw = raw["entrypoint"]
     return HookSpec(
-        name=raw["name"],
+        name=hook_name,
         entrypoint=Entrypoint(
             type=entrypoint_raw["type"],
             command=entrypoint_raw["command"],
         ),
-        failure_policy=raw["failure_policy"],
+        failure_policy=failure_policy,
         timeout_seconds=raw.get("timeout_seconds"),
         permissions=tuple(raw.get("permissions", ())),
         description=raw.get("description", ""),
+    )
+
+
+def _validate_hook_name(
+    name: Any,
+    *,
+    hook_index: int,
+    manifest_path: str | Path,
+) -> None:
+    """Reject hook names that are not in the v1 ``HookKind`` vocabulary.
+
+    Deferred and explicitly-excluded names get specific error messages
+    so manifest authors can tell whether the name is "wait for a later
+    RFC slice" or "this name will never be accepted".
+    """
+    json_pointer = f"/hooks/{hook_index}/name"
+    if not isinstance(name, str) or not name:
+        raise PluginManifestError(
+            "hook name must be a non-empty string",
+            path=str(manifest_path),
+            json_pointer=json_pointer,
+            expected="non-empty string drawn from the v1 hook vocabulary",
+            got=repr(name),
+        )
+
+    if is_v1_hook_kind(name):
+        return
+
+    if is_deferred_hook_kind(name):
+        raise PluginManifestError(
+            "hook name is deferred to a follow-up RFC slice",
+            path=str(manifest_path),
+            json_pointer=json_pointer,
+            expected="v1 hook name (see ouroboros.plugin.hooks.HookKind)",
+            got=name,
+        )
+
+    if is_excluded_hook_kind(name):
+        raise PluginManifestError(
+            "hook name is excluded from the v1 plugin lifecycle contract",
+            path=str(manifest_path),
+            json_pointer=json_pointer,
+            expected="v1 hook name (see ouroboros.plugin.hooks.HookKind)",
+            got=name,
+        )
+
+    raise PluginManifestError(
+        "unknown hook name",
+        path=str(manifest_path),
+        json_pointer=json_pointer,
+        expected="v1 hook name (see ouroboros.plugin.hooks.HookKind)",
+        got=name,
+    )
+
+
+def _validate_failure_policy(
+    failure_policy: Any,
+    *,
+    hook_index: int,
+    manifest_path: str | Path,
+) -> None:
+    """Reject failure_policy values outside the v1 vocabulary."""
+    if isinstance(failure_policy, str) and is_v1_failure_policy(failure_policy):
+        return
+    raise PluginManifestError(
+        "hook failure_policy must be a v1 policy",
+        path=str(manifest_path),
+        json_pointer=f"/hooks/{hook_index}/failure_policy",
+        expected="'fail_open' or 'fail_closed'",
+        got=repr(failure_policy),
     )
 
 
