@@ -96,6 +96,14 @@ def _require_non_empty(name: str, value: str) -> str:
     return normalized
 
 
+def _require_non_blank_text(name: str, value: Any) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"HumanInput {name} must be a string")
+    if not value.strip():
+        raise ValueError(f"HumanInput {name} must be non-empty")
+    return value
+
+
 def _normalize_string_tuple(name: str, value: Any) -> tuple[str, ...]:
     if isinstance(value, str) or not isinstance(value, tuple | list):
         raise TypeError(f"HumanInput {name} must be a tuple or list of strings")
@@ -311,10 +319,12 @@ class HumanInputResponse:
             raise TypeError("HumanInputResponse response_kind must be a HumanInputResponseKind")
         object.__setattr__(self, "request_id", _require_non_empty("request_id", self.request_id))
         object.__setattr__(self, "actor", _require_non_empty("actor", self.actor))
-        for field_name in ("session_id", "run_id", "invocation_id", "text", "surface"):
+        for field_name in ("session_id", "run_id", "invocation_id", "surface"):
             value = getattr(self, field_name)
             if value is not None:
                 object.__setattr__(self, field_name, _require_non_empty(field_name, value))
+        if self.text is not None:
+            object.__setattr__(self, "text", _require_non_blank_text("text", self.text))
         object.__setattr__(
             self,
             "selected_values",

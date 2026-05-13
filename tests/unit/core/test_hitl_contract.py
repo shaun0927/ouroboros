@@ -370,6 +370,29 @@ def test_response_allows_request_id_only_correlation() -> None:
     assert "invocation_id" not in response.to_event_data()
 
 
+def test_text_response_preserves_verbatim_text() -> None:
+    text = "  def example():\n      return 'ok'\n"
+    response = HumanInputResponse(
+        request_id="hitl-1",
+        actor="local-user",
+        response_kind=HumanInputResponseKind.TEXT,
+        text=text,
+    )
+
+    assert response.text == text
+    assert response.to_event_data()["text"] == text
+
+
+def test_text_response_rejects_all_whitespace_text() -> None:
+    with pytest.raises(ValueError, match="text"):
+        HumanInputResponse(
+            request_id="hitl-1",
+            actor="local-user",
+            response_kind=HumanInputResponseKind.TEXT,
+            text="  \n\t",
+        )
+
+
 def test_response_rejects_approval_decision_on_non_approval() -> None:
     with pytest.raises(ValueError, match="approval_decision"):
         HumanInputResponse(
