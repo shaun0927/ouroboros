@@ -53,24 +53,44 @@ WORKFLOW_IR_SCHEMA_VERSION = 1
 # ---------------------------------------------------------------------------
 
 
+def _freeze_value(value: Any) -> Any:
+    """Recursively copy common JSON-like containers into immutable views."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze_value(item) for key, item in value.items()})
+    if isinstance(value, list | tuple):
+        return tuple(_freeze_value(item) for item in value)
+    if isinstance(value, set | frozenset):
+        return frozenset(_freeze_value(item) for item in value)
+    return value
+
+
+def _thaw_value(value: Any) -> Any:
+    """Convert immutable container views back to JSON-serializable containers."""
+    if isinstance(value, Mapping):
+        return {key: _thaw_value(item) for key, item in value.items()}
+    if isinstance(value, tuple | frozenset):
+        return [_thaw_value(item) for item in value]
+    return value
+
+
 def _coerce_to_mapping(value: Any) -> Mapping[str, Any]:
-    """Normalize incoming mapping-shaped input into a fresh proxy view."""
+    """Normalize incoming mapping-shaped input into a recursively frozen view."""
     if value is None:
         return MappingProxyType({})
-    if isinstance(value, MappingProxyType):
-        return value
     if isinstance(value, Mapping):
-        return MappingProxyType(dict(value))
+        frozen = _freeze_value(value)
+        if isinstance(frozen, MappingProxyType):
+            return frozen
     msg = f"mapping field must be a mapping, got {type(value).__name__}"
     raise ValueError(msg)
 
 
 def _ensure_frozen_after(value: Any) -> Mapping[str, Any]:
-    """Final-stage wrapper guaranteeing ``MappingProxyType`` identity."""
-    if isinstance(value, MappingProxyType):
-        return value
+    """Final-stage wrapper guaranteeing recursively immutable mapping values."""
     if isinstance(value, Mapping):
-        return MappingProxyType(dict(value))
+        frozen = _freeze_value(value)
+        if isinstance(frozen, MappingProxyType):
+            return frozen
     msg = f"mapping field must be a mapping, got {type(value).__name__}"
     raise ValueError(msg)
 
@@ -84,7 +104,7 @@ FrozenMapping = Annotated[
     Mapping[str, Any],
     BeforeValidator(_coerce_to_mapping),
     AfterValidator(_ensure_frozen_after),
-    PlainSerializer(lambda value: dict(value), return_type=dict, when_used="always"),
+    PlainSerializer(lambda value: _thaw_value(value), return_type=dict, when_used="always"),
 ]
 """Mapping field that blocks top-level mutation (``__setitem__`` etc.)."""
 

@@ -14,6 +14,8 @@ Covers the acceptance contract from issue #956 PR-1:
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 from pydantic import ValidationError
 import pytest
 
@@ -440,6 +442,57 @@ class TestMetadataIsRuntimeImmutable:
         dumped = node.model_dump()
         assert isinstance(dumped["metadata"], dict)
         assert dumped["metadata"] == {"k": "v", "n": 1}
+
+    def test_nested_metadata_blocks_mutation(self) -> None:
+        original: dict[str, Any] = {"outer": {"inner": "v"}, "items": ["a", "b"]}
+        node = WorkflowNode(
+            node_id="node_a",
+            kind=NodeKind.TASK,
+            owner=NodeOwner.HARNESS,
+            metadata=original,
+        )
+
+        original["outer"]["inner"] = "tampered"
+        original["items"].append("c")
+
+        nested = cast(dict[str, Any], node.metadata["outer"])
+        assert nested["inner"] == "v"
+        with pytest.raises(TypeError):
+            nested["inner"] = "tampered"
+
+        items = cast(tuple[str, ...], node.metadata["items"])
+        assert items == ("a", "b")
+        with pytest.raises(AttributeError):
+            items.append("c")  # type: ignore[attr-defined]
+
+    def test_nested_runtime_hints_round_trip_as_plain_containers(self) -> None:
+        node = WorkflowNode(
+            node_id="node_a",
+            kind=NodeKind.TASK,
+            owner=NodeOwner.HARNESS,
+            runtime_hints={"retry": {"max": 2}, "models": ["fast", "deep"]},
+        )
+
+        dumped = node.model_dump()
+        assert dumped["runtime_hints"] == {
+            "retry": {"max": 2},
+            "models": ["fast", "deep"],
+        }
+
+    def test_edge_condition_nested_mapping_blocks_mutation(self) -> None:
+        edge = WorkflowEdge(
+            edge_id="edge_x",
+            source="a",
+            target="b",
+            kind=EdgeKind.CONDITIONAL,
+            condition={"all": [{"field": "status", "op": "eq"}]},
+        )
+
+        assert edge.condition is not None
+        clauses = cast(tuple[dict[str, str], ...], edge.condition["all"])
+        assert clauses == ({"field": "status", "op": "eq"},)
+        with pytest.raises(TypeError):
+            clauses[0]["op"] = "ne"
 
 
 class TestCapabilityEnvelopeHygiene:
