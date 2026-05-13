@@ -9,11 +9,15 @@ Covers the contract from issue #946 PR-1a:
 * ``VerdictRecord`` enforces the ``scope`` ↔ ``ac_id`` invariant.
 * Timestamp invariants reject ``ended_at < started_at``.
 * Schema-version field defaults to ``PROJECTION_SCHEMA_VERSION``.
+* ``metadata`` is read-only at runtime (blocks
+  ``record.metadata[key] = value`` mutation).
+* Identifier-tuple fields reject blank or whitespace-only entries.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import MappingProxyType
 
 from pydantic import ValidationError
 import pytest
@@ -265,3 +269,155 @@ class TestEnumerations:
             "cancelled",
             "unknown",
         }
+
+
+class TestMetadataIsRuntimeImmutable:
+    """``metadata`` mapping fields must reject in-place mutation.
+
+    ``frozen=True`` only blocks attribute reassignment on the model
+    itself; we additionally wrap ``metadata`` in a ``MappingProxyType``
+    view so consumers cannot quietly poison cached projections through
+    ``record.metadata[key] = value``.
+    """
+
+    def test_run_record_metadata_is_mapping_proxy(self) -> None:
+        record = RunRecord(seed_id="seed_abc", metadata={"k": "v"})
+        assert isinstance(record.metadata, MappingProxyType)
+
+    def test_run_record_metadata_blocks_setitem(self) -> None:
+        record = RunRecord(seed_id="seed_abc", metadata={"k": "v"})
+        with pytest.raises(TypeError):
+            record.metadata["new"] = "value"  # type: ignore[index]
+
+    def test_run_record_metadata_blocks_pop(self) -> None:
+        record = RunRecord(seed_id="seed_abc", metadata={"k": "v"})
+        with pytest.raises((AttributeError, TypeError)):
+            record.metadata.pop("k")  # type: ignore[attr-defined]
+
+    def test_stage_record_metadata_blocks_setitem(self) -> None:
+        record = StageRecord(run_id="run_1", kind=StageKind.EXECUTE)
+        with pytest.raises(TypeError):
+            record.metadata["new"] = "value"  # type: ignore[index]
+
+    def test_step_record_metadata_blocks_setitem(self) -> None:
+        record = StepRecord(
+            run_id="run_1",
+            stage_id="stage_1",
+            kind=StepKind.TOOL_CALL,
+            source_event_ids=("evt_1",),
+        )
+        with pytest.raises(TypeError):
+            record.metadata["new"] = "value"  # type: ignore[index]
+
+    def test_artifact_record_metadata_blocks_setitem(self) -> None:
+        record = ArtifactRecord(step_id="step_1", kind="file")
+        with pytest.raises(TypeError):
+            record.metadata["new"] = "value"  # type: ignore[index]
+
+    def test_verdict_record_metadata_blocks_setitem(self) -> None:
+        record = VerdictRecord(
+            run_id="run_1",
+            scope="run",
+            outcome=VerdictOutcome.PASS,
+        )
+        with pytest.raises(TypeError):
+            record.metadata["new"] = "value"  # type: ignore[index]
+
+    def test_metadata_round_trips_through_model_dump(self) -> None:
+        record = RunRecord(seed_id="seed_abc", metadata={"k": "v", "n": 1})
+        dumped = record.model_dump()
+        assert isinstance(dumped["metadata"], dict)
+        assert dumped["metadata"] == {"k": "v", "n": 1}
+
+    def test_metadata_rejects_non_mapping_input(self) -> None:
+        with pytest.raises(ValidationError):
+            RunRecord(seed_id="seed_abc", metadata=[("k", "v")])  # type: ignore[arg-type]
+
+
+class TestIdentifierTupleRejectsBlanks:
+    """Tuple-of-identifier fields must reject empty or whitespace-only
+    entries so cross-record references stay usable.
+    """
+
+    def test_step_record_rejects_blank_source_event_id(self) -> None:
+        with pytest.raises(ValidationError):
+            StepRecord(
+                run_id="run_1",
+                stage_id="stage_1",
+                kind=StepKind.TOOL_CALL,
+                source_event_ids=("   ",),
+            )
+
+    def test_step_record_rejects_empty_source_event_id(self) -> None:
+        with pytest.raises(ValidationError):
+            StepRecord(
+                run_id="run_1",
+                stage_id="stage_1",
+                kind=StepKind.TOOL_CALL,
+                source_event_ids=("",),
+            )
+
+    def test_step_record_rejects_blank_artifact_id(self) -> None:
+        with pytest.raises(ValidationError):
+            StepRecord(
+                run_id="run_1",
+                stage_id="stage_1",
+                kind=StepKind.TOOL_CALL,
+                source_event_ids=("evt_1",),
+                artifact_ids=("   ",),
+            )
+
+    def test_step_record_trims_identifier_whitespace(self) -> None:
+        record = StepRecord(
+            run_id="run_1",
+            stage_id="stage_1",
+            kind=StepKind.TOOL_CALL,
+            source_event_ids=("  evt_1  ",),
+        )
+        assert record.source_event_ids == ("evt_1",)
+
+    def test_stage_record_rejects_blank_step_id(self) -> None:
+        with pytest.raises(ValidationError):
+            StageRecord(
+                run_id="run_1",
+                kind=StageKind.EXECUTE,
+                step_ids=("",),
+            )
+
+    def test_run_record_rejects_blank_stage_id(self) -> None:
+        with pytest.raises(ValidationError):
+            RunRecord(seed_id="seed_abc", stage_ids=("   ",))
+
+    def test_run_record_rejects_blank_verdict_id(self) -> None:
+        with pytest.raises(ValidationError):
+            RunRecord(seed_id="seed_abc", verdict_id="   ")
+
+    def test_verdict_rejects_blank_evidence_event_id(self) -> None:
+        with pytest.raises(ValidationError):
+            VerdictRecord(
+                run_id="run_1",
+                scope="run",
+                outcome=VerdictOutcome.PASS,
+                evidence_event_ids=("",),
+            )
+
+    def test_verdict_rejects_blank_ac_id_when_scope_ac(self) -> None:
+        # Blank ``ac_id`` should be rejected even though scope='ac' would
+        # otherwise allow a non-None value.
+        with pytest.raises(ValidationError):
+            VerdictRecord(
+                run_id="run_1",
+                scope="ac",
+                ac_id="   ",
+                outcome=VerdictOutcome.PASS,
+            )
+
+    def test_step_record_rejects_blank_ac_id(self) -> None:
+        with pytest.raises(ValidationError):
+            StepRecord(
+                run_id="run_1",
+                stage_id="stage_1",
+                kind=StepKind.TOOL_CALL,
+                source_event_ids=("evt_1",),
+                ac_id="   ",
+            )

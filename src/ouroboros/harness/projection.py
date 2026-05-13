@@ -10,6 +10,10 @@ Design constraints (per the acceptance criteria attached to issue #946):
 
 * Records are immutable Pydantic models (``frozen=True``) so they can be
   treated as values in projections, comparisons, and persistence layers.
+  ``metadata`` mappings are wrapped in :class:`types.MappingProxyType`
+  views to block top-level ``record.metadata[key] = value`` mutation, and
+  tuple-of-identifier fields reject blank or whitespace-only entries so
+  cross-record references remain usable.
 * Every ``StepRecord`` either links to one or more source event IDs via
   :attr:`StepRecord.source_event_ids`, or explicitly marks itself as legacy
   or inferred via :attr:`StepRecord.legacy_inferred`. Projections that
@@ -27,15 +31,122 @@ can be reviewed independently of any wiring.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, Literal
+from types import MappingProxyType
+from typing import Annotated, Any, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    BeforeValidator,
+    Field,
+    PlainSerializer,
+    field_validator,
+    model_validator,
+)
 
 PROJECTION_SCHEMA_VERSION = 1
 """Initial schema version for the projection vocabulary."""
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers — immutable metadata + identifier hygiene
+# ---------------------------------------------------------------------------
+
+
+def _coerce_to_mapping(value: Any) -> Mapping[str, Any]:
+    """Normalize the incoming value into an immutable ``MappingProxyType``.
+
+    Accepts ``None``, plain mappings, and existing ``MappingProxyType``
+    views. Anything else is rejected so callers cannot smuggle mutable
+    state in through unexpected types. ``ValueError`` is raised on
+    non-mapping inputs so Pydantic surfaces it as a regular
+    ``ValidationError``.
+    """
+    if value is None:
+        return MappingProxyType({})
+    if isinstance(value, MappingProxyType):
+        return value
+    if isinstance(value, Mapping):
+        return MappingProxyType(dict(value))
+    msg = f"metadata must be a mapping, got {type(value).__name__}"
+    raise ValueError(msg)
+
+
+def _empty_frozen_metadata() -> Mapping[str, Any]:
+    """Default factory that returns an empty read-only mapping.
+
+    Returning a ``MappingProxyType`` directly avoids relying on Pydantic
+    running validators against default values; the runtime invariant
+    that ``record.metadata`` is read-only must hold even when no
+    metadata was supplied at construction time.
+    """
+    return MappingProxyType({})
+
+
+def _ensure_frozen_after(value: Any) -> Mapping[str, Any]:
+    """Final-stage wrapper that guarantees a ``MappingProxyType`` view.
+
+    Pydantic's built-in mapping handling may unwrap a ``MappingProxyType``
+    back into a plain dict between the ``BeforeValidator`` and the final
+    field value. This AfterValidator runs last so the stored attribute
+    is always a read-only view regardless of upstream coercion choices.
+    """
+    if isinstance(value, MappingProxyType):
+        return value
+    if isinstance(value, Mapping):
+        return MappingProxyType(dict(value))
+    msg = f"metadata must be a mapping, got {type(value).__name__}"
+    raise ValueError(msg)
+
+
+FrozenMetadata = Annotated[
+    Mapping[str, Any],
+    BeforeValidator(_coerce_to_mapping),
+    AfterValidator(_ensure_frozen_after),
+    PlainSerializer(lambda value: dict(value), return_type=dict, when_used="always"),
+]
+"""Metadata field type that blocks top-level dict mutation.
+
+Once a record is constructed the resulting ``Mapping`` is a
+``MappingProxyType`` view, so ``record.metadata[key] = value`` raises
+``TypeError`` at runtime. Serializers convert the view back to a plain
+``dict`` for JSON output.
+"""
+
+
+def _normalize_id_tuple(values: tuple[str, ...]) -> tuple[str, ...]:
+    """Reject empty or whitespace-only identifiers inside a tuple field.
+
+    Trims each entry so consumers can rely on the stored value matching
+    the canonical id format used elsewhere in the projection vocabulary.
+    Raises ``TypeError`` on non-string entries and ``ValueError`` on
+    blank or whitespace-only entries.
+    """
+    normalized: list[str] = []
+    for index, value in enumerate(values):
+        if not isinstance(value, str):
+            msg = (
+                f"identifier at index {index} must be a string; "
+                f"got {type(value).__name__}"
+            )
+            raise TypeError(msg)
+        stripped = value.strip()
+        if not stripped:
+            msg = (
+                f"identifier at index {index} is empty or whitespace-only; "
+                "projections require usable IDs for cross-record references"
+            )
+            raise ValueError(msg)
+        normalized.append(stripped)
+    return tuple(normalized)
+
+
+IdentifierTuple = Annotated[tuple[str, ...], AfterValidator(_normalize_id_tuple)]
+"""Tuple-of-identifier field type that rejects blank or whitespace entries."""
 
 
 # ---------------------------------------------------------------------------
@@ -116,8 +227,9 @@ class ArtifactRecord(BaseModel, frozen=True):
         digest: Optional content digest (``algorithm:hex``) so artifacts
             can be addressed without holding their payload in memory.
         summary: Short, human-readable description suitable for CLI output.
-        metadata: Free-form metadata bag; consumers must treat it as
-            opaque and additive.
+        metadata: Free-form metadata bag, stored as a read-only
+            ``MappingProxyType`` view. Consumers must treat it as opaque
+            and additive; top-level mutation is blocked at runtime.
     """
 
     schema_version: int = Field(default=PROJECTION_SCHEMA_VERSION, ge=1)
@@ -129,7 +241,7 @@ class ArtifactRecord(BaseModel, frozen=True):
     size_bytes: int | None = Field(default=None, ge=0)
     digest: str | None = Field(default=None)
     summary: str = Field(default="")
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    metadata: FrozenMetadata = Field(default_factory=_empty_frozen_metadata)
 
     @field_validator("kind")
     @classmethod
@@ -162,13 +274,17 @@ class StepRecord(BaseModel, frozen=True):
         ok: Optional success indicator. ``True`` indicates success,
             ``False`` indicates failure, ``None`` means undetermined.
         source_event_ids: Identifiers of the source events that produced
-            this projection. Empty only when ``legacy_inferred`` is True.
+            this projection. Empty only when ``legacy_inferred`` is True;
+            blank or whitespace entries are rejected so projection
+            consumers can rely on every entry being a usable id.
         legacy_inferred: Marks the record as projected from legacy data
             that did not preserve enough metadata to link source events.
             Consumers may filter on this flag when computing audit views.
         artifact_ids: Identifiers of artifacts produced by the step. Each
-            value must match a :attr:`ArtifactRecord.artifact_id`.
-        metadata: Free-form metadata bag for additive consumer data.
+            value must match a :attr:`ArtifactRecord.artifact_id`; blank
+            entries are rejected.
+        metadata: Free-form metadata bag, stored as a read-only
+            ``MappingProxyType`` view.
     """
 
     schema_version: int = Field(default=PROJECTION_SCHEMA_VERSION, ge=1)
@@ -181,10 +297,24 @@ class StepRecord(BaseModel, frozen=True):
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     ended_at: datetime | None = Field(default=None)
     ok: bool | None = Field(default=None)
-    source_event_ids: tuple[str, ...] = Field(default_factory=tuple)
+    source_event_ids: IdentifierTuple = Field(default_factory=tuple)
     legacy_inferred: bool = Field(default=False)
-    artifact_ids: tuple[str, ...] = Field(default_factory=tuple)
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    artifact_ids: IdentifierTuple = Field(default_factory=tuple)
+    metadata: FrozenMetadata = Field(default_factory=_empty_frozen_metadata)
+
+    @field_validator("ac_id")
+    @classmethod
+    def _ac_id_not_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            msg = (
+                "StepRecord.ac_id must be None or a non-blank identifier; "
+                "blank strings break cross-record references"
+            )
+            raise ValueError(msg)
+        return stripped
 
     @model_validator(mode="after")
     def _enforce_source_event_invariant(self) -> StepRecord:
@@ -215,8 +345,9 @@ class StageRecord(BaseModel, frozen=True):
         started_at: When the stage entered.
         ended_at: When the stage exited (``None`` while active).
         step_ids: Step identifiers contained in this stage, in execution
-            order.
-        metadata: Free-form metadata bag for additive consumer data.
+            order. Blank entries are rejected.
+        metadata: Free-form metadata bag, stored as a read-only
+            ``MappingProxyType`` view.
     """
 
     schema_version: int = Field(default=PROJECTION_SCHEMA_VERSION, ge=1)
@@ -225,8 +356,8 @@ class StageRecord(BaseModel, frozen=True):
     kind: StageKind
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     ended_at: datetime | None = Field(default=None)
-    step_ids: tuple[str, ...] = Field(default_factory=tuple)
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    step_ids: IdentifierTuple = Field(default_factory=tuple)
+    metadata: FrozenMetadata = Field(default_factory=_empty_frozen_metadata)
 
     @model_validator(mode="after")
     def _validate_timestamps(self) -> StageRecord:
@@ -249,16 +380,17 @@ class VerdictRecord(BaseModel, frozen=True):
         run_id: Identifier of the owning :class:`RunRecord`.
         scope: ``"run"`` for run-level verdicts, ``"ac"`` for per-AC.
         ac_id: Acceptance-criterion identifier when ``scope == "ac"``;
-            must be ``None`` otherwise.
+            must be ``None`` otherwise. Blank strings are rejected.
         outcome: Terminal status from :class:`VerdictOutcome`.
         rationale: Short structured rationale string. Consumers should
             treat it as a stable summary, not as the full evidence body.
         evidence_event_ids: Identifiers of source events backing this
-            verdict.
+            verdict. Blank entries are rejected.
         evidence_artifact_ids: Identifiers of artifacts backing this
-            verdict.
+            verdict. Blank entries are rejected.
         recorded_at: When the verdict was recorded.
-        metadata: Free-form metadata bag for additive consumer data.
+        metadata: Free-form metadata bag, stored as a read-only
+            ``MappingProxyType`` view.
     """
 
     schema_version: int = Field(default=PROJECTION_SCHEMA_VERSION, ge=1)
@@ -268,10 +400,23 @@ class VerdictRecord(BaseModel, frozen=True):
     ac_id: str | None = Field(default=None)
     outcome: VerdictOutcome
     rationale: str = Field(default="")
-    evidence_event_ids: tuple[str, ...] = Field(default_factory=tuple)
-    evidence_artifact_ids: tuple[str, ...] = Field(default_factory=tuple)
+    evidence_event_ids: IdentifierTuple = Field(default_factory=tuple)
+    evidence_artifact_ids: IdentifierTuple = Field(default_factory=tuple)
     recorded_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    metadata: FrozenMetadata = Field(default_factory=_empty_frozen_metadata)
+
+    @field_validator("ac_id")
+    @classmethod
+    def _ac_id_not_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            msg = (
+                "VerdictRecord.ac_id must be None or a non-blank identifier"
+            )
+            raise ValueError(msg)
+        return stripped
 
     @model_validator(mode="after")
     def _validate_scope_and_ac(self) -> VerdictRecord:
@@ -297,10 +442,12 @@ class RunRecord(BaseModel, frozen=True):
         goal: Human-readable goal text.
         started_at: When the run began.
         ended_at: When the run finished (``None`` while still active).
-        stage_ids: Stage identifiers in execution order.
+        stage_ids: Stage identifiers in execution order. Blank entries
+            are rejected.
         verdict_id: Optional identifier of the run-level
             :class:`VerdictRecord`.
-        metadata: Free-form metadata bag for additive consumer data.
+        metadata: Free-form metadata bag, stored as a read-only
+            ``MappingProxyType`` view.
     """
 
     schema_version: int = Field(default=PROJECTION_SCHEMA_VERSION, ge=1)
@@ -309,9 +456,20 @@ class RunRecord(BaseModel, frozen=True):
     goal: str = Field(default="")
     started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     ended_at: datetime | None = Field(default=None)
-    stage_ids: tuple[str, ...] = Field(default_factory=tuple)
+    stage_ids: IdentifierTuple = Field(default_factory=tuple)
     verdict_id: str | None = Field(default=None)
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    metadata: FrozenMetadata = Field(default_factory=_empty_frozen_metadata)
+
+    @field_validator("verdict_id")
+    @classmethod
+    def _verdict_id_not_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            msg = "RunRecord.verdict_id must be None or a non-blank identifier"
+            raise ValueError(msg)
+        return stripped
 
     @model_validator(mode="after")
     def _validate_timestamps(self) -> RunRecord:
@@ -324,6 +482,8 @@ class RunRecord(BaseModel, frozen=True):
 __all__ = [
     "PROJECTION_SCHEMA_VERSION",
     "ArtifactRecord",
+    "FrozenMetadata",
+    "IdentifierTuple",
     "RunRecord",
     "StageKind",
     "StageRecord",
