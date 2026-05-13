@@ -700,6 +700,67 @@ class TestProjectionQueryHandler:
         assert result.is_err
         assert "does not belong" in str(result.error)
 
+    async def test_handle_narrows_session_metadata_to_requested_execution(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
+        """Combined selectors must not reuse older metadata from the same session."""
+        from ouroboros.events.base import BaseEvent
+
+        await memory_event_store.append(
+            BaseEvent(
+                id="evt_session_exec_a",
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id="orch_projection_multi",
+                data={
+                    "execution_id": "exec_projection_a",
+                    "seed_id": "seed_projection_a",
+                    "seed_goal": "Older execution",
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                id="evt_session_exec_b",
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id="orch_projection_multi",
+                data={
+                    "execution_id": "exec_projection_b",
+                    "seed_id": "seed_projection_b",
+                    "seed_goal": "Requested execution",
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                id="evt_exec_b_tool",
+                type="tool.call.started",
+                aggregate_type="execution",
+                aggregate_id="exec_projection_b",
+                data={
+                    "session_id": "orch_projection_multi",
+                    "execution_id": "exec_projection_b",
+                    "call_id": "b",
+                    "tool_name": "Bash",
+                },
+            )
+        )
+
+        handler = ProjectionQueryHandler(event_store=memory_event_store)
+        result = await handler.handle(
+            {
+                "session_id": "orch_projection_multi",
+                "execution_id": "exec_projection_b",
+            }
+        )
+
+        assert result.is_ok
+        assert result.value.meta["seed_id"] == "seed_projection_b"
+        assert result.value.meta["run"]["goal"] == "Requested execution"
+        assert result.value.meta["event_count"] == 2
+
     async def test_handle_limit_is_fail_closed_safety_cap(
         self,
         memory_event_store: EventStore,

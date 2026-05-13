@@ -209,7 +209,7 @@ async def _load_projection_events(
         return [
             event
             for event in events
-            if _is_session_metadata_event(event, session_id)
+            if _is_session_metadata_event(event, session_id, execution_id=execution_id)
             or _event_links_execution(event, execution_id)
         ]
     if execution_id is not None:
@@ -287,16 +287,25 @@ def _session_declares_execution(
     execution_id: str,
 ) -> bool:
     for event in events:
-        if not _is_session_metadata_event(event, session_id):
-            continue
-        value = event.data.get("execution_id") if isinstance(event.data, dict) else None
-        if isinstance(value, str) and value.strip() == execution_id:
+        if _is_session_metadata_event(event, session_id, execution_id=execution_id):
             return True
     return False
 
 
-def _is_session_metadata_event(event: BaseEvent, session_id: str) -> bool:
-    return event.aggregate_type == "session" and event.aggregate_id == session_id
+def _is_session_metadata_event(
+    event: BaseEvent,
+    session_id: str,
+    *,
+    execution_id: str | None = None,
+) -> bool:
+    if event.aggregate_type != "session" or event.aggregate_id != session_id:
+        return False
+    if execution_id is None:
+        return True
+    if not isinstance(event.data, dict):
+        return False
+    value = event.data.get("execution_id")
+    return isinstance(value, str) and value.strip() == execution_id
 
 
 def _event_links_execution(event: BaseEvent, execution_id: str) -> bool:
