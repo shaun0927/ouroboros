@@ -281,6 +281,21 @@ def test_request_rejects_payload_over_json_encoded_byte_limit() -> None:
         )
 
 
+def test_request_rejects_bool_schema_version() -> None:
+    with pytest.raises(ValueError, match="schema_version"):
+        HumanInputRequest(
+            request_id="hitl-1",
+            session_id="session-1",
+            created_by="plan",
+            kind=HumanInputKind.APPROVAL,
+            source=HumanInputSource.PLAN_APPROVAL,
+            risk_class=HumanInputRiskClass.MATERIAL_BRANCH,
+            question="Approve?",
+            resume_target="plan:approval",
+            schema_version=True,
+        )
+
+
 def test_human_input_response_serializes_matching_answer() -> None:
     response = HumanInputResponse(
         request_id="hitl-1",
@@ -299,6 +314,33 @@ def test_human_input_response_serializes_matching_answer() -> None:
     assert data["actor"] == "local-user"
     assert data["response_kind"] == "approval"
     assert data["approval_decision"] is True
+
+
+def test_human_input_response_serializes_cancel_and_timeout_answers() -> None:
+    cancel = HumanInputResponse(
+        request_id="hitl-1",
+        actor="local-user",
+        response_kind=HumanInputResponseKind.CANCEL,
+    )
+    timeout = HumanInputResponse(
+        request_id="hitl-2",
+        actor="runtime",
+        response_kind=HumanInputResponseKind.TIMEOUT,
+    )
+
+    assert cancel.to_event_data()["response_kind"] == "cancel"
+    assert timeout.to_event_data()["response_kind"] == "timeout"
+
+
+def test_response_rejects_bool_schema_version() -> None:
+    with pytest.raises(ValueError, match="schema_version"):
+        HumanInputResponse(
+            request_id="hitl-1",
+            actor="local-user",
+            response_kind=HumanInputResponseKind.TEXT,
+            text="continue",
+            schema_version=True,
+        )
 
 
 def test_response_is_frozen() -> None:

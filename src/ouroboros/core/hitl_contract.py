@@ -205,8 +205,8 @@ class HumanInputRequest:
     CANCELLED_EVENT_TYPE: ClassVar[str] = "hitl.cancelled"
 
     def __post_init__(self) -> None:
-        if self.schema_version < 1:
-            raise ValueError("HumanInputRequest schema_version must be >= 1")
+        if type(self.schema_version) is not int or self.schema_version < 1:
+            raise ValueError("HumanInputRequest schema_version must be a positive integer")
         if not isinstance(self.kind, HumanInputKind):
             raise TypeError("HumanInputRequest kind must be a HumanInputKind")
         if not isinstance(self.source, HumanInputSource):
@@ -305,8 +305,8 @@ class HumanInputResponse:
     ANSWERED_EVENT_TYPE: ClassVar[str] = "hitl.answered"
 
     def __post_init__(self) -> None:
-        if self.schema_version < 1:
-            raise ValueError("HumanInputResponse schema_version must be >= 1")
+        if type(self.schema_version) is not int or self.schema_version < 1:
+            raise ValueError("HumanInputResponse schema_version must be a positive integer")
         if not isinstance(self.response_kind, HumanInputResponseKind):
             raise TypeError("HumanInputResponse response_kind must be a HumanInputResponseKind")
         object.__setattr__(self, "request_id", _require_non_empty("request_id", self.request_id))

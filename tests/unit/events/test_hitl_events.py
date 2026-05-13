@@ -163,6 +163,32 @@ def test_answered_event_rejects_kind_mismatch() -> None:
         create_hitl_answered_event(_request(), response)
 
 
+def test_destructive_confirmation_answered_event_accepts_approval_response() -> None:
+    request = HumanInputRequest(
+        request_id="hitl-1",
+        session_id="session-1",
+        run_id="run-1",
+        created_by="plan",
+        kind=HumanInputKind.DESTRUCTIVE_CONFIRMATION,
+        source=HumanInputSource.PLAN_APPROVAL,
+        risk_class=HumanInputRiskClass.DESTRUCTIVE,
+        question="Delete the index?",
+        resume_target="ralplan:approval",
+    )
+    response = HumanInputResponse(
+        request_id="hitl-1",
+        actor="local-user",
+        response_kind=HumanInputResponseKind.APPROVAL,
+        approval_decision=True,
+    )
+
+    event = create_hitl_answered_event(request, response)
+
+    assert event.type == "hitl.answered"
+    assert event.aggregate_id == "hitl-1"
+    assert event.data["approval_decision"] is True
+
+
 def test_answered_event_rejects_selection_outside_request_options() -> None:
     request = HumanInputRequest(
         request_id="hitl-1",

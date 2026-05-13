@@ -33,7 +33,10 @@ def _validate_response_matches_request(
     if response.request_id != request.request_id:
         raise ValueError("HITL response request_id must match the originating request")
 
-    if request.kind is HumanInputKind.APPROVAL:
+    if request.kind in (
+        HumanInputKind.APPROVAL,
+        HumanInputKind.DESTRUCTIVE_CONFIRMATION,
+    ):
         if response.response_kind is not HumanInputResponseKind.APPROVAL:
             raise ValueError("approval HITL requests require an approval response")
         return
