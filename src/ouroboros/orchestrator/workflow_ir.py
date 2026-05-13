@@ -702,7 +702,7 @@ def _compute_nodes_that_can_reach_terminal(spec: WorkflowSpec) -> set[str]:
     terminal_ids = {
         node_id
         for node in spec.nodes
-        if node.kind is NodeKind.TERMINAL
+        if _enum_is(node.kind, NodeKind.TERMINAL)
         for node_id in (_canonical_identifier(node.node_id),)
         if node_id is not None
     }
