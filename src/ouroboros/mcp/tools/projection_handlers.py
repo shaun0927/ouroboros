@@ -25,6 +25,15 @@ from ouroboros.persistence.event_store import EventStore
 
 log = structlog.get_logger(__name__)
 
+_SESSION_TERMINAL_EVENT_TYPES = frozenset(
+    {
+        "orchestrator.session.cancelled",
+        "orchestrator.session.completed",
+        "orchestrator.session.failed",
+        "orchestrator.session.paused",
+    }
+)
+
 
 @dataclass
 class ProjectionQueryHandler:
@@ -220,6 +229,7 @@ async def _load_projection_events(
                         session_id,
                         execution_id=declared_execution_id,
                     )
+                    or _is_session_terminal_event(event, session_id)
                     or _event_links_execution(event, declared_execution_id)
                 ]
             return events
@@ -230,6 +240,7 @@ async def _load_projection_events(
             event
             for event in events
             if _is_session_metadata_event(event, session_id, execution_id=execution_id)
+            or _is_session_terminal_event(event, session_id)
             or _event_links_execution(event, execution_id)
         ]
     if execution_id is not None:
@@ -337,6 +348,14 @@ def _is_session_metadata_event(
         return False
     value = event.data.get("execution_id")
     return isinstance(value, str) and value.strip() == execution_id
+
+
+def _is_session_terminal_event(event: BaseEvent, session_id: str) -> bool:
+    return (
+        event.aggregate_type == "session"
+        and event.aggregate_id == session_id
+        and event.type in _SESSION_TERMINAL_EVENT_TYPES
+    )
 
 
 def _event_links_execution(event: BaseEvent, execution_id: str) -> bool:

@@ -655,7 +655,7 @@ class TestProjectionQueryHandler:
         memory_event_store: EventStore,
     ) -> None:
         """Session queries include execution events connected by execution_id."""
-        from datetime import UTC, datetime
+        from datetime import UTC, datetime, timedelta
 
         from ouroboros.events.base import BaseEvent
 
@@ -690,6 +690,16 @@ class TestProjectionQueryHandler:
         )
         await memory_event_store.append(
             BaseEvent(
+                id="evt_session_completed",
+                type="orchestrator.session.completed",
+                timestamp=t0 + timedelta(milliseconds=100),
+                aggregate_type="session",
+                aggregate_id="orch_projection_123",
+                data={"status": "completed"},
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
                 id="evt_session_foreign",
                 type="tool.call.started",
                 aggregate_type="lineage",
@@ -710,7 +720,8 @@ class TestProjectionQueryHandler:
         assert result.value.meta["session_id"] == "orch_projection_123"
         assert result.value.meta["seed_id"] == "seed_projection_456"
         assert result.value.meta["run"]["goal"] == "Project session"
-        assert result.value.meta["event_count"] == 2
+        assert result.value.meta["event_count"] == 3
+        assert result.value.meta["run"]["ended_at"] == "2026-01-01T00:00:00.100000Z"
         assert result.value.meta["steps"][0]["name"] == "Read"
 
     async def test_handle_rejects_mismatched_session_execution(
