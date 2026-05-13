@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from ouroboros.orchestrator.evidence_schema import EvidenceRecord, ValidationResult
+from ouroboros.orchestrator.evidence_schema import (
+    BlockerCode,
+    EvidenceBlocker,
+    EvidenceRecord,
+    ValidationResult,
+)
 from ouroboros.orchestrator.failure_taxonomy import (
     FailureClass,
     RecoveryAction,
@@ -75,11 +80,28 @@ class TestClassify:
         attempt = _attempt(evidence_error="not json")
         assert classify(attempt) == FailureClass.EVIDENCE_MISSING
 
+    def test_evidence_validation_error_maps_to_evidence_missing(self) -> None:
+        attempt = _attempt()
+        object.__setattr__(attempt, "validation_error", "blocker.reason missing")
+        assert classify(attempt) == FailureClass.EVIDENCE_MISSING
+
     def test_validation_failure_maps_to_evidence_missing(self) -> None:
         attempt = _attempt(
             validation=ValidationResult(ok=False, missing_fields=("tests_passed",), rejected_by=()),
         )
         assert classify(attempt) == FailureClass.EVIDENCE_MISSING
+
+    def test_typed_blocked_validation_maps_to_blocked(self) -> None:
+        attempt = _attempt(
+            validation=ValidationResult(
+                ok=False,
+                blocker=EvidenceBlocker(
+                    code=BlockerCode.MISSING_ACCESS,
+                    reason="repository token is missing",
+                ),
+            ),
+        )
+        assert classify(attempt) == FailureClass.BLOCKED
 
     def test_unattributed_failure_maps_to_stall(self) -> None:
         attempt = _attempt(

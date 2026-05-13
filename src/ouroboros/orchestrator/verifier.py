@@ -17,9 +17,10 @@ Loop semantics:
     2. The harness parses evidence (H2). If evidence cannot be extracted,
        that counts as a FAIL with a parser reason — verifier is NOT called.
     3. The harness validates the record against profile.evidence_schema.
-       If the record fails validation, the verifier is short-circuited
-       and the loop retries (the leaf would never satisfy the contract
-       even if the verifier said PASS).
+       If the record carries a typed blocker, the loop terminates as
+       BLOCKED without verifier invocation. Other validation failures
+       short-circuit the verifier and retry (the leaf would never satisfy
+       the contract even if the verifier said PASS).
     4. Otherwise the verifier is invoked. PASS → return. FAIL → retry,
        feeding the verdict reasons back to the executor.
     5. After `max_retries` exhausted FAILs, return the last attempt with
@@ -37,6 +38,7 @@ from typing import Protocol
 from ouroboros.orchestrator.evidence_schema import (
     EvidenceError,
     EvidenceRecord,
+    ProfileEvidenceConfigError,
     ValidationResult,
     extract_evidence,
     validate_evidence,
@@ -180,10 +182,15 @@ class Attempt:
     evidence_error: str | None
     validation: ValidationResult | None
     verdict: VerifierVerdict | None
+    validation_error: str | None = None
 
     @property
     def accepted(self) -> bool:
         return self.verdict is not None and self.verdict.passed
+
+    @property
+    def blocked(self) -> bool:
+        return self.validation is not None and self.validation.blocker is not None
 
 
 @dataclass(frozen=True)
@@ -205,6 +212,8 @@ def _failure_reasons(attempt: Attempt) -> tuple[str, ...]:
     """Collect surfaceable reasons from an attempt's failure mode."""
     if attempt.evidence_error is not None:
         return (f"evidence parse failed: {attempt.evidence_error}",)
+    if attempt.validation_error is not None:
+        return (f"evidence validation failed: {attempt.validation_error}",)
     out: list[str] = []
     if attempt.validation is not None and not attempt.validation.ok:
         out.extend(attempt.validation.reasons())
@@ -255,11 +264,22 @@ def run_with_verifier(
             evidence_error = str(exc)
 
         validation: ValidationResult | None = None
+        validation_error: str | None = None
         verdict: VerifierVerdict | None = None
 
         if record is not None:
-            validation = validate_evidence(profile, record)
-            if validation.ok:
+            try:
+                validation = validate_evidence(profile, record)
+            except ProfileEvidenceConfigError:
+                # Profile-authored rejected_if expressions are deterministic
+                # configuration bugs. Retrying the same leaf cannot repair the
+                # profile, so surface the error immediately instead of
+                # converting it into an evidence validation retry.
+                raise
+            except EvidenceError as exc:
+                validation_error = str(exc)
+                validation = None
+            if validation is not None and validation.ok:
                 try:
                     raw_verdict = verifier(
                         profile=profile,
@@ -310,6 +330,7 @@ def run_with_verifier(
             leaf_output=leaf_output,
             record=record,
             evidence_error=evidence_error,
+            validation_error=validation_error,
             validation=validation,
             verdict=verdict,
         )
@@ -317,6 +338,8 @@ def run_with_verifier(
 
         if attempt.accepted:
             return LoopResult(accepted=True, attempts=tuple(attempts))
+        if attempt.blocked:
+            return LoopResult(accepted=False, attempts=tuple(attempts))
 
         feedback = _failure_reasons(attempt)
 

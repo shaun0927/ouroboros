@@ -13,8 +13,9 @@ The evaluator for `rejected_if` is intentionally narrow. It supports only
 `<field> == <literal>` where literal is parsed first as JSON (so YAML/JSON
 authors can write `null`, `true`, `false`, numbers, strings, lists) and
 then as a Python literal as a fallback (so legacy `None`/`True`/`False`
-keep working). Any other expression shape raises EvidenceError so that
-profile authors get an immediate, loud failure instead of silent acceptance.
+keep working). Any other expression shape raises ProfileEvidenceConfigError
+so that profile authors get an immediate, loud failure instead of silent
+acceptance.
 
 Usage:
     from ouroboros.orchestrator.evidence_schema import (
@@ -31,6 +32,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass, field
+from enum import StrEnum
 import json
 import re
 from typing import Any
@@ -48,7 +50,36 @@ _DECODER = json.JSONDecoder()
 
 
 class EvidenceError(ValueError):
-    """Raised when evidence cannot be parsed or a profile expression is invalid."""
+    """Raised when leaf evidence cannot be parsed or validated."""
+
+
+class ProfileEvidenceConfigError(EvidenceError):
+    """Raised when a profile-authored evidence expression is invalid."""
+
+
+class BlockerCode(StrEnum):
+    """Machine-readable terminal blocker classes surfaced by leaf evidence."""
+
+    MISSING_AUTHORITY = "MISSING_AUTHORITY"
+    MISSING_ACCESS = "MISSING_ACCESS"
+    MISSING_TOOL = "MISSING_TOOL"
+    MISSING_CONFIGURATION = "MISSING_CONFIGURATION"
+    UNSAFE_SCOPE_CHANGE = "UNSAFE_SCOPE_CHANGE"
+    EXTERNAL_DEPENDENCY = "EXTERNAL_DEPENDENCY"
+
+
+@dataclass(frozen=True)
+class EvidenceBlocker:
+    """Typed precondition that prevents the leaf from completing an AC."""
+
+    code: BlockerCode
+    reason: str
+    required_by: str = ""
+
+    def summary(self) -> str:
+        detail = f": {self.reason}" if self.reason else ""
+        suffix = f" (required_by: {self.required_by})" if self.required_by else ""
+        return f"blocked[{self.code.value}]{detail}{suffix}"
 
 
 @dataclass(frozen=True)
@@ -60,15 +91,20 @@ class ValidationResult:
         missing_fields: Required fields the record did not provide.
         rejected_by: rejected_if expressions that evaluated True against
             the record (verbatim, in profile order).
+        blocker: typed terminal blocker if the leaf could not satisfy a
+            legitimate precondition. Blockers are not missing evidence.
     """
 
     ok: bool
     missing_fields: tuple[str, ...] = ()
     rejected_by: tuple[str, ...] = ()
+    blocker: EvidenceBlocker | None = None
 
     def reasons(self) -> tuple[str, ...]:
         """Human-readable, harness-friendly summary of all failure reasons."""
         out: list[str] = []
+        if self.blocker is not None:
+            out.append(self.blocker.summary())
         if self.missing_fields:
             out.append("missing required fields: " + ", ".join(self.missing_fields))
         out.extend(f"rejected by {expr!r}" for expr in self.rejected_by)
@@ -169,14 +205,61 @@ def _parse_literal(raw: str) -> Any:
         return ast.literal_eval(raw)
     except (ValueError, SyntaxError) as exc:
         msg = f"Unsupported literal in rejected_if right-hand side: {raw!r} ({exc})"
+        raise ProfileEvidenceConfigError(msg) from exc
+
+
+def _parse_blocker(data: dict[str, Any]) -> EvidenceBlocker | None:
+    """Return a typed blocker from a blocked evidence record, if present."""
+    status = data.get("status")
+    if status not in {"blocked", "BLOCKED"}:
+        return None
+
+    raw_blocker = data.get("blocker")
+    if raw_blocker is None:
+        # Preserve compatibility with ordinary evidence schemas that use
+        # status == "blocked" as a domain field or rejected_if literal.
+        # A terminal blocker is typed only when the blocker object is present.
+        return None
+    if not isinstance(raw_blocker, dict):
+        msg = "Blocked evidence blocker must be an object."
+        raise EvidenceError(msg)
+
+    raw_code = raw_blocker.get("code")
+    if not isinstance(raw_code, str):
+        msg = "Blocked evidence blocker.code must be a string."
+        raise EvidenceError(msg)
+    try:
+        code = BlockerCode(raw_code)
+    except ValueError as exc:
+        valid = ", ".join(item.value for item in BlockerCode)
+        msg = f"Unknown blocker.code {raw_code!r}; expected one of: {valid}"
         raise EvidenceError(msg) from exc
+
+    raw_reason = raw_blocker.get("reason")
+    if not isinstance(raw_reason, str) or not raw_reason.strip():
+        msg = "Blocked evidence blocker.reason must be a non-empty string."
+        raise EvidenceError(msg)
+
+    raw_required_by = raw_blocker.get("required_by", "")
+    if raw_required_by is None:
+        raw_required_by = ""
+    if not isinstance(raw_required_by, str):
+        msg = "Blocked evidence blocker.required_by must be a string when present."
+        raise EvidenceError(msg)
+
+    return EvidenceBlocker(
+        code=code,
+        reason=raw_reason.strip(),
+        required_by=raw_required_by.strip(),
+    )
 
 
 def _evaluate_rejection(expr: str, data: dict[str, Any]) -> bool:
     """Evaluate a single rejected_if expression.
 
-    Grammar: `<field> == <literal>` only. Anything else raises EvidenceError
-    so profile authors notice immediately instead of silently passing.
+    Grammar: `<field> == <literal>` only. Anything else raises
+    ProfileEvidenceConfigError so profile authors notice immediately instead
+    of silently passing.
     """
     match = _EXPR_RE.match(expr)
     if not match:
@@ -184,7 +267,7 @@ def _evaluate_rejection(expr: str, data: dict[str, Any]) -> bool:
             f"Unsupported rejected_if expression: {expr!r}. "
             "Only '<field> == <literal>' is currently supported."
         )
-        raise EvidenceError(msg)
+        raise ProfileEvidenceConfigError(msg)
     field_name = match.group("field")
     literal = _parse_literal(match.group("lit"))
     # Missing fields evaluate as None for comparison purposes — that way
@@ -205,13 +288,18 @@ def validate_evidence(profile: ExecutionProfile, record: EvidenceRecord) -> Vali
         and no rejected_if expression matched.
 
     Raises:
-        EvidenceError: If any rejected_if expression has unsupported syntax.
-            (Profile bugs should be loud, not silent.)
+        EvidenceError: If leaf evidence is malformed.
+        ProfileEvidenceConfigError: If any rejected_if expression has unsupported
+            syntax. (Profile bugs should be loud, not silent.)
     """
     schema = profile.evidence_schema
 
-    missing = tuple(name for name in schema.required if name not in record.data)
     rejected = tuple(expr for expr in schema.rejected_if if _evaluate_rejection(expr, record.data))
+    blocker = _parse_blocker(record.data)
+    if blocker is not None:
+        return ValidationResult(ok=False, blocker=blocker)
+
+    missing = tuple(name for name in schema.required if name not in record.data)
 
     return ValidationResult(
         ok=not missing and not rejected,
@@ -221,7 +309,10 @@ def validate_evidence(profile: ExecutionProfile, record: EvidenceRecord) -> Vali
 
 
 __all__ = [
+    "BlockerCode",
+    "EvidenceBlocker",
     "EvidenceError",
+    "ProfileEvidenceConfigError",
     "EvidenceRecord",
     "ValidationResult",
     "extract_evidence",

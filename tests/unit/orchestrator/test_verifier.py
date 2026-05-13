@@ -7,8 +7,8 @@ import json
 
 import pytest
 
-from ouroboros.orchestrator.evidence_schema import EvidenceRecord
-from ouroboros.orchestrator.profile_loader import ExecutionProfile, load_profile
+from ouroboros.orchestrator.evidence_schema import EvidenceRecord, ProfileEvidenceConfigError
+from ouroboros.orchestrator.profile_loader import EvidenceSchema, ExecutionProfile, load_profile
 from ouroboros.orchestrator.verifier import (
     DEFAULT_MAX_RETRIES,
     LoopResult,
@@ -422,6 +422,36 @@ class TestEvidenceShortCircuit:
         # Feedback to the retry should mention the parse failure.
         assert any("evidence parse failed" in line for line in executor.feedbacks[1])
 
+    def test_blocked_evidence_stops_without_retry_or_verifier(
+        self, code_profile: ExecutionProfile
+    ) -> None:
+        blocked = json.dumps(
+            {
+                "status": "blocked",
+                "blocker": {
+                    "code": "MISSING_CONFIGURATION",
+                    "reason": "DATABASE_URL is required to verify this AC",
+                },
+            }
+        )
+        executor = ScriptedExecutor(outputs=[blocked, _code_evidence()])
+        verifier = ScriptedVerifier(verdicts=[VerifierVerdict(passed=True)])
+
+        result = run_with_verifier(
+            executor=executor,
+            verifier=verifier,
+            profile=code_profile,
+            ac="x",
+        )
+
+        assert result.accepted is False
+        assert len(result.attempts) == 1
+        assert result.final.blocked is True
+        assert result.final.validation is not None
+        assert result.final.validation.blocker is not None
+        assert verifier.calls == 0
+        assert len(executor.feedbacks) == 1
+
     def test_evidence_validation_fail_skips_verifier(self, code_profile: ExecutionProfile) -> None:
         empty_tests = _code_evidence(tests_passed=[])
         executor = ScriptedExecutor(outputs=[empty_tests, _code_evidence()])
@@ -438,6 +468,56 @@ class TestEvidenceShortCircuit:
         assert first.validation is not None and not first.validation.ok
         assert first.verdict is None
         assert any("tests_passed == []" in line for line in executor.feedbacks[1])
+
+    def test_malformed_blocker_validation_retries_without_crashing(
+        self, code_profile: ExecutionProfile
+    ) -> None:
+        malformed_blocker = json.dumps({"status": "blocked", "blocker": {"code": "MISSING_TOOL"}})
+        executor = ScriptedExecutor(outputs=[malformed_blocker, _code_evidence()])
+        verifier = ScriptedVerifier(verdicts=[VerifierVerdict(passed=True)])
+
+        result = run_with_verifier(
+            executor=executor,
+            verifier=verifier,
+            profile=code_profile,
+            ac="x",
+        )
+
+        assert result.accepted is True
+        assert verifier.calls == 1
+        first = result.attempts[0]
+        assert first.record is not None
+        assert first.validation_error is not None
+        assert "blocker.reason" in first.validation_error
+        assert first.validation is None
+        assert first.verdict is None
+        assert any("evidence validation failed" in line for line in executor.feedbacks[1])
+
+    def test_malformed_profile_rejected_if_propagates_without_retry(
+        self, code_profile: ExecutionProfile
+    ) -> None:
+        broken_profile = code_profile.model_copy(
+            update={
+                "evidence_schema": EvidenceSchema(
+                    required=(),
+                    rejected_if=("len(tests_passed) < 1",),
+                )
+            }
+        )
+        executor = ScriptedExecutor(outputs=[_code_evidence(), _code_evidence()])
+        verifier = ScriptedVerifier(verdicts=[VerifierVerdict(passed=True)])
+
+        with pytest.raises(ProfileEvidenceConfigError, match="Unsupported rejected_if"):
+            run_with_verifier(
+                executor=executor,
+                verifier=verifier,
+                profile=broken_profile,
+                ac="x",
+            )
+
+        # A malformed profile cannot be fixed by asking the leaf to retry.
+        assert len(executor.feedbacks) == 1
+        assert verifier.calls == 0
 
     def test_evidence_fail_exhausts_budget_without_verifier(
         self, code_profile: ExecutionProfile
