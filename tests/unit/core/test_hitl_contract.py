@@ -63,6 +63,37 @@ def test_select_request_requires_options() -> None:
         )
 
 
+def test_select_request_rejects_string_options_iterable() -> None:
+    with pytest.raises(TypeError, match="options"):
+        HumanInputRequest(
+            request_id="hitl-1",
+            session_id="session-1",
+            created_by="plan",
+            kind=HumanInputKind.SINGLE_SELECT,
+            source=HumanInputSource.PLAN_APPROVAL,
+            risk_class=HumanInputRiskClass.MATERIAL_BRANCH,
+            question="Pick one",
+            resume_target="plan:approval",
+            options="yes",  # type: ignore[arg-type]
+        )
+
+
+def test_request_rejects_non_integer_timeout_seconds() -> None:
+    for timeout_seconds in (1.5, True):
+        with pytest.raises(TypeError, match="timeout_seconds"):
+            HumanInputRequest(
+                request_id="hitl-1",
+                session_id="session-1",
+                created_by="plan",
+                kind=HumanInputKind.APPROVAL,
+                source=HumanInputSource.PLAN_APPROVAL,
+                risk_class=HumanInputRiskClass.MATERIAL_BRANCH,
+                question="Approve?",
+                resume_target="plan:approval",
+                timeout_seconds=timeout_seconds,  # type: ignore[arg-type]
+            )
+
+
 def test_request_rejects_secret_like_persisted_payload() -> None:
     with pytest.raises(ValueError, match="secret-like"):
         HumanInputRequest(
@@ -256,6 +287,17 @@ def test_selection_response_requires_selected_values_and_forbids_other_answer_co
             response_kind=HumanInputResponseKind.SELECTION,
             selected_values=("yes",),
             text="yes",
+        )
+
+
+def test_selection_response_rejects_string_selected_values_iterable() -> None:
+    with pytest.raises(TypeError, match="selected_values"):
+        HumanInputResponse(
+            request_id="hitl-1",
+            actor="local-user",
+            session_id="session-1",
+            response_kind=HumanInputResponseKind.SELECTION,
+            selected_values="approve",  # type: ignore[arg-type]
         )
 
 

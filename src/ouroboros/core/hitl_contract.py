@@ -69,6 +69,17 @@ def _require_non_empty(name: str, value: str) -> str:
     return normalized
 
 
+def _normalize_string_tuple(name: str, value: Any) -> tuple[str, ...]:
+    if isinstance(value, str) or not isinstance(value, tuple | list):
+        raise TypeError(f"HumanInput {name} must be a tuple or list of strings")
+    normalized: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise TypeError(f"HumanInput {name} entries must be strings")
+        normalized.append(_require_non_empty(name, item))
+    return tuple(normalized)
+
+
 def _contains_secret_marker(value: str) -> bool:
     lowered = value.lower()
     return any(marker in lowered for marker in _SECRET_MARKERS)
@@ -180,16 +191,17 @@ class HumanInputRequest:
             value = getattr(self, field_name)
             if value is not None:
                 object.__setattr__(self, field_name, _require_non_empty(field_name, value))
-        if self.timeout_seconds is not None and self.timeout_seconds < 1:
-            raise ValueError("HumanInputRequest timeout_seconds must be >= 1 when provided")
+        if self.timeout_seconds is not None:
+            if type(self.timeout_seconds) is not int:
+                raise TypeError("HumanInputRequest timeout_seconds must be an int")
+            if self.timeout_seconds < 1:
+                raise ValueError("HumanInputRequest timeout_seconds must be >= 1 when provided")
         if (
             self.kind in {HumanInputKind.SINGLE_SELECT, HumanInputKind.MULTI_SELECT}
             and not self.options
         ):
             raise ValueError("select HumanInputRequest requires at least one option")
-        if any(not option.strip() for option in self.options):
-            raise ValueError("HumanInputRequest options must be non-empty")
-        object.__setattr__(self, "options", tuple(self.options))
+        object.__setattr__(self, "options", _normalize_string_tuple("options", self.options))
         object.__setattr__(self, "payload", _ensure_json_safe_payload("payload", self.payload))
 
     @property
@@ -260,13 +272,15 @@ class HumanInputResponse:
             value = getattr(self, field_name)
             if value is not None:
                 object.__setattr__(self, field_name, _require_non_empty(field_name, value))
-        if any(not value.strip() for value in self.selected_values):
-            raise ValueError("HumanInputResponse selected_values must be non-empty")
+        object.__setattr__(
+            self,
+            "selected_values",
+            _normalize_string_tuple("selected_values", self.selected_values),
+        )
         if self.run_id is None and self.invocation_id is None and self.session_id is None:
             raise ValueError(
                 "HumanInputResponse requires session_id, run_id, or invocation_id for request correlation"
             )
-        object.__setattr__(self, "selected_values", tuple(self.selected_values))
         self._validate_response_content()
         object.__setattr__(self, "payload", _ensure_json_safe_payload("payload", self.payload))
 
