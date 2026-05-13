@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from ouroboros.core.hitl_contract import HumanInputRequest, HumanInputResponse
+from ouroboros.core.hitl_contract import (
+    HumanInputKind,
+    HumanInputRequest,
+    HumanInputResponse,
+    HumanInputResponseKind,
+)
 from ouroboros.events.base import BaseEvent
 
 
@@ -22,7 +27,41 @@ def create_hitl_requested_event(request: HumanInputRequest) -> BaseEvent:
     )
 
 
-def create_hitl_answered_event(response: HumanInputResponse) -> BaseEvent:
+def _validate_response_matches_request(
+    request: HumanInputRequest, response: HumanInputResponse
+) -> None:
+    if response.request_id != request.request_id:
+        raise ValueError("HITL response request_id must match the originating request")
+
+    if request.kind is HumanInputKind.APPROVAL:
+        if response.response_kind is not HumanInputResponseKind.APPROVAL:
+            raise ValueError("approval HITL requests require an approval response")
+        return
+
+    if request.kind is HumanInputKind.FREE_TEXT:
+        if response.response_kind is not HumanInputResponseKind.TEXT:
+            raise ValueError("free-text HITL requests require a text response")
+        return
+
+    if request.kind in (HumanInputKind.SINGLE_SELECT, HumanInputKind.MULTI_SELECT):
+        if response.response_kind is not HumanInputResponseKind.SELECTION:
+            raise ValueError("select HITL requests require a selection response")
+        options = set(request.options or ())
+        selected_values = response.selected_values or ()
+        invalid_values = [value for value in selected_values if value not in options]
+        if invalid_values:
+            raise ValueError("HITL response selected_values must be present in request options")
+        if request.kind is HumanInputKind.SINGLE_SELECT and len(selected_values) != 1:
+            raise ValueError("single-select HITL requests require exactly one selected value")
+        return
+
+    raise ValueError(f"unsupported HITL request kind: {request.kind}")
+
+
+def create_hitl_answered_event(
+    request: HumanInputRequest, response: HumanInputResponse
+) -> BaseEvent:
+    _validate_response_matches_request(request, response)
     return BaseEvent(
         type=HumanInputResponse.ANSWERED_EVENT_TYPE,
         aggregate_type="hitl",
@@ -32,6 +71,8 @@ def create_hitl_answered_event(response: HumanInputResponse) -> BaseEvent:
 
 
 def create_hitl_timed_out_event(request: HumanInputRequest, *, reason: str) -> BaseEvent:
+    if request.timeout_seconds is None:
+        raise ValueError("HITL timed_out events require a request timeout_seconds value")
     data = request.to_event_data()
     data["reason"] = _require_non_empty_event_field("reason", reason)
     return BaseEvent(

@@ -31,6 +31,7 @@ def _request() -> HumanInputRequest:
         risk_class=HumanInputRiskClass.MATERIAL_BRANCH,
         question="Approve the plan?",
         resume_target="ralplan:approval",
+        timeout_seconds=60,
     )
 
 
@@ -74,7 +75,7 @@ def test_answered_event_preserves_request_correlation() -> None:
         approval_decision=True,
     )
 
-    event = create_hitl_answered_event(response)
+    event = create_hitl_answered_event(_request(), response)
 
     assert event.type == "hitl.answered"
     assert event.aggregate_id == "hitl-1"
@@ -119,6 +120,95 @@ def test_timeout_and_cancel_events_reuse_request_payload() -> None:
 def test_timeout_event_rejects_empty_reason() -> None:
     with pytest.raises(ValueError, match="reason"):
         create_hitl_timed_out_event(_request(), reason="   ")
+
+
+def test_timeout_event_rejects_request_without_timeout() -> None:
+    request = HumanInputRequest(
+        request_id="hitl-1",
+        session_id="session-1",
+        run_id="run-1",
+        created_by="plan",
+        kind=HumanInputKind.APPROVAL,
+        source=HumanInputSource.PLAN_APPROVAL,
+        risk_class=HumanInputRiskClass.MATERIAL_BRANCH,
+        question="Approve the plan?",
+        resume_target="ralplan:approval",
+    )
+
+    with pytest.raises(ValueError, match="timeout_seconds"):
+        create_hitl_timed_out_event(request, reason="deadline elapsed")
+
+
+def test_answered_event_rejects_mismatched_request_id() -> None:
+    response = HumanInputResponse(
+        request_id="other-hitl",
+        actor="local-user",
+        response_kind=HumanInputResponseKind.APPROVAL,
+        approval_decision=True,
+    )
+
+    with pytest.raises(ValueError, match="request_id"):
+        create_hitl_answered_event(_request(), response)
+
+
+def test_answered_event_rejects_kind_mismatch() -> None:
+    response = HumanInputResponse(
+        request_id="hitl-1",
+        actor="local-user",
+        response_kind=HumanInputResponseKind.TEXT,
+        text="approved",
+    )
+
+    with pytest.raises(ValueError, match="approval"):
+        create_hitl_answered_event(_request(), response)
+
+
+def test_answered_event_rejects_selection_outside_request_options() -> None:
+    request = HumanInputRequest(
+        request_id="hitl-1",
+        session_id="session-1",
+        run_id="run-1",
+        created_by="plan",
+        kind=HumanInputKind.SINGLE_SELECT,
+        source=HumanInputSource.PLAN_APPROVAL,
+        risk_class=HumanInputRiskClass.MATERIAL_BRANCH,
+        question="Pick one",
+        resume_target="ralplan:approval",
+        options=("Approve", "Reject"),
+    )
+    response = HumanInputResponse(
+        request_id="hitl-1",
+        actor="local-user",
+        response_kind=HumanInputResponseKind.SELECTION,
+        selected_values=("Escalate",),
+    )
+
+    with pytest.raises(ValueError, match="selected_values"):
+        create_hitl_answered_event(request, response)
+
+
+def test_answered_event_rejects_multiple_single_select_values() -> None:
+    request = HumanInputRequest(
+        request_id="hitl-1",
+        session_id="session-1",
+        run_id="run-1",
+        created_by="plan",
+        kind=HumanInputKind.SINGLE_SELECT,
+        source=HumanInputSource.PLAN_APPROVAL,
+        risk_class=HumanInputRiskClass.MATERIAL_BRANCH,
+        question="Pick one",
+        resume_target="ralplan:approval",
+        options=("Approve", "Reject"),
+    )
+    response = HumanInputResponse(
+        request_id="hitl-1",
+        actor="local-user",
+        response_kind=HumanInputResponseKind.SELECTION,
+        selected_values=("Approve", "Reject"),
+    )
+
+    with pytest.raises(ValueError, match="single-select"):
+        create_hitl_answered_event(request, response)
 
 
 def test_cancel_event_rejects_empty_reason() -> None:
