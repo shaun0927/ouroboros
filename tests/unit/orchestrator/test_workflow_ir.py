@@ -147,6 +147,36 @@ class TestWorkflowNode:
         assert node.evidence_schema_ref == "evidence://agent_default"
         assert node.input_schema_ref == "input://agent_default"
 
+    def test_agent_schema_refs_are_trimmed(self) -> None:
+        node = WorkflowNode(
+            node_id="node_agent",
+            kind=NodeKind.TASK,
+            owner=NodeOwner.AGENT,
+            evidence_schema_ref="  evidence://agent_default  ",
+            input_schema_ref="  input://agent_default  ",
+        )
+        assert node.evidence_schema_ref == "evidence://agent_default"
+        assert node.input_schema_ref == "input://agent_default"
+
+    def test_agent_rejects_blank_input_schema_ref(self) -> None:
+        with pytest.raises(ValidationError):
+            WorkflowNode(
+                node_id="node_agent",
+                kind=NodeKind.TASK,
+                owner=NodeOwner.AGENT,
+                evidence_schema_ref="evidence://agent_default",
+                input_schema_ref="   ",
+            )
+
+    def test_verifier_rejects_blank_evidence_schema_ref(self) -> None:
+        with pytest.raises(ValidationError):
+            WorkflowNode(
+                node_id="node_verifier",
+                kind=NodeKind.TASK,
+                owner=NodeOwner.VERIFIER,
+                evidence_schema_ref="   ",
+            )
+
     def test_harness_owner_omits_evidence_ok(self) -> None:
         node = WorkflowNode(
             node_id="node_h",
@@ -252,7 +282,7 @@ class TestValidateWorkflow:
         assert result.ok is False
         assert any(e.code == "unreachable_terminal" for e in result.errors)
 
-    def test_isolated_node_warning(self) -> None:
+    def test_isolated_node_without_terminal_path_is_error_and_warning(self) -> None:
         spec = WorkflowSpec(
             source=SourceKind.SYNTHETIC,
             nodes=(
@@ -263,8 +293,27 @@ class TestValidateWorkflow:
             edges=(_edge("a", "end"),),
         )
         result = validate_workflow(spec)
-        assert result.ok is True  # warning, not error
+        assert result.ok is False
+        assert any(
+            e.code == "unreachable_terminal" and e.node_id == "orphan" for e in result.errors
+        )
         assert any(w.code == "isolated_node" for w in result.warnings)
+
+    def test_missing_terminal_path_for_non_terminal_branch(self) -> None:
+        spec = WorkflowSpec(
+            source=SourceKind.SYNTHETIC,
+            nodes=(
+                _make_task("a"),
+                _make_task("b"),
+                _make_task("c"),
+                _make_terminal("end"),
+            ),
+            edges=(_edge("a", "b"), _edge("c", "end")),
+        )
+        result = validate_workflow(spec)
+        assert result.ok is False
+        assert any(e.code == "unreachable_terminal" and e.node_id == "a" for e in result.errors)
+        assert any(e.code == "unreachable_terminal" and e.node_id == "b" for e in result.errors)
 
     def test_missing_input_schema_detected_by_validator(self) -> None:
         # Construct an agent node with evidence but no input via
@@ -296,6 +345,34 @@ class TestValidateWorkflow:
         result = validate_workflow(spec)
         assert result.ok is False
         assert any(e.code == "missing_input_schema" for e in result.errors)
+
+    def test_blank_schema_refs_detected_by_validator(self) -> None:
+        bad_node = WorkflowNode.model_construct(
+            schema_version=WORKFLOW_IR_SCHEMA_VERSION,
+            node_id="agent_blank_refs",
+            kind=NodeKind.TASK,
+            owner=NodeOwner.AGENT,
+            evidence_schema_ref="   ",
+            input_schema_ref="   ",
+            capability_envelope=(),
+            runtime_hints={},
+            metadata={},
+            name="",
+        )
+        end_node = _make_terminal("end")
+        spec = WorkflowSpec.model_construct(
+            schema_version=WORKFLOW_IR_SCHEMA_VERSION,
+            spec_id="wfspec_test",
+            source=SourceKind.SYNTHETIC,
+            source_ref=None,
+            nodes=(bad_node, end_node),
+            edges=(_edge("agent_blank_refs", "end"),),
+            metadata={},
+        )
+        result = validate_workflow(spec)
+        codes = [e.code for e in result.errors]
+        assert "missing_evidence_schema" in codes
+        assert "missing_input_schema" in codes
 
     def test_missing_evidence_schema_detected_by_validator(self) -> None:
         # Build a spec that bypasses Pydantic re-validation (mirrors a future

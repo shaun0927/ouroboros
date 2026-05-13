@@ -128,6 +128,26 @@ CapabilityTuple = Annotated[tuple[str, ...], AfterValidator(_normalize_capabilit
 """Capability-envelope tuple type that rejects blank entries."""
 
 
+def _normalize_schema_ref(value: str) -> str:
+    """Trim and reject blank schema-reference strings."""
+    if not isinstance(value, str):
+        msg = f"schema reference must be a string; got {type(value).__name__}"
+        raise TypeError(msg)
+    stripped = value.strip()
+    if not stripped:
+        msg = "schema reference must be non-blank"
+        raise ValueError(msg)
+    return stripped
+
+
+def _has_schema_ref(value: str | None) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+SchemaRef = Annotated[str, AfterValidator(_normalize_schema_ref)]
+"""Schema-reference field type that rejects blank/whitespace-only refs."""
+
+
 # ---------------------------------------------------------------------------
 # Enumerations
 # ---------------------------------------------------------------------------
@@ -216,8 +236,8 @@ class WorkflowNode(BaseModel, frozen=True):
     kind: NodeKind
     owner: NodeOwner
     name: str = Field(default="", description="Short human-readable label")
-    input_schema_ref: str | None = Field(default=None)
-    evidence_schema_ref: str | None = Field(default=None)
+    input_schema_ref: SchemaRef | None = Field(default=None)
+    evidence_schema_ref: SchemaRef | None = Field(default=None)
     capability_envelope: CapabilityTuple = Field(default_factory=tuple)
     runtime_hints: FrozenMapping = Field(default_factory=_empty_frozen_mapping)
     metadata: FrozenMapping = Field(default_factory=_empty_frozen_mapping)
@@ -228,7 +248,7 @@ class WorkflowNode(BaseModel, frozen=True):
         # Harness and human-gate nodes are exempt because they do not emit
         # evidence-bearing artifacts in the fat-harness loop.
         evidence_owners = {NodeOwner.AGENT, NodeOwner.PLUGIN, NodeOwner.VERIFIER}
-        if self.owner in evidence_owners and not self.evidence_schema_ref:
+        if self.owner in evidence_owners and not _has_schema_ref(self.evidence_schema_ref):
             msg = (
                 f"WorkflowNode(owner={self.owner.value}) must declare "
                 "evidence_schema_ref; see #956 validation rule "
@@ -241,7 +261,7 @@ class WorkflowNode(BaseModel, frozen=True):
         # the evidence manifest itself rather than a free-form input.
         # Harness and human-gate nodes do not take a typed input.
         input_owners = {NodeOwner.AGENT, NodeOwner.PLUGIN}
-        if self.owner in input_owners and not self.input_schema_ref:
+        if self.owner in input_owners and not _has_schema_ref(self.input_schema_ref):
             msg = (
                 f"WorkflowNode(owner={self.owner.value}) must declare "
                 "input_schema_ref; the harness must validate the payload "
@@ -415,7 +435,7 @@ def validate_workflow(spec: WorkflowSpec) -> WorkflowValidationResult:
     evidence_owners = {NodeOwner.AGENT, NodeOwner.PLUGIN, NodeOwner.VERIFIER}
     input_owners = {NodeOwner.AGENT, NodeOwner.PLUGIN}
     for node in spec.nodes:
-        if node.owner in evidence_owners and not node.evidence_schema_ref:
+        if node.owner in evidence_owners and not _has_schema_ref(node.evidence_schema_ref):
             errors.append(
                 WorkflowValidationError(
                     code="missing_evidence_schema",
@@ -426,7 +446,7 @@ def validate_workflow(spec: WorkflowSpec) -> WorkflowValidationResult:
                     node_id=node.node_id,
                 )
             )
-        if node.owner in input_owners and not node.input_schema_ref:
+        if node.owner in input_owners and not _has_schema_ref(node.input_schema_ref):
             errors.append(
                 WorkflowValidationError(
                     code="missing_input_schema",
@@ -486,6 +506,21 @@ def validate_workflow(spec: WorkflowSpec) -> WorkflowValidationResult:
                             "from any non-terminal node."
                         ),
                         node_id=terminal.node_id,
+                    )
+                )
+        terminal_reachable_from = _compute_nodes_that_can_reach_terminal(spec)
+        for node in spec.nodes:
+            if node.kind is NodeKind.TERMINAL:
+                continue
+            if node.node_id not in terminal_reachable_from:
+                errors.append(
+                    WorkflowValidationError(
+                        code="unreachable_terminal",
+                        message=(
+                            f"Node '{node.node_id}' has no path to a terminal node; "
+                            "all executable branches must be able to terminate."
+                        ),
+                        node_id=node.node_id,
                     )
                 )
 
@@ -550,6 +585,26 @@ def _compute_reachable(spec: WorkflowSpec) -> set[str]:
     return visited
 
 
+def _compute_nodes_that_can_reach_terminal(spec: WorkflowSpec) -> set[str]:
+    """Return nodes with at least one directed path to a terminal node."""
+    terminal_ids = {node.node_id for node in spec.nodes if node.kind is NodeKind.TERMINAL}
+    reverse_adjacency: dict[str, list[str]] = {}
+    for edge in spec.edges:
+        reverse_adjacency.setdefault(edge.target, []).append(edge.source)
+
+    visited: set[str] = set()
+    stack = list(terminal_ids)
+    while stack:
+        current = stack.pop()
+        if current in visited:
+            continue
+        visited.add(current)
+        for predecessor in reverse_adjacency.get(current, ()):  # pragma: no branch
+            if predecessor not in visited:
+                stack.append(predecessor)
+    return visited
+
+
 __all__ = [
     "WORKFLOW_IR_SCHEMA_VERSION",
     "CapabilityTuple",
@@ -557,6 +612,7 @@ __all__ = [
     "FrozenMapping",
     "NodeKind",
     "NodeOwner",
+    "SchemaRef",
     "SourceKind",
     "WorkflowEdge",
     "WorkflowNode",
