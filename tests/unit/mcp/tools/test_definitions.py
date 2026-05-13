@@ -786,6 +786,19 @@ class TestProjectionQueryHandler:
                 },
             )
         )
+        await memory_event_store.append(
+            BaseEvent(
+                id="evt_exec_b_child",
+                type="tool.call.started",
+                aggregate_type="execution",
+                aggregate_id="exec_projection_b_child",
+                data={
+                    "parent_execution_id": "exec_projection_b",
+                    "call_id": "b_child",
+                    "tool_name": "Read",
+                },
+            )
+        )
 
         handler = ProjectionQueryHandler(event_store=memory_event_store)
         result = await handler.handle(
@@ -798,7 +811,8 @@ class TestProjectionQueryHandler:
         assert result.is_ok
         assert result.value.meta["seed_id"] == "seed_projection_b"
         assert result.value.meta["run"]["goal"] == "Requested execution"
-        assert result.value.meta["event_count"] == 2
+        assert result.value.meta["event_count"] == 3
+        assert [step["name"] for step in result.value.meta["steps"]] == ["Bash", "Read"]
 
     async def test_handle_limit_is_fail_closed_safety_cap(
         self,

@@ -199,6 +199,7 @@ async def _load_projection_events(
     if session_id is not None:
         events = await store.query_session_related_events(
             session_id=session_id,
+            execution_id=execution_id,
             limit=None,
         )
         if execution_id is None:
