@@ -80,8 +80,7 @@ mkdir -p /tmp/character-chat-978-observation
 cd /tmp/character-chat-978-observation
 git init
 cat > controlled-hello-seed-978.yaml <<'YAML'
-name: "Controlled hello #978 observation"
-description: "Single-AC observation seed for post-#1026 TraceGuard evidence gate."
+goal: "Create a minimal Python hello function with a pytest verification."
 
 constraints:
   - "Use Python only."
@@ -194,7 +193,7 @@ A full controlled pass is stronger and should also show the CLI run succeeds.
 
 Post the result on #978, and summarize the state on #961 if it changes the SSOT.
 
-```md
+````md
 ## #978 Observation batch N — post-#1026 clean-main controlled run
 
 Date: YYYY-MM-DD TZ
@@ -236,7 +235,7 @@ Conclusion:
 - Positive controlled signal: yes/no
 - #978 P5 remains blocked: yes/no
 - Next observation/fix needed:
-```
+````
 
 ## P5 readiness boundary
 
