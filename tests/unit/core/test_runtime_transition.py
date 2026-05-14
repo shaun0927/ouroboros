@@ -141,6 +141,20 @@ def test_terminal_current_state_is_terminal_rejection() -> None:
     assert result.failure_kind is RuntimeTransitionFailureKind.TERMINAL_STATE
 
 
+def test_terminal_current_state_wins_over_from_state_drift() -> None:
+    result = evaluate_runtime_transition(
+        _transition(from_state="running", to_state="blocked", expected_revision=None),
+        current_state="completed",
+        allowed_transitions=_ALLOWED,
+        terminal_states=("completed", "failed", "cancelled"),
+        current_revision=9,
+    )
+
+    assert result.failure_class is RuntimeFailureClass.TERMINAL
+    assert result.failure_kind is RuntimeTransitionFailureKind.TERMINAL_STATE
+    assert result.current_state == "completed"
+
+
 def test_disallowed_transition_is_blocking_scope_error() -> None:
     result = evaluate_runtime_transition(
         _transition(from_state="pending", to_state="completed", expected_revision=None),

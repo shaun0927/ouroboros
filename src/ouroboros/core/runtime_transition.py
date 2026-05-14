@@ -352,19 +352,6 @@ def evaluate_runtime_transition(
             message="current_revision must be >= 0; reload the latest runtime snapshot",
             current_state=normalized_current,
         )
-    if transition.from_state != normalized_current:
-        return RuntimeTransitionResult(
-            transition=transition,
-            decision=RuntimeTransitionDecision.REJECTED,
-            failure_class=RuntimeFailureClass.RETRYABLE,
-            failure_kind=RuntimeTransitionFailureKind.INVALID_STATE,
-            message=(
-                "transition from_state does not match current_state; reload the latest "
-                "runtime snapshot before retrying"
-            ),
-            current_revision=current_revision,
-            current_state=normalized_current,
-        )
     if transition.expected_revision is not None:
         if current_revision is None:
             return RuntimeTransitionResult(
@@ -397,6 +384,19 @@ def evaluate_runtime_transition(
             failure_class=RuntimeFailureClass.TERMINAL,
             failure_kind=RuntimeTransitionFailureKind.TERMINAL_STATE,
             message="current state is terminal and cannot transition further",
+            current_revision=current_revision,
+            current_state=normalized_current,
+        )
+    if transition.from_state != normalized_current:
+        return RuntimeTransitionResult(
+            transition=transition,
+            decision=RuntimeTransitionDecision.REJECTED,
+            failure_class=RuntimeFailureClass.RETRYABLE,
+            failure_kind=RuntimeTransitionFailureKind.INVALID_STATE,
+            message=(
+                "transition from_state does not match current_state; reload the latest "
+                "runtime snapshot before retrying"
+            ),
             current_revision=current_revision,
             current_state=normalized_current,
         )
