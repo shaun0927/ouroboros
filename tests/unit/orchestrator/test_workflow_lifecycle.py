@@ -412,6 +412,34 @@ def test_next_runnable_conditional_edges_ignore_prior_attempt_traversal() -> Non
     assert next_runnable_node_ids(spec, retried_branch_selected) == ("branch_no",)
 
 
+def test_next_runnable_nodes_stop_after_terminal_run_events() -> None:
+    spec = _spec()
+    start = datetime(2026, 5, 15, tzinfo=UTC)
+
+    for terminal_event_type in (
+        WorkflowLifecycleEventType.RUN_COMPLETED,
+        WorkflowLifecycleEventType.RUN_FAILED,
+        WorkflowLifecycleEventType.RUN_CANCELLED,
+    ):
+        events = (
+            WorkflowLifecycleEvent(
+                event_type=WorkflowLifecycleEventType.RUN_CREATED,
+                workflow_id=spec.spec_id,
+                timestamp=start,
+            ),
+            WorkflowLifecycleEvent(
+                event_type=terminal_event_type,
+                workflow_id=spec.spec_id,
+                reason_code="terminal"
+                if terminal_event_type is not WorkflowLifecycleEventType.RUN_COMPLETED
+                else None,
+                timestamp=start + timedelta(seconds=1),
+            ),
+        )
+
+        assert next_runnable_node_ids(spec, events) == ()
+
+
 def test_lifecycle_module_does_not_import_runtime_dispatcher() -> None:
     import ouroboros.orchestrator.workflow_lifecycle as lifecycle
 

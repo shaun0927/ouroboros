@@ -394,6 +394,21 @@ def next_runnable_node_ids(
     dispatch work.
     """
     event_list = tuple(event for event in events if event.workflow_id == spec.spec_id)
+    latest_run_event = next(
+        (
+            event
+            for event in sorted(event_list, key=lambda item: item.timestamp, reverse=True)
+            if event.event_type in _RUN_EVENT_TYPES
+        ),
+        None,
+    )
+    if latest_run_event is not None and latest_run_event.event_type in {
+        WorkflowLifecycleEventType.RUN_COMPLETED,
+        WorkflowLifecycleEventType.RUN_FAILED,
+        WorkflowLifecycleEventType.RUN_CANCELLED,
+    }:
+        return ()
+
     states = effective_node_states(event_list)
     completed = {
         node_id
