@@ -27,6 +27,7 @@ from ouroboros.orchestrator.parallel_executor import (
     ParallelACExecutor,
     ParallelExecutionResult,
     StageExecutionOutcome,
+    _message_contains_test_success,
     render_parallel_completion_message,
     render_parallel_verification_report,
 )
@@ -82,6 +83,28 @@ def _make_replaying_event_store() -> tuple[AsyncMock, list[BaseEvent]]:
     event_store.append.side_effect = _append
     event_store.replay.side_effect = _replay
     return event_store, appended_events
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    (
+        ("3 passed in 1.2s", True),
+        ("0 failed, 3 passed", True),
+        ("0 failed, 0 errors, 1 passed", True),
+        ("no errors, 3 passed", True),
+        ("no tests failed, 3 passed", True),
+        ("exit code 0", True),
+        ("1 failed, 3 passed", False),
+        ("2 errors, 1 passed", False),
+    ),
+)
+def test_message_contains_test_success_handles_zero_failure_summaries(
+    content: str,
+    expected: bool,
+) -> None:
+    """Verifier accepts explicit zero-failure summaries without allowing failures."""
+    message = AgentMessage(type="result", content=content, data={})
+    assert _message_contains_test_success(message) is expected
 
 
 class _FinalMessageRuntime:
