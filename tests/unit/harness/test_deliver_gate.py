@@ -350,6 +350,85 @@ class TestLoadAcEvidenceManifest:
         assert manifest.entries[0].source_event_ids == ("evt_started_target",)
 
     @pytest.mark.asyncio
+    async def test_execution_scoped_events_without_session_payload_are_retained(
+        self,
+    ) -> None:
+        now = datetime.now(UTC)
+        store = _FakeEventStore(
+            [
+                _tool_started(
+                    call_id="target",
+                    session_id=None,
+                    execution_id="exec_1",
+                    when=now,
+                ),
+                _tool_returned(
+                    call_id="target",
+                    session_id=None,
+                    execution_id="exec_1",
+                    when=now + timedelta(seconds=1),
+                ),
+            ]
+        )
+
+        manifest = await load_ac_evidence_manifest(
+            store,
+            ac_id="ac_1",
+            session_id="sess_1",
+            execution_id="exec_1",
+        )
+
+        assert len(manifest.entries) == 1
+        assert manifest.entries[0].source_event_ids == (
+            "evt_started_target",
+            "evt_returned_target",
+        )
+
+    @pytest.mark.asyncio
+    async def test_session_aggregate_events_must_match_requested_session(self) -> None:
+        now = datetime.now(UTC)
+        store = _FakeEventStore(
+            [
+                BaseEvent(
+                    id="evt_started_wrong_session_aggregate",
+                    type="tool.call.started",
+                    timestamp=now,
+                    aggregate_type="session",
+                    aggregate_id="other_sess",
+                    data={
+                        "call_id": "wrong_session_aggregate",
+                        "tool_name": "Bash",
+                        "ac_id": "ac_1",
+                        "execution_id": "exec_1",
+                    },
+                ),
+                BaseEvent(
+                    id="evt_started_target_session_aggregate",
+                    type="tool.call.started",
+                    timestamp=now + timedelta(seconds=1),
+                    aggregate_type="session",
+                    aggregate_id="sess_1",
+                    data={
+                        "call_id": "target_session_aggregate",
+                        "tool_name": "Bash",
+                        "ac_id": "ac_1",
+                        "execution_id": "exec_1",
+                    },
+                ),
+            ]
+        )
+
+        manifest = await load_ac_evidence_manifest(
+            store,
+            ac_id="ac_1",
+            session_id="sess_1",
+            execution_id="exec_1",
+        )
+
+        assert len(manifest.entries) == 1
+        assert manifest.entries[0].source_event_ids == ("evt_started_target_session_aggregate",)
+
+    @pytest.mark.asyncio
     async def test_scope_id_filters_production_shaped_events_without_ac_payload(self) -> None:
         now = datetime.now(UTC)
         store = _FakeEventStore(
