@@ -88,16 +88,19 @@ def _conditional_spec() -> WorkflowSpec:
 
 
 def test_run_created_event_anchors_to_workflow_spec_id() -> None:
+    timestamp = datetime(2026, 5, 15, tzinfo=UTC)
     event = lifecycle_event_for_spec(
         _spec(),
         WorkflowLifecycleEventType.RUN_CREATED,
         refs=("seed://example",),
         data={"source_ref": "seed_001"},
+        timestamp=timestamp,
     )
 
     base = event.to_base_event()
 
     assert base.type == "workflow.run.created"
+    assert base.timestamp == timestamp
     assert base.aggregate_type == "workflow_ir"
     assert base.aggregate_id == "wfspec_lifecycle"
     assert base.event_version == WORKFLOW_LIFECYCLE_SCHEMA_VERSION
@@ -326,6 +329,37 @@ def test_next_runnable_nodes_follow_traversed_conditional_edges_only() -> None:
     )
 
     assert next_runnable_node_ids(spec, yes_selected) == ("branch_yes",)
+
+
+def test_next_runnable_nodes_ignore_foreign_workflow_events() -> None:
+    spec = _spec()
+    events = (
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.NODE_COMPLETED,
+            workflow_id="other_workflow",
+            node_id="node_a",
+        ),
+    )
+
+    assert next_runnable_node_ids(spec, events) == ("node_a",)
+
+
+def test_next_runnable_conditional_edges_ignore_foreign_traversal() -> None:
+    spec = _conditional_spec()
+    events = (
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.NODE_COMPLETED,
+            workflow_id=spec.spec_id,
+            node_id="decide",
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.EDGE_TRAVERSED,
+            workflow_id="other_workflow",
+            edge_id="edge_yes",
+        ),
+    )
+
+    assert next_runnable_node_ids(spec, events) == ()
 
 
 def test_lifecycle_module_does_not_import_runtime_dispatcher() -> None:

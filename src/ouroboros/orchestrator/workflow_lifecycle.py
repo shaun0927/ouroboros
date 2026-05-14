@@ -346,6 +346,7 @@ class WorkflowLifecycleEvent(BaseModel, frozen=True):
         return BaseEvent(
             type=self.event_type.value,
             aggregate_type="workflow_ir",
+            timestamp=self.timestamp,
             aggregate_id=self.aggregate_id,
             data=self.to_event_data(),
             event_version=self.schema_version,
@@ -392,7 +393,7 @@ def next_runnable_node_ids(
     graph and lifecycle records only, performs no side effects, and does not
     dispatch work.
     """
-    event_list = tuple(events)
+    event_list = tuple(event for event in events if event.workflow_id == spec.spec_id)
     states = effective_node_states(event_list)
     completed = {
         node_id
