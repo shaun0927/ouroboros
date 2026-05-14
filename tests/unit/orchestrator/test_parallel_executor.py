@@ -97,10 +97,12 @@ class _FinalMessageRuntime:
         *,
         native_session_id: str,
         support_messages: tuple[AgentMessage, ...] = (),
+        cwd: str = "/tmp/project",
     ) -> None:
         self._final_message = final_message
         self._native_session_id = native_session_id
         self._support_messages = support_messages
+        self._cwd = cwd
 
     @property
     def runtime_backend(self) -> str:
@@ -1427,13 +1429,13 @@ class TestParallelACExecutor:
                         data={"subtype": "success"},
                     ),
                 ),
+                cwd=str(tmp_path),
             ),
             event_store=event_store,
             console=MagicMock(),
             enable_decomposition=False,
             execution_profile=load_profile("code"),
             fat_harness_mode=True,
-            task_cwd=str(tmp_path),
         )
 
         result = await executor._execute_atomic_ac(

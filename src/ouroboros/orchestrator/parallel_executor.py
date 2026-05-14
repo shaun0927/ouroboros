@@ -215,18 +215,46 @@ def _looks_like_test_command(command: str) -> bool:
     )
 
 
-def _runtime_messages_include_test_success(messages: tuple[AgentMessage, ...]) -> bool:
-    """Return True when transcript evidence says a test command passed."""
-    for message in messages:
-        parts = [message.content]
-        for key in ("result_preview", "output", "stdout"):
-            value = message.data.get(key)
-            if isinstance(value, str):
-                parts.append(value)
-        text = "\n".join(parts).lower()
-        if re.search(r"\b(passed|pass|success|succeeded)\b|exit\s*code\s*0|0\s+failed", text):
-            return True
-    return False
+def _message_contains_test_success(message: AgentMessage) -> bool:
+    """Return True when one message says a test command passed."""
+    parts = [message.content]
+    for key in ("result_preview", "output", "stdout"):
+        value = message.data.get(key)
+        if isinstance(value, str):
+            parts.append(value)
+    text = "\n".join(parts).lower()
+    return bool(re.search(r"\b(passed|pass|success|succeeded)\b|exit\s*code\s*0|0\s+failed", text))
+
+
+def _successful_backed_test_commands(
+    *,
+    backed_commands: tuple[str, ...],
+    messages: tuple[AgentMessage, ...],
+) -> tuple[str, ...]:
+    """Return backed test commands whose adjacent transcript chunk passed."""
+    successful: list[str] = []
+    for index, message in enumerate(messages):
+        if message.tool_name != "Bash":
+            continue
+        command = next(
+            (
+                candidate
+                for candidate in backed_commands
+                if _looks_like_test_command(candidate)
+                and _runtime_messages_support_claim(candidate, (message,))
+            ),
+            None,
+        )
+        if command is None:
+            continue
+        chunk = [message]
+        for following in messages[index + 1 :]:
+            if following.tool_name == "Bash":
+                break
+            chunk.append(following)
+        if any(_message_contains_test_success(item) for item in chunk):
+            successful.append(command)
+    return tuple(successful)
 
 
 _REUSABLE_RUNTIME_EVENT_TYPES = frozenset(
@@ -3888,9 +3916,12 @@ When complete, explicitly state: [TASK_COMPLETE]
                 _runtime_support_messages_for_field("commands_run", support_messages),
             )
         )
-        has_successful_backed_test_command = any(
-            _looks_like_test_command(command) for command in backed_commands
-        ) and _runtime_messages_include_test_success(support_messages)
+        has_successful_backed_test_command = bool(
+            _successful_backed_test_commands(
+                backed_commands=backed_commands,
+                messages=support_messages,
+            )
+        )
         for field_name in self._execution_profile.evidence_schema.required:
             values = tuple(_flatten_evidence_values(typed_evidence.get(field_name)))
             if not values:
@@ -3920,14 +3951,15 @@ When complete, explicitly state: [TASK_COMPLETE]
 
     def _evidence_path_exists(self, value: str) -> bool:
         """Return True when a file claim exists under the task working directory."""
-        if self._task_cwd is None:
+        task_cwd = self._task_cwd or self._adapter.working_directory
+        if task_cwd is None:
             return False
         candidate = Path(value)
         if candidate.is_absolute():
             return False
         if ".." in candidate.parts:
             return False
-        base = Path(self._task_cwd).resolve()
+        base = Path(task_cwd).resolve()
         resolved = (base / candidate).resolve()
         try:
             resolved.relative_to(base)
