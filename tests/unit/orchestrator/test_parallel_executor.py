@@ -1490,7 +1490,7 @@ class TestParallelACExecutor:
                     ),
                     AgentMessage(
                         type="result",
-                        content="1 failed",
+                        content="1 failed, 3 passed",
                         data={"subtype": "success"},
                     ),
                 ),
