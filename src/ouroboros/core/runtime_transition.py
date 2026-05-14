@@ -217,7 +217,9 @@ class RuntimeTransition:
         if type(self.schema_version) is not int or self.schema_version < 1:
             raise ValueError("RuntimeTransition schema_version must be a positive integer")
         for field_name in ("subject_id", "from_state", "to_state", "reason"):
-            object.__setattr__(self, field_name, _require_non_blank(field_name, getattr(self, field_name)))
+            object.__setattr__(
+                self, field_name, _require_non_blank(field_name, getattr(self, field_name))
+            )
         if self.from_state == self.to_state:
             raise ValueError("RuntimeTransition from_state and to_state must differ")
         if self.expected_revision is not None:
@@ -226,7 +228,9 @@ class RuntimeTransition:
             if self.expected_revision < 0:
                 raise ValueError("RuntimeTransition expected_revision must be >= 0")
         if self.idempotency_key is not None:
-            object.__setattr__(self, "idempotency_key", _require_non_blank("idempotency_key", self.idempotency_key))
+            object.__setattr__(
+                self, "idempotency_key", _require_non_blank("idempotency_key", self.idempotency_key)
+            )
         object.__setattr__(self, "timestamp", _normalize_utc("timestamp", self.timestamp))
         object.__setattr__(self, "evidence_refs", _normalize_refs(self.evidence_refs))
         object.__setattr__(self, "metadata", _normalize_payload("metadata", self.metadata))
@@ -285,7 +289,9 @@ class RuntimeTransitionResult:
         if self.current_revision is not None and self.current_revision < 0:
             raise ValueError("RuntimeTransitionResult current_revision must be >= 0")
         if self.current_state is not None:
-            object.__setattr__(self, "current_state", _require_non_blank("current_state", self.current_state))
+            object.__setattr__(
+                self, "current_state", _require_non_blank("current_state", self.current_state)
+            )
 
     @property
     def accepted(self) -> bool:
@@ -353,7 +359,10 @@ def evaluate_runtime_transition(
             current_revision=current_revision,
             current_state=normalized_current,
         )
-    allowed = {(_require_non_blank("from_state", source), _require_non_blank("to_state", target)) for source, target in allowed_transitions}
+    allowed = {
+        (_require_non_blank("from_state", source), _require_non_blank("to_state", target))
+        for source, target in allowed_transitions
+    }
     if (transition.from_state, transition.to_state) not in allowed:
         return RuntimeTransitionResult(
             transition=transition,
