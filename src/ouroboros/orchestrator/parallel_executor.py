@@ -240,13 +240,22 @@ def _runtime_message_supports_file_reference(reference: str, message: AgentMessa
     if not normalized_reference:
         return False
     text = _runtime_message_file_proof_text(message)
+    if message.tool_name == "Bash":
+        return _text_supports_file_mutation_reference(
+            text, normalized_reference
+        ) or _bash_command_mutates_file_reference(message, normalized_reference)
+    if message.tool_name in {"Edit", "Write", "NotebookEdit"}:
+        return bool(text and _file_reference_pattern(normalized_reference).search(text))
+    return _text_supports_file_mutation_reference(text, normalized_reference)
+
+
+def _text_supports_file_mutation_reference(text: str, normalized_reference: str) -> bool:
+    """Return True when text pairs a file reference with mutation language."""
     if not text:
         return False
-    reference_pattern = re.compile(rf"(?<![\w./-]){re.escape(normalized_reference)}(?![\w./-])")
+    reference_pattern = _file_reference_pattern(normalized_reference)
     if not reference_pattern.search(text):
         return False
-    if message.tool_name in {"Edit", "Write", "NotebookEdit"}:
-        return True
     return bool(
         re.search(
             rf"(?<![\w./-]){re.escape(normalized_reference)}(?![\w./-]).*\b("
@@ -255,6 +264,49 @@ def _runtime_message_supports_file_reference(reference: str, message: AgentMessa
             r"updated|modified|changed|created|generated|wrote|written|patched"
             rf")\b.*(?<![\w./-]){re.escape(normalized_reference)}(?![\w./-])",
             text,
+        )
+    )
+
+
+def _file_reference_pattern(normalized_reference: str) -> re.Pattern[str]:
+    """Return a conservative token pattern for a workspace-relative file reference."""
+    return re.compile(rf"(?<![\w./-]){re.escape(normalized_reference)}(?![\w./-])")
+
+
+def _bash_command_mutates_file_reference(
+    message: AgentMessage, normalized_reference: str
+) -> bool:
+    """Return True for explicit shell writes to the referenced file.
+
+    Bash command text is only trusted when the command itself carries mutation
+    semantics for the claimed file. This preserves direct shell-edit evidence
+    such as ``touch src/generated.py`` or ``printf ... > src/generated.py``
+    without allowing read-only probes like ``grep updated src/generated.py`` to
+    prove ``files_touched`` merely by containing a path and a mutation word.
+    """
+    tool_input = message.data.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return False
+    command = tool_input.get("command")
+    if not isinstance(command, str):
+        return False
+    normalized_command = command.strip().lower()
+    if not normalized_command:
+        return False
+    if not _file_reference_pattern(normalized_reference).search(normalized_command):
+        return False
+    quoted_reference = rf"['\"]?{re.escape(normalized_reference)}['\"]?"
+    if re.search(rf"(^|[\s;&|])(?:\d?>|&>|>>|\d>>)\s*{quoted_reference}", normalized_command):
+        return True
+    return bool(
+        re.search(
+            rf"(^|[\s;&|])(touch|truncate|tee)\b[^;&|]*\s{quoted_reference}(?=$|[\s;&|])",
+            normalized_command,
+        )
+        or re.search(
+            rf"(^|[\s;&|])(sed|perl)\b[^;&|]*\s-[^\s;&|]*i[^;&|]*\s"
+            rf"{quoted_reference}(?=$|[\s;&|])",
+            normalized_command,
         )
     )
 
