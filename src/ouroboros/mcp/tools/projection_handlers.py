@@ -268,7 +268,12 @@ async def _load_projection_events(
                     or _is_session_terminal_event(event, session_id)
                     or _event_links_execution(event, payload_execution_id)
                 ]
-            return events
+            return [
+                event
+                for event in events
+                if _is_session_metadata_event(event, session_id)
+                or _is_session_terminal_event(event, session_id)
+            ]
         if not _session_declares_execution(
             events,
             session_id,

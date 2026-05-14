@@ -991,6 +991,34 @@ class TestProjectionQueryHandler:
         assert result.value.meta["seed_id_source"] == "fallback"
         assert [step["name"] for step in result.value.meta["steps"]] == ["Bash"]
 
+    async def test_handle_rejects_foreign_only_payload_session_query(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
+        """Session-only projections must not project foreign payload-only aggregates."""
+        from ouroboros.events.base import BaseEvent
+
+        await memory_event_store.append(
+            BaseEvent(
+                id="evt_payload_foreign_only_session",
+                type="tool.call.started",
+                aggregate_type="lineage",
+                aggregate_id="lineage_payload_foreign_only_session",
+                data={
+                    "session_id": "orch_projection_foreign_only_session",
+                    "execution_id": "exec_payload_foreign_only_session",
+                    "call_id": "payload_foreign_only_session",
+                    "tool_name": "Read",
+                },
+            )
+        )
+
+        handler = ProjectionQueryHandler(event_store=memory_event_store)
+        result = await handler.handle({"session_id": "orch_projection_foreign_only_session"})
+
+        assert result.is_err
+        assert "No events found" in str(result.error)
+
     async def test_handle_rejects_foreign_only_payload_session_execution(
         self,
         memory_event_store: EventStore,
