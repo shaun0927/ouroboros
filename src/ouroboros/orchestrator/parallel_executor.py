@@ -287,7 +287,7 @@ def _message_contains_test_success(message: AgentMessage) -> bool:
     failure_scan_text = re.sub(zero_failure_pattern, "", text)
     if re.search(
         r"\b[1-9]\d*\s+(failed|failures?|errors?)\b|"
-        r"\b(failure|failures?|error|errors)\b|"
+        r"\b(failed|failure|failures?|error|errors)\b|"
         r"exit\s*code\s*[1-9]",
         failure_scan_text,
     ):

@@ -96,6 +96,8 @@ def _make_replaying_event_store() -> tuple[AsyncMock, list[BaseEvent]]:
         ("exit code 0", True),
         ("1 failed, 3 passed", False),
         ("2 errors, 1 passed", False),
+        ("FAILED tests/test_app.py::test_auth", False),
+        ("tests failed", False),
     ),
 )
 def test_message_contains_test_success_handles_zero_failure_summaries(
