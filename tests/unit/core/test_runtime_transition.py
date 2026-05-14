@@ -170,3 +170,12 @@ def test_validation_rejects_noop_duplicate_evidence_and_secret_metadata() -> Non
 
     with pytest.raises(ValueError, match="secret-like key"):
         _transition(metadata={"passwd": "secret"})
+
+    with pytest.raises(ValueError, match="secret-like key"):
+        _transition(metadata={"apiKey": "secret"})
+
+    with pytest.raises(ValueError, match="secret-like key"):
+        _transition(metadata={"clientSecret": "secret"})
+
+    with pytest.raises(ValueError, match="secret-like key"):
+        _transition(metadata={"dbPassword": "secret"})

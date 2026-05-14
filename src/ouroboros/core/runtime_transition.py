@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 import json
+import re
 from types import MappingProxyType
 from typing import Any, Final, cast
 
@@ -118,7 +119,9 @@ def _normalize_utc(name: str, value: datetime) -> datetime:
 
 
 def _is_secret_key(value: str) -> bool:
-    normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
+    camel_split = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", value.strip())
+    camel_split = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", camel_split)
+    normalized = camel_split.lower().replace("-", "_").replace(" ", "_")
     return normalized in _SECRET_KEYS or normalized.endswith(_SECRET_SUFFIXES)
 
 
