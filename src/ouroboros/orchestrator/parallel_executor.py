@@ -281,15 +281,15 @@ def _message_contains_test_success(message: AgentMessage) -> bool:
         if isinstance(value, str):
             parts.append(value)
     text = "\n".join(parts).lower()
-    failure_scan_text = re.sub(r"\b0\s+(failed|failures|error|errors)\b", "", text)
+    zero_failure_pattern = (
+        r"\b(0\s+(failed|failures?|errors?)|no\s+(tests?\s+)?(failed|failures?|errors?))\b"
+    )
+    failure_scan_text = re.sub(zero_failure_pattern, "", text)
     if re.search(
-        r"\b[1-9]\d*\s+failed\b|\b(failure|error|errors)\b|exit\s*code\s*[1-9]",
+        r"\b[1-9]\d*\s+(failed|failures?|errors?)\b|"
+        r"\b(failure|failures?|error|errors)\b|"
+        r"exit\s*code\s*[1-9]",
         failure_scan_text,
-    ):
-        return False
-    if re.search(r"\bfailed\b", text) and not re.search(
-        r"\b0\s+failed\b|\bno\s+tests?\s+failed\b",
-        text,
     ):
         return False
     if re.search(r"\b0\s+passed\b", text) and not re.search(r"\b[1-9]\d*\s+passed\b", text):
