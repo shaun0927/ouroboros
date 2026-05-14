@@ -32,6 +32,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 import json
 import os
+from pathlib import Path
 import platform
 import re
 import subprocess
@@ -183,8 +184,7 @@ def _runtime_support_messages_for_field(
     """Narrow support messages for profile-known evidence fields."""
     normalized = field_name.lower()
     if normalized == "files_touched":
-        write_tools = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
-        return tuple(message for message in messages if message.tool_name in write_tools)
+        return messages
     if normalized in {"commands_run", "tests_passed"}:
         return tuple(message for message in messages if message.tool_name == "Bash")
     return messages
@@ -195,6 +195,22 @@ def _runtime_messages_support_claim(value: str, messages: tuple[AgentMessage, ..
     needle = value.strip().lower()
     return bool(needle) and any(
         needle in _runtime_message_search_text(message) for message in messages
+    )
+
+
+def _looks_like_test_command(command: str) -> bool:
+    """Return True for common whole-suite or targeted test invocations."""
+    normalized = command.strip().lower()
+    if not normalized:
+        return False
+    return bool(
+        re.search(
+            r"(^|[\s;&|])("
+            r"pytest|py\.test|tox|nox|npm\s+test|pnpm\s+test|yarn\s+test|"
+            r"uv\s+run\s+pytest|python\s+-m\s+pytest"
+            r")($|[\s;&|])",
+            normalized,
+        )
     )
 
 
@@ -3849,13 +3865,28 @@ When complete, explicitly state: [TASK_COMPLETE]
             )
 
         unsupported: list[str] = []
+        backed_commands = tuple(
+            command
+            for command in _flatten_evidence_values(typed_evidence.get("commands_run"))
+            if _runtime_messages_support_claim(
+                command,
+                _runtime_support_messages_for_field("commands_run", support_messages),
+            )
+        )
+        has_backed_test_command = any(
+            _looks_like_test_command(command) for command in backed_commands
+        )
         for field_name in self._execution_profile.evidence_schema.required:
             values = tuple(_flatten_evidence_values(typed_evidence.get(field_name)))
             if not values:
                 unsupported.append(f"{field_name}: no concrete claim values")
                 continue
+            if field_name == "tests_passed" and has_backed_test_command:
+                continue
             field_messages = _runtime_support_messages_for_field(field_name, support_messages)
             for value in values:
+                if field_name == "files_touched" and self._evidence_path_exists(value):
+                    continue
                 if not _runtime_messages_support_claim(value, field_messages):
                     unsupported.append(f"{field_name}: {value}")
 
@@ -3867,6 +3898,15 @@ When complete, explicitly state: [TASK_COMPLETE]
             )
 
         return VerifierVerdict(passed=True)
+
+    def _evidence_path_exists(self, value: str) -> bool:
+        """Return True when a file claim exists under the task working directory."""
+        if self._task_cwd is None:
+            return False
+        candidate = Path(value)
+        if candidate.is_absolute():
+            return candidate.exists()
+        return (Path(self._task_cwd) / candidate).exists()
 
     async def _emit_atomic_typed_evidence_event(
         self,

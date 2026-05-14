@@ -1387,6 +1387,75 @@ class TestParallelACExecutor:
         assert evidence_event.data["verifier_failure_class"] == "EVIDENCE_MISSING"
 
     @pytest.mark.asyncio
+    async def test_fat_harness_verifier_allows_bash_generated_file_and_whole_suite_test(
+        self, tmp_path
+    ) -> None:
+        """Bash-backed generation plus whole-suite pytest can support evidence."""
+        generated_file = tmp_path / "src" / "generated.py"
+        generated_file.parent.mkdir()
+        generated_file.write_text("VALUE = 1\n", encoding="utf-8")
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                "Done.\n"
+                "```json\n"
+                '{"files_touched":["src/generated.py"],'
+                '"commands_run":["python scripts/generate.py","pytest"],'
+                '"tests_passed":["tests/test_generated.py"]}\n'
+                "```",
+                native_session_id="opencode-session-evidence",
+                support_messages=(
+                    AgentMessage(
+                        type="tool",
+                        content="Bash: python scripts/generate.py",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": "python scripts/generate.py"}},
+                    ),
+                    AgentMessage(
+                        type="tool",
+                        content="Bash: pytest",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": "pytest"}},
+                    ),
+                    AgentMessage(
+                        type="result",
+                        content="generated.py updated; all tests passed",
+                        data={"subtype": "success"},
+                    ),
+                ),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+            task_cwd=str(tmp_path),
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is True
+        assert result.error is None
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_ran"] is True
+        assert evidence_event.data["verifier_passed"] is True
+
+    @pytest.mark.asyncio
     async def test_fat_harness_mode_rejects_verifier_fail(self) -> None:
         """Fat harness requires a separate verifier PASS after typed evidence."""
 
