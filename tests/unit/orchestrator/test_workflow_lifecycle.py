@@ -59,6 +59,34 @@ def _spec() -> WorkflowSpec:
     )
 
 
+def _conditional_spec() -> WorkflowSpec:
+    return WorkflowSpec(
+        spec_id="wfspec_conditional",
+        source=SourceKind.SYNTHETIC,
+        nodes=(
+            WorkflowNode(node_id="decide", kind=NodeKind.DECISION, owner=NodeOwner.HARNESS),
+            _task("branch_yes"),
+            _task("branch_no"),
+        ),
+        edges=(
+            WorkflowEdge(
+                edge_id="edge_yes",
+                source="decide",
+                target="branch_yes",
+                kind=EdgeKind.CONDITIONAL,
+                condition={"result": "yes"},
+            ),
+            WorkflowEdge(
+                edge_id="edge_no",
+                source="decide",
+                target="branch_no",
+                kind=EdgeKind.CONDITIONAL,
+                condition={"result": "no"},
+            ),
+        ),
+    )
+
+
 def test_run_created_event_anchors_to_workflow_spec_id() -> None:
     event = lifecycle_event_for_spec(
         _spec(),
@@ -275,6 +303,31 @@ def test_retried_node_becomes_runnable_again_after_failure_history() -> None:
 
     assert effective_node_states(events)["node_a"] is WorkflowNodeLifecycleState.RETRIED
     assert next_runnable_node_ids(spec, events) == ("node_a",)
+
+
+
+
+def test_next_runnable_nodes_follow_traversed_conditional_edges_only() -> None:
+    spec = _conditional_spec()
+    completed_decision = (
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.NODE_COMPLETED,
+            workflow_id=spec.spec_id,
+            node_id="decide",
+        ),
+    )
+
+    assert next_runnable_node_ids(spec, completed_decision) == ()
+
+    yes_selected = completed_decision + (
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.EDGE_TRAVERSED,
+            workflow_id=spec.spec_id,
+            edge_id="edge_yes",
+        ),
+    )
+
+    assert next_runnable_node_ids(spec, yes_selected) == ("branch_yes",)
 
 
 def test_lifecycle_module_does_not_import_runtime_dispatcher() -> None:

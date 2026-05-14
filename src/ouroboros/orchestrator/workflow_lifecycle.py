@@ -18,7 +18,7 @@ from typing import Any, Final, cast
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ouroboros.events.base import BaseEvent
-from ouroboros.orchestrator.workflow_ir import WorkflowNode, WorkflowSpec
+from ouroboros.orchestrator.workflow_ir import EdgeKind, WorkflowEdge, WorkflowNode, WorkflowSpec
 
 WORKFLOW_LIFECYCLE_SCHEMA_VERSION: Final[int] = 1
 MAX_WORKFLOW_LIFECYCLE_DATA_BYTES: Final[int] = 8192
@@ -392,25 +392,37 @@ def next_runnable_node_ids(
     graph and lifecycle records only, performs no side effects, and does not
     dispatch work.
     """
-    states = effective_node_states(events)
+    event_list = tuple(events)
+    states = effective_node_states(event_list)
     completed = {
         node_id
         for node_id, state in states.items()
         if state is WorkflowNodeLifecycleState.COMPLETED
     }
+    traversed_edges = {
+        event.edge_id
+        for event in event_list
+        if event.event_type is WorkflowLifecycleEventType.EDGE_TRAVERSED
+        and event.edge_id is not None
+    }
     nodes_by_id: dict[str, WorkflowNode] = {node.node_id: node for node in spec.nodes}
-    incoming: dict[str, set[str]] = {node_id: set() for node_id in nodes_by_id}
+    incoming: dict[str, list[WorkflowEdge]] = {node_id: [] for node_id in nodes_by_id}
     for edge in spec.edges:
         if edge.target in incoming:
-            incoming[edge.target].add(edge.source)
+            incoming[edge.target].append(edge)
+
+    def dependency_is_satisfied(edge: WorkflowEdge) -> bool:
+        if edge.kind is EdgeKind.CONDITIONAL:
+            return edge.edge_id in traversed_edges
+        return edge.source in completed
 
     runnable: list[str] = []
     for node in spec.nodes:
         state = states.get(node.node_id)
         if state is not None and state is not WorkflowNodeLifecycleState.RETRIED:
             continue
-        predecessors = incoming.get(node.node_id, set())
-        if predecessors <= completed:
+        predecessors = incoming.get(node.node_id, ())
+        if all(dependency_is_satisfied(edge) for edge in predecessors):
             runnable.append(node.node_id)
     return tuple(runnable)
 
