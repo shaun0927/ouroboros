@@ -269,7 +269,15 @@ async def _load_projection_events(
                     or _event_links_execution(event, payload_execution_id)
                 ]
             return events
-        if not _session_declares_execution(events, session_id, execution_id):
+        if not _session_declares_execution(
+            events,
+            session_id,
+            execution_id,
+        ) and not _session_payload_links_execution(
+            events,
+            session_id,
+            execution_id,
+        ):
             msg = f"execution_id {execution_id!r} does not belong to session_id {session_id!r}"
             raise ValueError(msg)
         return [
@@ -383,6 +391,24 @@ def _session_execution_ids(events: Sequence[BaseEvent], session_id: str) -> froz
         if isinstance(value, str) and value.strip():
             execution_ids.add(value.strip())
     return frozenset(execution_ids)
+
+
+def _session_payload_links_execution(
+    events: Sequence[BaseEvent],
+    session_id: str,
+    execution_id: str,
+) -> bool:
+    for event in events:
+        if not isinstance(event.data, dict):
+            continue
+        payload_session_id = event.data.get("session_id")
+        if not isinstance(payload_session_id, str) or payload_session_id.strip() != session_id:
+            continue
+        for key in ("execution_id", "parent_execution_id"):
+            value = event.data.get(key)
+            if isinstance(value, str) and value.strip() == execution_id:
+                return True
+    return False
 
 
 def _event_payload_execution_ids(events: Sequence[BaseEvent]) -> frozenset[str]:

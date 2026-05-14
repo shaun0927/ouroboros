@@ -946,6 +946,56 @@ class TestProjectionQueryHandler:
         assert result.is_err
         assert "references multiple executions" in str(result.error)
 
+    async def test_handle_disambiguates_metadata_less_session_with_execution_id(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
+        """Explicit execution_id can disambiguate payload-only session links."""
+        from ouroboros.events.base import BaseEvent
+
+        await memory_event_store.append(
+            BaseEvent(
+                id="evt_payload_exec_a",
+                type="tool.call.started",
+                aggregate_type="execution",
+                aggregate_id="exec_payload_a",
+                data={
+                    "session_id": "orch_projection_payload_multi",
+                    "execution_id": "exec_payload_a",
+                    "call_id": "payload_a",
+                    "tool_name": "Bash",
+                },
+            )
+        )
+        await memory_event_store.append(
+            BaseEvent(
+                id="evt_payload_exec_b",
+                type="tool.call.started",
+                aggregate_type="execution",
+                aggregate_id="exec_payload_b",
+                data={
+                    "session_id": "orch_projection_payload_multi",
+                    "execution_id": "exec_payload_b",
+                    "call_id": "payload_b",
+                    "tool_name": "Read",
+                },
+            )
+        )
+
+        handler = ProjectionQueryHandler(event_store=memory_event_store)
+        result = await handler.handle(
+            {
+                "session_id": "orch_projection_payload_multi",
+                "execution_id": "exec_payload_a",
+            }
+        )
+
+        assert result.is_ok
+        assert result.value.meta["event_count"] == 1
+        assert result.value.meta["seed_id"] == "exec_payload_a"
+        assert result.value.meta["seed_id_source"] == "fallback"
+        assert [step["name"] for step in result.value.meta["steps"]] == ["Bash"]
+
     async def test_handle_narrows_metadata_less_session_only_single_execution_payload(
         self,
         memory_event_store: EventStore,
