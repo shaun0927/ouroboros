@@ -170,7 +170,16 @@ class ProjectionQueryHandler:
                 override=seed_id_override,
             )
             goal = _derive_goal(ordered_events)
-            projection = build_projection(ordered_events, seed_id=seed_id, goal=goal)
+            projection = build_projection(
+                ordered_events,
+                seed_id=seed_id,
+                goal=goal,
+                source_key=_query_projection_source_key(
+                    ordered_events,
+                    session_id=session_id,
+                    execution_id=execution_id,
+                ),
+            )
 
             return Result.ok(
                 MCPToolResult(
@@ -435,6 +444,26 @@ def _derive_goal(events: Sequence[BaseEvent]) -> str:
             if isinstance(value, str) and value.strip():
                 return value.strip()
     return ""
+
+
+def _query_projection_source_key(
+    events: Sequence[BaseEvent],
+    *,
+    session_id: str | None,
+    execution_id: str | None,
+) -> str | None:
+    if execution_id is not None:
+        return f"execution:{execution_id}"
+    if session_id is not None:
+        execution_ids = _session_execution_ids(events, session_id)
+        if len(execution_ids) == 1:
+            return f"execution:{next(iter(execution_ids))}"
+        payload_execution_ids = _event_payload_execution_ids(events)
+        if len(payload_execution_ids) == 1:
+            return f"execution:{next(iter(payload_execution_ids))}"
+    if session_id is not None:
+        return f"session:{session_id}"
+    return None
 
 
 def _string_argument(arguments: dict[str, Any], name: str) -> str | None:

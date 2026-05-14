@@ -635,8 +635,10 @@ class TestProjectionQueryHandler:
 
         handler = ProjectionQueryHandler(event_store=memory_event_store)
         result = await handler.handle({"execution_id": "exec_projection_123"})
+        second_result = await handler.handle({"execution_id": "exec_projection_123"})
 
         assert result.is_ok
+        assert second_result.is_ok
         assert "Run Projection" in result.value.text_content
         assert result.value.meta["execution_id"] == "exec_projection_123"
         assert result.value.meta["seed_id"] == "seed_projection_123"
@@ -650,6 +652,14 @@ class TestProjectionQueryHandler:
         assert step["ok"] is True
         assert step["source_event_ids"] == ["evt_proj_start", "evt_proj_return"]
         assert result.value.meta["steps"][1]["name"] == "Read"
+        assert result.value.meta["run"]["run_id"] == second_result.value.meta["run"]["run_id"]
+        assert (
+            result.value.meta["stages"][0]["stage_id"]
+            == second_result.value.meta["stages"][0]["stage_id"]
+        )
+        assert [step["step_id"] for step in result.value.meta["steps"]] == [
+            step["step_id"] for step in second_result.value.meta["steps"]
+        ]
 
     async def test_handle_projects_session_related_events(
         self,
@@ -716,8 +726,10 @@ class TestProjectionQueryHandler:
 
         handler = ProjectionQueryHandler(event_store=memory_event_store)
         result = await handler.handle({"session_id": "orch_projection_123"})
+        second_result = await handler.handle({"session_id": "orch_projection_123"})
 
         assert result.is_ok
+        assert second_result.is_ok
         assert result.value.meta["session_id"] == "orch_projection_123"
         assert result.value.meta["seed_id"] == "seed_projection_456"
         assert result.value.meta["seed_id_source"] == "event"
@@ -725,6 +737,11 @@ class TestProjectionQueryHandler:
         assert result.value.meta["event_count"] == 3
         assert result.value.meta["run"]["ended_at"] == "2026-01-01T00:00:00.100000Z"
         assert result.value.meta["steps"][0]["name"] == "Read"
+        assert result.value.meta["run"]["run_id"] == second_result.value.meta["run"]["run_id"]
+        assert (
+            result.value.meta["stages"][0]["stage_id"]
+            == second_result.value.meta["stages"][0]["stage_id"]
+        )
 
     async def test_handle_rejects_mismatched_session_execution(
         self,

@@ -87,6 +87,7 @@ class ProjectionBuilder:
         goal: str = "",
         run_id: str | None = None,
         stage_id: str | None = None,
+        source_key: str | None = None,
     ) -> None:
         if not seed_id.strip():
             msg = "ProjectionBuilder requires a non-blank seed_id"
@@ -95,9 +96,11 @@ class ProjectionBuilder:
         self._goal = goal
         self._run_id = run_id
         self._stage_id = stage_id
+        self._source_key = source_key.strip() if source_key and source_key.strip() else None
         self._tool_started: OrderedDict[str, BaseEvent] = OrderedDict()
         self._llm_started: OrderedDict[str, BaseEvent] = OrderedDict()
         self._steps: OrderedDict[str, StepRecord] = OrderedDict()
+        self._identity_events: list[BaseEvent] = []
         self._idle_started_at = datetime.now(UTC)
         self._first_event_at: datetime | None = None
         self._last_event_at: datetime | None = None
@@ -113,6 +116,7 @@ class ProjectionBuilder:
     def add_event(self, event: BaseEvent) -> ProjectionBuilder:
         """Ingest a single event. Returns self for chaining."""
         self._update_timestamps(event)
+        self._identity_events.append(event)
 
         if event.type == _TOOL_STARTED:
             call_id = _extract_call_id(event)
@@ -162,10 +166,14 @@ class ProjectionBuilder:
         Repeated calls return identical ``run_id`` / ``stage_id`` so
         replayable projections stay stable.
         """
+        source_key = self._source_key or _derive_projection_source_key(
+            self._identity_events,
+            seed_id=self._seed_id,
+        )
         if self._run_id is None:
-            self._run_id = RunRecord(seed_id=self._seed_id).run_id
+            self._run_id = _stable_run_id(source_key)
         if self._stage_id is None:
-            self._stage_id = StageRecord(run_id=self._run_id, kind=StageKind.EXECUTE).stage_id
+            self._stage_id = _stable_stage_id(self._run_id, StageKind.EXECUTE)
         run_id = self._run_id
         stage_id = self._stage_id
 
@@ -295,9 +303,14 @@ def build_projection(
     *,
     seed_id: str,
     goal: str = "",
+    source_key: str | None = None,
 ) -> ProjectionBuildResult:
     """One-shot projection from a sequence of events."""
-    return ProjectionBuilder(seed_id=seed_id, goal=goal).add_events(events).build()
+    return (
+        ProjectionBuilder(seed_id=seed_id, goal=goal, source_key=source_key)
+        .add_events(events)
+        .build()
+    )
 
 
 def _extract_call_id(event: BaseEvent) -> str | None:
@@ -347,6 +360,70 @@ def _safe_bool(value: Any) -> bool | None:
     if isinstance(value, bool):
         return value
     return None
+
+
+def _derive_projection_source_key(events: Sequence[BaseEvent], *, seed_id: str) -> str:
+    """Return the deterministic identity source for a projected run.
+
+    Projection records are rebuildable read-models over the journal, so
+    run/stage IDs must not depend on object construction time. Prefer an
+    explicit execution aggregate when the event slice has exactly one,
+    then a single session aggregate, then a stable digest of the event
+    slice. Empty synthetic projections fall back to the seed id.
+    """
+    execution_ids = _event_scope_ids(events, scope="execution")
+    if len(execution_ids) == 1:
+        return f"execution:{next(iter(execution_ids))}"
+
+    session_ids = _event_scope_ids(events, scope="session")
+    if len(session_ids) == 1:
+        return f"session:{next(iter(session_ids))}"
+
+    if events:
+        digest = uuid5(
+            NAMESPACE_URL,
+            "ouroboros:harness:projection:events:"
+            + "|".join(
+                _event_identity_part(event) for event in sorted(events, key=_event_sort_key)
+            ),
+        ).hex[:12]
+        return f"events:{digest}"
+
+    return f"seed:{seed_id}"
+
+
+def _event_scope_ids(events: Sequence[BaseEvent], *, scope: str) -> frozenset[str]:
+    values: set[str] = set()
+    data_key = f"{scope}_id"
+    for event in events:
+        if event.aggregate_type == scope and event.aggregate_id.strip():
+            values.add(event.aggregate_id.strip())
+        if isinstance(event.data, dict):
+            value = event.data.get(data_key)
+            if isinstance(value, str) and value.strip():
+                values.add(value.strip())
+    return frozenset(values)
+
+
+def _event_sort_key(event: BaseEvent) -> tuple[datetime, str]:
+    return (event.timestamp, event.id)
+
+
+def _event_identity_part(event: BaseEvent) -> str:
+    return (
+        f"{event.timestamp.isoformat()}::{event.id}::"
+        f"{event.aggregate_type}:{event.aggregate_id}::{event.type}"
+    )
+
+
+def _stable_run_id(source_key: str) -> str:
+    digest = uuid5(NAMESPACE_URL, f"ouroboros:harness:run:{source_key}").hex[:12]
+    return f"run_{digest}"
+
+
+def _stable_stage_id(run_id: str, kind: StageKind) -> str:
+    digest = uuid5(NAMESPACE_URL, f"ouroboros:harness:stage:{run_id}:{kind.value}").hex[:12]
+    return f"stage_{digest}"
 
 
 def _tool_step_metadata(

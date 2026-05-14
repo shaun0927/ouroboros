@@ -310,6 +310,37 @@ class TestIncrementalIngestion:
         assert first.run.run_id == second.run.run_id
         assert first.steps[0].step_id == second.steps[0].step_id
 
+    def test_one_shot_projection_ids_are_stable_across_replays(self) -> None:
+        t0 = datetime.now(UTC)
+        events = [
+            _tool_started(call_id="c1", tool_name="Bash", when=t0, event_id="evt_a"),
+            _tool_returned(
+                call_id="c1",
+                tool_name="Bash",
+                when=t0 + timedelta(milliseconds=10),
+                event_id="evt_b",
+            ),
+        ]
+
+        first = build_projection(events, seed_id="seed_abc")
+        second = build_projection(events, seed_id="seed_abc")
+
+        assert first.run.run_id == second.run.run_id
+        assert first.stages[0].stage_id == second.stages[0].stage_id
+        assert first.steps[0].step_id == second.steps[0].step_id
+
+    def test_projection_source_key_controls_run_identity(self) -> None:
+        events = [_tool_started(call_id="c1", tool_name="Bash")]
+
+        first = build_projection(events, seed_id="seed_abc", source_key="execution:exec_a")
+        second = build_projection(events, seed_id="seed_abc", source_key="execution:exec_a")
+        different = build_projection(events, seed_id="seed_abc", source_key="execution:exec_b")
+
+        assert first.run.run_id == second.run.run_id
+        assert first.stages[0].stage_id == second.stages[0].stage_id
+        assert first.run.run_id != different.run.run_id
+        assert first.stages[0].stage_id != different.stages[0].stage_id
+
     def test_in_flight_step_id_stays_stable_across_builds_and_completion(self) -> None:
         t0 = datetime.now(UTC)
         builder = ProjectionBuilder(seed_id="seed_abc")
