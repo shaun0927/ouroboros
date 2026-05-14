@@ -326,14 +326,27 @@ def _event_matches_required_anchors(
         keys=("execution_id", "parent_execution_id"),
     ):
         return False
-    return not (
-        session_id is not None
-        and not _event_matches_anchor(
-            event,
-            session_id,
-            keys=("session_id",),
-        )
-    )
+    return session_id is None or _event_matches_optional_session_anchor(event, session_id)
+
+
+def _event_matches_optional_session_anchor(event: BaseEvent, session_id: str) -> bool:
+    """Return True when an event does not contradict the optional session anchor.
+
+    The I/O journal recorder allows execution-scoped tool/LLM events to carry
+    ``execution_id`` without also carrying ``session_id``. Once an execution
+    anchor has matched, those rows are valid evidence and must not be pruned
+    merely because the optional session correlation field is absent. Explicit
+    session-scoped rows, or rows that do carry a ``session_id`` payload, still
+    have to match the requested session so broad EventStore OR queries cannot
+    splice another session's evidence into the manifest.
+    """
+    if event.aggregate_type == "session":
+        return event.aggregate_id == session_id
+    if isinstance(event.data, dict):
+        value = event.data.get("session_id")
+        if isinstance(value, str) and value.strip():
+            return value.strip() == session_id
+    return True
 
 
 def _event_matches_anchor(event: BaseEvent, anchor: str, *, keys: tuple[str, ...]) -> bool:
