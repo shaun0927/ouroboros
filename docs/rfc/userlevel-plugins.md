@@ -425,6 +425,15 @@ implementation PRs should use these event names unless the vendored
 - `plugin.hook.failed`
 - `plugin.hook.blocked`
 
+The current v0.3 schema slice vendors only the v1 hook **outcome** events
+needed for blocked/failed hook paths: `plugin.hook.blocked` and
+`plugin.hook.failed`. In code, `HOOK_OUTCOME_AUDIT_EVENTS` is the canonical
+constant for that narrowed set, and `HOOK_AUDIT_EVENTS` remains only a
+backward-compatible alias for the original #984 export. Successful hook
+start/completion telemetry (`plugin.hook.invoked` / `plugin.hook.completed`)
+must land through a separate schema/runtime slice before core emits those
+events.
+
 Hook event payloads follow the same bounded-payload rules as command audit
 events:
 

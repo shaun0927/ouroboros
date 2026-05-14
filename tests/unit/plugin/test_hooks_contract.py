@@ -6,8 +6,10 @@ Covers the v1 contract from issue #939 (first slice — types only):
 * ``DeferredHookKind`` and ``ExcludedHookKind`` enumerate the remaining
   candidate sets without overlapping ``HookKind``.
 * ``HookFailurePolicy`` exposes the two v1 policies the RFC defines.
-* ``HOOK_AUDIT_EVENTS`` matches the wrapper event names the RFC
-  references (``plugin.hook.blocked`` / ``plugin.hook.failed``).
+* ``HOOK_OUTCOME_AUDIT_EVENTS`` matches the v1 hook outcome event names
+  currently vendored in the schema (``plugin.hook.blocked`` /
+  ``plugin.hook.failed``), while ``HOOK_AUDIT_EVENTS`` remains a
+  compatibility alias for the original #984 export.
 * The ``is_*`` helpers route any candidate string to exactly one of
   v1 / deferred / excluded / unknown.
 """
@@ -18,6 +20,7 @@ from ouroboros.plugin.hooks import (
     HOOK_AUDIT_EVENTS,
     HOOK_BLOCKED_EVENT,
     HOOK_FAILED_EVENT,
+    HOOK_OUTCOME_AUDIT_EVENTS,
     DeferredHookKind,
     ExcludedHookKind,
     HookFailurePolicy,
@@ -81,16 +84,19 @@ class TestFailurePolicy:
 
 
 class TestAuditEventConstants:
-    def test_audit_event_set(self) -> None:
-        assert frozenset({"plugin.hook.blocked", "plugin.hook.failed"}) == HOOK_AUDIT_EVENTS
+    def test_hook_outcome_event_set(self) -> None:
+        assert frozenset({"plugin.hook.blocked", "plugin.hook.failed"}) == HOOK_OUTCOME_AUDIT_EVENTS
+
+    def test_legacy_audit_event_alias_points_to_outcome_events(self) -> None:
+        assert HOOK_AUDIT_EVENTS is HOOK_OUTCOME_AUDIT_EVENTS
 
     def test_blocked_event_constant(self) -> None:
         assert HOOK_BLOCKED_EVENT == "plugin.hook.blocked"
-        assert HOOK_BLOCKED_EVENT in HOOK_AUDIT_EVENTS
+        assert HOOK_BLOCKED_EVENT in HOOK_OUTCOME_AUDIT_EVENTS
 
     def test_failed_event_constant(self) -> None:
         assert HOOK_FAILED_EVENT == "plugin.hook.failed"
-        assert HOOK_FAILED_EVENT in HOOK_AUDIT_EVENTS
+        assert HOOK_FAILED_EVENT in HOOK_OUTCOME_AUDIT_EVENTS
 
 
 class TestRoutingHelpers:
