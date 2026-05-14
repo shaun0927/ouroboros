@@ -3014,6 +3014,72 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
         }
         return f"## Governed Dispatch Context ({label})\n{rendered}", audit
 
+    def _build_typed_evidence_prompt_section(self) -> str:
+        """Return profile evidence-output instructions for atomic leaf prompts.
+
+        Legacy dispatch has no active profile and keeps its historical prompt
+        shape.  Profile-backed dispatch must teach the leaf what the harness
+        will parse at completion; otherwise fat-harness enforcement can fail
+        every leaf before the verifier sees valid typed evidence.
+        """
+        profile = self._execution_profile
+        if profile is None:
+            return ""
+
+        required = list(profile.evidence_schema.required)
+        must_produce = list(profile.must_produce)
+        rejected_if = list(profile.evidence_schema.rejected_if)
+        example: dict[str, Any] = {}
+        for field_name in required:
+            if field_name == "files_touched":
+                example[field_name] = ["relative/path.py"]
+            elif field_name == "commands_run":
+                example[field_name] = ["pytest path/to/test.py"]
+            elif field_name == "tests_passed":
+                example[field_name] = ["path/to/test.py"]
+            else:
+                example[field_name] = ["evidence value"]
+
+        lines = [
+            "",
+            "## Required Typed Evidence",
+            "The active execution profile requires machine-readable evidence at completion.",
+            "After [TASK_COMPLETE], include exactly one fenced `json` object that the harness can parse.",
+        ]
+        if required:
+            lines.append("Required fields: " + ", ".join(required) + ".")
+        if must_produce:
+            lines.append("Must produce evidence for: " + ", ".join(must_produce) + ".")
+        if rejected_if:
+            lines.append("Rejected if: " + "; ".join(rejected_if) + ".")
+        lines.extend(
+            [
+                "Use relative paths from the working directory and list only tools/tests you actually ran.",
+                "If blocked by a legitimate precondition, return a blocked evidence object instead of prose-only status.",
+                "Completion template:",
+                "[TASK_COMPLETE]",
+                "```json",
+                json.dumps(example, indent=2, sort_keys=True),
+                "```",
+                "Blocked template:",
+                "```json",
+                json.dumps(
+                    {
+                        "status": "blocked",
+                        "blocker": {
+                            "code": "MISSING_AUTHORITY",
+                            "reason": "Explain the unmet precondition.",
+                            "required_by": "Name the required approval, credential, or tool.",
+                        },
+                    },
+                    indent=2,
+                    sort_keys=True,
+                ),
+                "```",
+            ]
+        )
+        return "\n".join(lines) + "\n"
+
     async def _emit_atomic_context_governed_event(
         self,
         *,
@@ -3392,6 +3458,8 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                     f"{other_list}\n"
                 )
 
+        typed_evidence_section = self._build_typed_evidence_prompt_section()
+
         # Scan the requested runtime workspace so prompts stay aligned with the actual task cwd.
         import os
 
@@ -3418,7 +3486,7 @@ Files present:
 {seed_goal}
 
 {task_section}
-{legacy_context_section}{retry_section}{parallel_section}
+{legacy_context_section}{retry_section}{parallel_section}{typed_evidence_section}
 Use the available tools to accomplish this task. Report your progress clearly.
 When complete, explicitly state: [TASK_COMPLETE]
 """

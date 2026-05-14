@@ -304,6 +304,14 @@ class TestProfileAwareContextGovernance:
         assert "## Parallel Execution Notice" in prompt
         assert "Avoid modifying files that other agents are likely editing." in prompt
         assert "summarized in the governed sibling-status section above" in prompt
+        assert "## Required Typed Evidence" in prompt
+        assert "Required fields: files_touched, commands_run, tests_passed." in prompt
+        assert "Must produce evidence for: tests_passed, files_touched." in prompt
+        assert "Rejected if: tests_passed == []." in prompt
+        assert '"files_touched": [' in prompt
+        assert '"commands_run": [' in prompt
+        assert '"tests_passed": [' in prompt
+        assert "Blocked template:" in prompt
 
         context_events = [
             event for event in appended_events if event.type == "execution.ac.context_governed"
@@ -400,6 +408,7 @@ class TestProfileAwareContextGovernance:
         assert "## Previous Work Context" in prompt
         assert "## Parallel Execution Notice" in prompt
         assert "## Governed Dispatch Context" not in prompt
+        assert "## Required Typed Evidence" not in prompt
         assert not any(event.type == "execution.ac.context_governed" for event in appended_events)
 
     @pytest.mark.asyncio
