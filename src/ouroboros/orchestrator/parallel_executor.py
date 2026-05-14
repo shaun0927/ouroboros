@@ -414,6 +414,7 @@ _MEMORY_WAIT_MAX_SECONDS = 120.0
 _MAX_LEAF_RESULT_CHARS = 1200
 _SIBLING_HEADLINE_CHARS = 80
 _SiblingACRef = tuple[int | None, str]
+_GOVERNED_COORDINATOR_REVIEW_HEADING_RE = re.compile(r"^## Coordinator Review \(Level (\d+)\)$")
 
 
 def _normalize_governed_parent_summary(parent_summary: str) -> str:
@@ -428,10 +429,12 @@ def _normalize_governed_parent_summary(parent_summary: str) -> str:
     """
     lines: list[str] = []
     for line in parent_summary.strip().splitlines():
-        if line.startswith("## "):
-            heading = line[3:].strip()
-            if heading:
-                lines.append(f"{heading}:")
+        if line == "## Previous Work Context":
+            lines.append("Previous Work Context:")
+            continue
+        coordinator_review = _GOVERNED_COORDINATOR_REVIEW_HEADING_RE.fullmatch(line)
+        if coordinator_review:
+            lines.append(f"Coordinator Review (Level {coordinator_review.group(1)}):")
             continue
         lines.append(line)
     return "\n".join(lines).strip()

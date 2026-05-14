@@ -28,6 +28,7 @@ from ouroboros.orchestrator.parallel_executor import (
     ParallelExecutionResult,
     StageExecutionOutcome,
     _message_contains_test_success,
+    _normalize_governed_parent_summary,
     render_parallel_completion_message,
     render_parallel_verification_report,
 )
@@ -105,6 +106,36 @@ def test_message_contains_test_success_handles_zero_failure_summaries(
     """Verifier accepts explicit zero-failure summaries without allowing failures."""
     message = AgentMessage(type="result", content=content, data={})
     assert _message_contains_test_success(message) is expected
+
+
+def test_normalize_governed_parent_summary_preserves_embedded_result_headings() -> None:
+    """Only framework wrapper H2 headings are normalized for governed dispatch."""
+    parent_summary = (
+        "\n## Previous Work Context\n"
+        "- AC 1: Prepare helper\n"
+        "  Result: Helper is ready\n"
+        "## User Heading\n"
+        "Prior result detail\n\n"
+        "## Coordinator Review (Level 12)\n"
+        "**Review**: No conflicts remain\n"
+        "## Coordinator Review (Level N)\n"
+        "## Previous Work Context appendix\n"
+    )
+
+    normalized = _normalize_governed_parent_summary(parent_summary)
+
+    assert normalized.splitlines() == [
+        "Previous Work Context:",
+        "- AC 1: Prepare helper",
+        "  Result: Helper is ready",
+        "## User Heading",
+        "Prior result detail",
+        "",
+        "Coordinator Review (Level 12):",
+        "**Review**: No conflicts remain",
+        "## Coordinator Review (Level N)",
+        "## Previous Work Context appendix",
+    ]
 
 
 class _FinalMessageRuntime:
@@ -274,7 +305,7 @@ class TestProfileAwareContextGovernance:
                     ac_index=0,
                     ac_content="Prepare helper",
                     success=True,
-                    key_output="Helper is ready",
+                    key_output=("Helper is ready\n## User Heading\nPrior result detail"),
                 ),
             ),
             coordinator_review=CoordinatorReview(
@@ -307,6 +338,9 @@ class TestProfileAwareContextGovernance:
         assert "Previous Work Context:" in prompt
         assert "Coordinator Review (Level 1):" in prompt
         assert "Helper is ready" in prompt
+        assert "## User Heading" in prompt
+        assert "User Heading:" not in prompt
+        assert "Prior result detail" in prompt
         assert "No conflicts remain" in prompt
         assert "Keep edits localized" in prompt
         assert "## Sibling status" in prompt
