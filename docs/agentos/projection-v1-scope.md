@@ -11,6 +11,15 @@ verdict records are rebuildable read-models over persisted events and existing
 state. Projection records must not become a second state model, execution
 control plane, plugin schema, or evidence-gate authority.
 
+## Current implementation baseline
+
+This boundary document is a scope map for the already-started #946 projection
+stack, not a new roadmap surface. The current baseline includes the v1 record
+schema, an EventStore projection builder, and a read-only MCP projection query
+from the earlier #946 slices (#980 / #983 / #990). Follow-up PRs should use this
+document to decide whether new work is additive projection coverage, a derived
+consumer, or out-of-scope authority that belongs to another canonical issue.
+
 ## Existing terms mapped to projection v1
 
 | Existing term / surface | Projection v1 term | Boundary |
