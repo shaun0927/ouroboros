@@ -174,6 +174,7 @@ def _runtime_message_search_text(message: AgentMessage) -> str:
     tool_input = message.data.get("tool_input")
     if isinstance(tool_input, dict):
         parts.extend(str(value) for value in tool_input.values() if value is not None)
+    parts.extend(_flatten_evidence_values(message.data))
     return "\n".join(parts).lower()
 
 
@@ -212,6 +213,20 @@ def _looks_like_test_command(command: str) -> bool:
             normalized,
         )
     )
+
+
+def _runtime_messages_include_test_success(messages: tuple[AgentMessage, ...]) -> bool:
+    """Return True when transcript evidence says a test command passed."""
+    for message in messages:
+        parts = [message.content]
+        for key in ("result_preview", "output", "stdout"):
+            value = message.data.get(key)
+            if isinstance(value, str):
+                parts.append(value)
+        text = "\n".join(parts).lower()
+        if re.search(r"\b(passed|pass|success|succeeded)\b|exit\s*code\s*0|0\s+failed", text):
+            return True
+    return False
 
 
 _REUSABLE_RUNTIME_EVENT_TYPES = frozenset(
@@ -3856,7 +3871,7 @@ When complete, explicitly state: [TASK_COMPLETE]
         The verifier deliberately ignores the final result message so the
         accepted evidence cannot be supported only by the leaf's self-report.
         """
-        support_messages = tuple(message for message in messages if not message.is_final)
+        support_messages = tuple(messages[:-1] if messages and messages[-1].is_final else messages)
         if not support_messages:
             return VerifierVerdict(
                 passed=False,
@@ -3873,19 +3888,23 @@ When complete, explicitly state: [TASK_COMPLETE]
                 _runtime_support_messages_for_field("commands_run", support_messages),
             )
         )
-        has_backed_test_command = any(
+        has_successful_backed_test_command = any(
             _looks_like_test_command(command) for command in backed_commands
-        )
+        ) and _runtime_messages_include_test_success(support_messages)
         for field_name in self._execution_profile.evidence_schema.required:
             values = tuple(_flatten_evidence_values(typed_evidence.get(field_name)))
             if not values:
                 unsupported.append(f"{field_name}: no concrete claim values")
                 continue
-            if field_name == "tests_passed" and has_backed_test_command:
-                continue
             field_messages = _runtime_support_messages_for_field(field_name, support_messages)
             for value in values:
                 if field_name == "files_touched" and self._evidence_path_exists(value):
+                    continue
+                if (
+                    field_name == "tests_passed"
+                    and has_successful_backed_test_command
+                    and self._evidence_path_exists(value)
+                ):
                     continue
                 if not _runtime_messages_support_claim(value, field_messages):
                     unsupported.append(f"{field_name}: {value}")
@@ -3905,8 +3924,16 @@ When complete, explicitly state: [TASK_COMPLETE]
             return False
         candidate = Path(value)
         if candidate.is_absolute():
-            return candidate.exists()
-        return (Path(self._task_cwd) / candidate).exists()
+            return False
+        if ".." in candidate.parts:
+            return False
+        base = Path(self._task_cwd).resolve()
+        resolved = (base / candidate).resolve()
+        try:
+            resolved.relative_to(base)
+        except ValueError:
+            return False
+        return resolved.exists()
 
     async def _emit_atomic_typed_evidence_event(
         self,
