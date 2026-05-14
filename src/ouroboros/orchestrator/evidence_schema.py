@@ -52,7 +52,6 @@ _FENCE_LINE_RE = re.compile(
     r"^(?P<indent>[ \t]{0,3})(?P<fence>`{3,})(?P<info>[^`\n]*)$",
     re.MULTILINE,
 )
-_CLOSING_FENCE_RE = re.compile(r"^[ \t]{0,3}`{3,}[ \t]*$", re.MULTILINE)
 _EXPR_RE = re.compile(r"^\s*(?P<field>[A-Za-z_][A-Za-z0-9_]*)\s*==\s*(?P<lit>.+?)\s*$")
 _DECODER = json.JSONDecoder()
 
@@ -143,6 +142,7 @@ def _top_level_fence_body_starts(text: str) -> Iterator[tuple[str, int]]:
         if opener is None:
             return
 
+        fence_len = len(opener.group("fence"))
         info = opener.group("info").strip().lower()
         body_start = opener.end()
         if body_start < len(text) and text[body_start] == "\n":
@@ -150,7 +150,8 @@ def _top_level_fence_body_starts(text: str) -> Iterator[tuple[str, int]]:
 
         yield info, body_start
 
-        closer = _CLOSING_FENCE_RE.search(text, body_start)
+        closing_fence_re = re.compile(rf"^[ \t]{{0,3}}`{{{fence_len},}}[ \t]*$", re.MULTILINE)
+        closer = closing_fence_re.search(text, body_start)
         if closer is None:
             return
         search_pos = closer.end()

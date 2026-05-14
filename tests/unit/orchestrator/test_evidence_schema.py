@@ -89,6 +89,33 @@ class TestExtractEvidence:
             "tests_passed": ["tests/test_emitter.py::test_example"],
         }
 
+    def test_matches_closing_fence_length_before_later_json_evidence(self) -> None:
+        text = (
+            "Documented an embedded markdown example:\n\n"
+            "````markdown\n"
+            "Example evidence shape:\n"
+            "```json\n"
+            '{"not": "top-level evidence"}\n'
+            "```\n"
+            "````\n\n"
+            "Validation evidence:\n\n"
+            "```json\n"
+            "{\n"
+            '  "files_touched": ["docs/example.md"],\n'
+            '  "commands_run": ["pytest tests/test_docs.py"],\n'
+            '  "tests_passed": ["tests/test_docs.py::test_example"]\n'
+            "}\n"
+            "```\n"
+        )
+
+        record = extract_evidence(text)
+
+        assert record.data == {
+            "files_touched": ["docs/example.md"],
+            "commands_run": ["pytest tests/test_docs.py"],
+            "tests_passed": ["tests/test_docs.py::test_example"],
+        }
+
     def test_fenced_block_without_lang_tag(self) -> None:
         record = extract_evidence('prelude\n```\n{"y": 2}\n```\n')
         assert record.data == {"y": 2}
