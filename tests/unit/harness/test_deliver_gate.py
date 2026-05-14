@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from ouroboros.events.base import BaseEvent
+from ouroboros.harness.claim_term_guard import deterministic_claim_term_guard
 from ouroboros.harness.deliver_gate import (
     DeliverEvidenceClaim,
     DeliverEvidenceFact,
@@ -595,6 +596,7 @@ class TestEvaluateDeliverClaim:
             manifest,
             claim,
             traceguard_validator=validator,
+            claim_term_guard=deterministic_claim_term_guard,
         )
 
         assert verdict.accepted is True
@@ -690,6 +692,7 @@ class TestEvaluateDeliverClaim:
             manifest,
             claim,
             traceguard_validator=validator,
+            claim_term_guard=deterministic_claim_term_guard,
         )
 
         assert verdict.accepted is True
@@ -783,6 +786,217 @@ class TestEvaluateDeliverClaim:
                 },
             }
         ]
+
+    def test_claim_term_guard_sees_non_edit_args_when_result_preview_exists(self) -> None:
+        manifest = EvidenceManifest(
+            ac_id="AC-1",
+            entries=(
+                _manifest_entry(
+                    handle="ev_test",
+                    ok=True,
+                    payload={
+                        "tool_name": "Bash",
+                        "args_preview": "uv run pytest -k admin_delete_denied",
+                        "result_preview": "pytest passed",
+                    },
+                    source_event_ids=("evt_test",),
+                ),
+            ),
+        )
+        claim = DeliverEvidenceClaim(
+            ac_id="AC-1",
+            facts=(
+                DeliverEvidenceFact(
+                    fact_id="test_passed:admin_delete_denied",
+                    evidence_handle="ev_test",
+                    statement="test_passed behavior=admin_delete_denied",
+                ),
+            ),
+        )
+        validator = _RecordingTraceGuardValidator()
+
+        verdict = evaluate_deliver_claim(
+            manifest,
+            claim,
+            traceguard_validator=validator,
+            claim_term_guard=deterministic_claim_term_guard,
+        )
+
+        assert verdict.accepted is True
+        assert verdict.accepted_fact_ids == ("test_passed:admin_delete_denied",)
+        assert validator.calls[0]["evidence_manifest"] == (
+            TraceGuardEvidenceInput(
+                fact_id="test_passed:admin_delete_denied",
+                chunk_id="ev_test",
+                text="pytest passed; uv run pytest -k admin_delete_denied",
+                child_call_id="evt_test",
+            ),
+        )
+
+    def test_claim_term_guard_rejects_traceguard_accepted_semantic_miss(self) -> None:
+        manifest = EvidenceManifest(
+            ac_id="AC-1",
+            entries=(
+                _manifest_entry(
+                    handle="ev_test",
+                    ok=True,
+                    payload={
+                        "tool_name": "Bash",
+                        "result_preview": "pytest passed for user profile update",
+                    },
+                    source_event_ids=("evt_test",),
+                ),
+            ),
+        )
+        claim = DeliverEvidenceClaim(
+            ac_id="AC-1",
+            facts=(
+                DeliverEvidenceFact(
+                    fact_id="test_passed:admin_delete_denied",
+                    evidence_handle="ev_test",
+                    statement="test_passed behavior=admin_delete_denied",
+                ),
+            ),
+        )
+
+        verdict = evaluate_deliver_claim(
+            manifest,
+            claim,
+            traceguard_validator=_RecordingTraceGuardValidator(),
+            claim_term_guard=deterministic_claim_term_guard,
+        )
+
+        assert verdict.accepted is False
+        assert verdict.unsupported_claim_rate == 0.0
+        assert verdict.accepted_fact_ids == ()
+        assert verdict.rejected_fact_ids == ("test_passed:admin_delete_denied",)
+        assert verdict.rejected_reasons == (
+            "semantic_miss: test_passed:admin_delete_denied cites ev_test but evidence text lacks "
+            "required term(s): behavior=admin_delete_denied",
+        )
+        assert verdict.evidence_event_ids == ()
+
+    def test_claim_term_guard_checks_mixed_traceguard_allowed_facts(self) -> None:
+        manifest = EvidenceManifest(
+            ac_id="AC-1",
+            entries=(
+                _manifest_entry(
+                    handle="ev_actual",
+                    ok=True,
+                    payload={
+                        "tool_name": "Bash",
+                        "result_preview": "pytest passed for user profile update",
+                    },
+                    source_event_ids=("evt_1",),
+                ),
+            ),
+        )
+        claim = DeliverEvidenceClaim(
+            ac_id="AC-1",
+            facts=(
+                DeliverEvidenceFact(
+                    fact_id="fact_actual",
+                    evidence_handle="ev_actual",
+                    statement="test_passed behavior=admin_delete_denied",
+                ),
+                DeliverEvidenceFact(
+                    fact_id="fact_missing",
+                    evidence_handle="ev_missing",
+                    statement="Unsupported claim.",
+                ),
+            ),
+        )
+
+        verdict = evaluate_deliver_claim(
+            manifest,
+            claim,
+            traceguard_validator=lambda **_: _TraceGuardResult(
+                accepted=False,
+                allowed_fact_ids=("fact_actual",),
+                allowed_chunk_ids=("ev_actual",),
+                rejected_claims=(
+                    _TraceGuardRejection(
+                        reason="unsupported_fact_id",
+                        claim=_TraceGuardClaim(fact_id="fact_missing", chunk_id="ev_missing"),
+                        detail="fact is not present in manifest",
+                    ),
+                ),
+            ),
+            claim_term_guard=deterministic_claim_term_guard,
+        )
+
+        assert verdict.accepted is False
+        assert verdict.unsupported_claim_rate == 0.5
+        assert verdict.accepted_fact_ids == ()
+        assert verdict.rejected_fact_ids == ("fact_missing", "fact_actual")
+        assert verdict.rejected_reasons == (
+            "missing_evidence_handle: ev_missing is not present in manifest",
+            "unsupported_fact_id: fact is not present in manifest",
+            "semantic_miss: fact_actual cites ev_actual but evidence text lacks "
+            "required term(s): behavior=admin_delete_denied",
+        )
+        assert verdict.evidence_event_ids == ()
+
+    def test_claim_term_guard_skips_chunk_only_fallback_for_mixed_rejection(self) -> None:
+        manifest = EvidenceManifest(
+            ac_id="AC-1",
+            entries=(
+                _manifest_entry(
+                    handle="ev_shared",
+                    ok=True,
+                    payload={
+                        "tool_name": "Bash",
+                        "result_preview": "pytest passed for behavior=supported_update",
+                    },
+                    source_event_ids=("evt_shared",),
+                ),
+            ),
+        )
+        claim = DeliverEvidenceClaim(
+            ac_id="AC-1",
+            facts=(
+                DeliverEvidenceFact(
+                    fact_id="fact_supported",
+                    evidence_handle="ev_shared",
+                    statement="test_passed behavior=supported_update",
+                ),
+                DeliverEvidenceFact(
+                    fact_id="fact_unsupported",
+                    evidence_handle="ev_shared",
+                    statement="test_passed behavior=unsupported_delete",
+                ),
+            ),
+        )
+
+        verdict = evaluate_deliver_claim(
+            manifest,
+            claim,
+            traceguard_validator=lambda **_: _TraceGuardResult(
+                accepted=False,
+                allowed_fact_ids=(),
+                allowed_chunk_ids=("ev_shared",),
+                rejected_claims=(
+                    _TraceGuardRejection(
+                        reason="unsupported_fact_id",
+                        claim=_TraceGuardClaim(
+                            fact_id="fact_unsupported",
+                            chunk_id="ev_shared",
+                        ),
+                        detail="fact was not structurally accepted",
+                    ),
+                ),
+            ),
+            claim_term_guard=deterministic_claim_term_guard,
+        )
+
+        assert verdict.accepted is False
+        assert verdict.unsupported_claim_rate == 0.5
+        assert verdict.accepted_fact_ids == ()
+        assert verdict.rejected_fact_ids == ("fact_unsupported",)
+        assert verdict.rejected_reasons == (
+            "unsupported_fact_id: fact was not structurally accepted",
+        )
+        assert verdict.evidence_event_ids == ("evt_shared",)
 
     def test_rejected_traceguard_result_is_preserved_for_routing(self) -> None:
         manifest = EvidenceManifest(
