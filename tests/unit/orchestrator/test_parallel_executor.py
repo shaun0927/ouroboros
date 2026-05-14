@@ -31,6 +31,7 @@ from ouroboros.orchestrator.parallel_executor import (
     render_parallel_verification_report,
 )
 from ouroboros.orchestrator.profile_loader import EvidenceSchema, load_profile
+from ouroboros.orchestrator.verifier import VerifierVerdict
 
 
 def _make_seed(*acceptance_criteria: str) -> Seed:
@@ -1106,6 +1107,8 @@ class TestParallelACExecutor:
         assert evidence_event.data["enforcement_error"] is None
         assert evidence_event.data["typed_evidence_present"] is True
         assert evidence_event.data["typed_evidence_valid"] is True
+        assert evidence_event.data["verifier_ran"] is True
+        assert evidence_event.data["verifier_passed"] is True
         assert evidence_event.data["required_fields"] == [
             "files_touched",
             "commands_run",
@@ -1197,6 +1200,7 @@ class TestParallelACExecutor:
         assert evidence_event.data["enforced"] is False
         assert evidence_event.data["typed_evidence_present"] is False
         assert evidence_event.data["typed_evidence_valid"] is False
+        assert evidence_event.data["verifier_ran"] is False
         assert "Evidence is not valid JSON" in evidence_event.data["typed_evidence_error"]
 
     @pytest.mark.asyncio
@@ -1254,6 +1258,7 @@ class TestParallelACExecutor:
         assert evidence_event.data["enforced"] is True
         assert evidence_event.data["fat_harness_mode"] is True
         assert "Evidence is not valid JSON" in evidence_event.data["enforcement_error"]
+        assert evidence_event.data["verifier_ran"] is False
 
         terminal_event = next(
             event for event in appended_events if event.type == "execution.session.failed"
@@ -1295,6 +1300,8 @@ class TestParallelACExecutor:
 
         assert result.success is True
         assert result.error is None
+        assert result.atomic_verifier_verdict is not None
+        assert result.atomic_verifier_verdict.passed is True
         evidence_event = next(
             event
             for event in appended_events
@@ -1305,6 +1312,71 @@ class TestParallelACExecutor:
         assert evidence_event.data["fat_harness_mode"] is True
         assert evidence_event.data["enforcement_error"] is None
         assert evidence_event.data["typed_evidence_valid"] is True
+        assert evidence_event.data["verifier_ran"] is True
+        assert evidence_event.data["verifier_passed"] is True
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_mode_rejects_verifier_fail(self) -> None:
+        """Fat harness requires a separate verifier PASS after typed evidence."""
+
+        def _rejecting_verifier(**kwargs: object) -> VerifierVerdict:
+            del kwargs
+            return VerifierVerdict(
+                passed=False,
+                reasons=("claimed test command did not support the AC",),
+                failure_class="FABRICATION_SUSPECTED",
+            )
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                "Done.\n"
+                "```json\n"
+                '{"files_touched":["src/app.py"],'
+                '"commands_run":["pytest"],'
+                '"tests_passed":["tests/test_app.py"]}\n'
+                "```",
+                native_session_id="opencode-session-evidence",
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+            atomic_verifier=_rejecting_verifier,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement AC 1",
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "Fat-harness verifier failed" in result.error
+        assert "claimed test command did not support the AC" in result.error
+        assert result.atomic_verifier_verdict is not None
+        assert result.atomic_verifier_verdict.passed is False
+
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["typed_evidence_valid"] is True
+        assert evidence_event.data["verifier_ran"] is True
+        assert evidence_event.data["verifier_passed"] is False
+        assert evidence_event.data["verifier_failure_class"] == "FABRICATION_SUSPECTED"
+        assert evidence_event.data["verifier_reasons"] == [
+            "claimed test command did not support the AC"
+        ]
 
     @pytest.mark.asyncio
     async def test_atomic_ac_typed_evidence_event_failure_does_not_fail_success(self) -> None:

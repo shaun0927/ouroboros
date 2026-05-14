@@ -106,6 +106,12 @@ from ouroboros.orchestrator.profile_loader import ExecutionProfile
 from ouroboros.orchestrator.runtime_message_projection import (
     project_runtime_message,
 )
+from ouroboros.orchestrator.verifier import (
+    Verifier,
+    VerifierContractError,
+    VerifierVerdict,
+    structural_atomic_verifier,
+)
 
 if TYPE_CHECKING:
     from ouroboros.core.seed import Seed
@@ -500,6 +506,7 @@ class ParallelACExecutor:
         task_cwd: str | None = None,
         execution_profile: ExecutionProfile | None = None,
         fat_harness_mode: bool = False,
+        atomic_verifier: Verifier | None = None,
     ):
         """Initialize executor.
 
@@ -516,8 +523,11 @@ class ParallelACExecutor:
             task_cwd: Explicit working directory override for task execution metadata.
             execution_profile: Optional profile that makes decomposition split along
                 profile axis/min_unit instead of the legacy generic prompt.
-            fat_harness_mode: Temporary PR-4 opt-in mode that enforces
-                profile typed-evidence validation at atomic AC acceptance.
+            fat_harness_mode: Enforce profile typed evidence plus a verifier
+                PASS at atomic AC acceptance.
+            atomic_verifier: Optional verifier callable for the separate
+                atomic evidence PASS gate. Defaults to the harness-owned
+                structural verifier.
         """
         self._adapter = adapter
         self._event_store = event_store
@@ -528,6 +538,7 @@ class ParallelACExecutor:
         self._task_cwd = task_cwd
         self._execution_profile = execution_profile
         self._fat_harness_mode = fat_harness_mode
+        self._atomic_verifier = atomic_verifier or structural_atomic_verifier
         self._coordinator = LevelCoordinator(
             adapter,
             inherited_runtime_handle=inherited_runtime_handle,
@@ -3517,11 +3528,19 @@ When complete, explicitly state: [TASK_COMPLETE]
                 final_message=final_message,
                 success=success,
             )
+            verifier_verdict = self._run_atomic_verifier_pass(
+                ac_content=ac_content,
+                final_message=final_message,
+                success=success,
+                typed_evidence=typed_evidence,
+                typed_validation=typed_validation,
+            )
             fat_harness_error = self._fat_harness_acceptance_error(
                 runtime_success=success,
                 typed_evidence=typed_evidence,
                 typed_validation=typed_validation,
                 typed_error=typed_error,
+                verifier_verdict=verifier_verdict,
             )
             result_final_message = final_message
             if fat_harness_error is not None:
@@ -3539,6 +3558,7 @@ When complete, explicitly state: [TASK_COMPLETE]
                 typed_evidence=typed_evidence,
                 typed_validation=typed_validation,
                 typed_error=typed_error,
+                verifier_verdict=verifier_verdict,
                 enforcement_error=fat_harness_error,
             )
             await self._emit_ac_runtime_event(
@@ -3583,6 +3603,7 @@ When complete, explicitly state: [TASK_COMPLETE]
                 typed_evidence=typed_evidence,
                 typed_evidence_validation=typed_validation,
                 typed_evidence_error=typed_error,
+                atomic_verifier_verdict=verifier_verdict,
                 error=fat_harness_error,
             )
 
@@ -3678,8 +3699,9 @@ When complete, explicitly state: [TASK_COMPLETE]
         typed_evidence: EvidenceRecord | None,
         typed_validation: ValidationResult | None,
         typed_error: str | None,
+        verifier_verdict: VerifierVerdict | None,
     ) -> str | None:
-        """Return the opt-in fat-harness rejection reason for an atomic leaf."""
+        """Return the fat-harness rejection reason for an atomic leaf."""
         if not self._fat_harness_mode or not runtime_success:
             return None
         if self._execution_profile is None:
@@ -3689,7 +3711,12 @@ When complete, explicitly state: [TASK_COMPLETE]
         if typed_validation is None:
             return "Fat-harness mode could not validate typed evidence."
         if typed_validation.ok:
-            return None
+            if verifier_verdict is None:
+                return "Fat-harness mode requires verifier PASS before atomic acceptance."
+            if verifier_verdict.passed:
+                return None
+            detail = "; ".join(verifier_verdict.reasons) or "verifier rejected atomic evidence"
+            return f"Fat-harness verifier failed ({detail})."
 
         reasons: list[str] = []
         if typed_validation.missing_fields:
@@ -3701,6 +3728,36 @@ When complete, explicitly state: [TASK_COMPLETE]
         detail = "; ".join(reasons) if reasons else "profile evidence validation failed"
         return f"Fat-harness typed evidence validation failed ({detail})."
 
+    def _run_atomic_verifier_pass(
+        self,
+        *,
+        ac_content: str,
+        final_message: str,
+        success: bool,
+        typed_evidence: EvidenceRecord | None,
+        typed_validation: ValidationResult | None,
+    ) -> VerifierVerdict | None:
+        """Run the separate verifier pass once typed evidence is schema-valid."""
+        if (
+            not success
+            or self._execution_profile is None
+            or typed_evidence is None
+            or typed_validation is None
+            or not typed_validation.ok
+        ):
+            return None
+
+        verdict = self._atomic_verifier(
+            profile=self._execution_profile,
+            ac=ac_content,
+            leaf_output=final_message,
+            record=typed_evidence,
+        )
+        if not isinstance(verdict, VerifierVerdict):
+            msg = f"Atomic verifier returned {type(verdict).__name__}, expected VerifierVerdict."
+            raise VerifierContractError(msg)
+        return verdict
+
     async def _emit_atomic_typed_evidence_event(
         self,
         *,
@@ -3711,6 +3768,7 @@ When complete, explicitly state: [TASK_COMPLETE]
         typed_evidence: EvidenceRecord | None,
         typed_validation: ValidationResult | None,
         typed_error: str | None,
+        verifier_verdict: VerifierVerdict | None = None,
         enforcement_error: str | None = None,
     ) -> None:
         """Persist typed-evidence metadata for atomic AC completion."""
@@ -3734,7 +3792,12 @@ When complete, explicitly state: [TASK_COMPLETE]
             "typed_evidence_present": typed_evidence is not None,
             "typed_evidence_valid": typed_validation.ok if typed_validation is not None else False,
             "typed_evidence_error": typed_error,
+            "verifier_ran": verifier_verdict is not None,
+            "verifier_passed": verifier_verdict.passed if verifier_verdict is not None else False,
         }
+        if verifier_verdict is not None:
+            data["verifier_reasons"] = list(verifier_verdict.reasons)
+            data["verifier_failure_class"] = verifier_verdict.failure_class
         if typed_evidence is not None:
             data["typed_evidence_fields"] = sorted(typed_evidence.data)
         if typed_validation is not None:
