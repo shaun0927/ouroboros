@@ -401,12 +401,15 @@ def next_runnable_node_ids(
         if state is WorkflowNodeLifecycleState.COMPLETED
     }
     latest_node_attempts: dict[str, int | None] = {}
-    traversed_edge_attempts: dict[str, set[int | None]] = {}
+    latest_node_completed_at: dict[str, datetime] = {}
+    traversed_edge_events: dict[str, list[WorkflowLifecycleEvent]] = {}
     for event in sorted(event_list, key=lambda item: item.timestamp):
         if event.event_type in _NODE_EVENT_TYPES and event.node_id is not None:
             latest_node_attempts[event.node_id] = event.attempt
+            if event.event_type is WorkflowLifecycleEventType.NODE_COMPLETED:
+                latest_node_completed_at[event.node_id] = event.timestamp
         if event.event_type is WorkflowLifecycleEventType.EDGE_TRAVERSED and event.edge_id:
-            traversed_edge_attempts.setdefault(event.edge_id, set()).add(event.attempt)
+            traversed_edge_events.setdefault(event.edge_id, []).append(event)
     nodes_by_id: dict[str, WorkflowNode] = {node.node_id: node for node in spec.nodes}
     incoming: dict[str, list[WorkflowEdge]] = {node_id: [] for node_id in nodes_by_id}
     for edge in spec.edges:
@@ -417,13 +420,17 @@ def next_runnable_node_ids(
         if edge.kind is EdgeKind.CONDITIONAL:
             if edge.source not in completed:
                 return False
-            edge_attempts = traversed_edge_attempts.get(edge.edge_id)
-            if not edge_attempts:
+            source_completed_at = latest_node_completed_at.get(edge.source)
+            if source_completed_at is None:
                 return False
             source_attempt = latest_node_attempts.get(edge.source)
-            if source_attempt is None:
+            for traversal in traversed_edge_events.get(edge.edge_id, ()):
+                if traversal.timestamp < source_completed_at:
+                    continue
+                if source_attempt is not None and traversal.attempt != source_attempt:
+                    continue
                 return True
-            return source_attempt in edge_attempts
+            return False
         return edge.source in completed
 
     runnable: list[str] = []
