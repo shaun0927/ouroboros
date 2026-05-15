@@ -110,10 +110,13 @@ def project_human_input_state(events: Iterable[BaseEvent]) -> tuple[HumanInputSn
             continue
 
         if event.type == HumanInputResponse.ANSWERED_EVENT_TYPE:
+            answered_state = _state_from_answered_event(event)
+            if answered_state is None:
+                continue
             snapshots[request_id] = _snapshot_from_terminal(
                 current,
                 event,
-                state=_state_from_answered_event(event),
+                state=answered_state,
                 response=_frozen_payload(event.data),
             )
             continue
@@ -188,13 +191,33 @@ def _snapshot_from_terminal(
     )
 
 
-def _state_from_answered_event(event: BaseEvent) -> HumanInputState:
+def _state_from_answered_event(event: BaseEvent) -> HumanInputState | None:
+    if _optional_str(event.data.get("actor")) is None:
+        return None
+
     response_kind = event.data.get("response_kind")
     if response_kind == HumanInputResponseKind.CANCEL.value:
         return HumanInputState.CANCELLED
     if response_kind == HumanInputResponseKind.TIMEOUT.value:
         return HumanInputState.TIMED_OUT
-    return HumanInputState.ANSWERED
+    if response_kind == HumanInputResponseKind.TEXT.value:
+        return (
+            HumanInputState.ANSWERED if _optional_str(event.data.get("text")) is not None else None
+        )
+    if response_kind == HumanInputResponseKind.SELECTION.value:
+        selected_values = event.data.get("selected_values")
+        if isinstance(selected_values, list | tuple) and any(
+            _optional_str(value) is not None for value in selected_values
+        ):
+            return HumanInputState.ANSWERED
+        return None
+    if response_kind == HumanInputResponseKind.APPROVAL.value:
+        return (
+            HumanInputState.ANSWERED
+            if isinstance(event.data.get("approval_decision"), bool)
+            else None
+        )
+    return None
 
 
 def _event_request_id(event: BaseEvent) -> str | None:

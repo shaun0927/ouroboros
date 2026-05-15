@@ -101,6 +101,63 @@ def test_answered_event_closes_request_with_response_payload() -> None:
     assert pending_human_input_requests(events) == ()
 
 
+def test_malformed_answered_events_do_not_close_pending_request() -> None:
+    request = _request()
+    requested = _with_time(create_hitl_requested_event(request), 0, "evt_requested")
+    missing_kind = _with_time(
+        BaseEvent(
+            type="hitl.answered",
+            aggregate_type="hitl",
+            aggregate_id="hitl-1",
+            data={"request_id": "hitl-1", "actor": "local-user"},
+        ),
+        1,
+        "evt_missing_kind",
+    )
+    unknown_kind = _with_time(
+        BaseEvent(
+            type="hitl.answered",
+            aggregate_type="hitl",
+            aggregate_id="hitl-1",
+            data={
+                "request_id": "hitl-1",
+                "actor": "local-user",
+                "response_kind": "unknown",
+            },
+        ),
+        2,
+        "evt_unknown_kind",
+    )
+    missing_answer_content = _with_time(
+        BaseEvent(
+            type="hitl.answered",
+            aggregate_type="hitl",
+            aggregate_id="hitl-1",
+            data={
+                "request_id": "hitl-1",
+                "actor": "local-user",
+                "response_kind": "approval",
+            },
+        ),
+        3,
+        "evt_missing_answer_content",
+    )
+
+    snapshots = project_human_input_state(
+        [requested, missing_kind, unknown_kind, missing_answer_content]
+    )
+
+    assert len(snapshots) == 1
+    assert snapshots[0].state is HumanInputState.PENDING
+    assert snapshots[0].updated_event_id == "evt_requested"
+    assert (
+        pending_human_input_requests(
+            [requested, missing_kind, unknown_kind, missing_answer_content]
+        )
+        == snapshots
+    )
+
+
 def test_answered_cancel_and_timeout_responses_project_terminal_state() -> None:
     cancel_request = _request("hitl-cancel-answer")
     timeout_request = _request("hitl-timeout-answer")
