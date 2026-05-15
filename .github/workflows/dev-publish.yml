@@ -88,6 +88,39 @@ jobs:
         env:
           UV_PUBLISH_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
         run: |
-          uv publish --check-url https://pypi.org/simple/ dist/*
-          echo "::notice::✅ Published ouroboros-ai==${{ steps.build.outputs.version }} to PyPI"
-          echo "::notice::Install: pip install ouroboros-ai==${{ steps.build.outputs.version }}"
+          if [ -z "${UV_PUBLISH_TOKEN:-}" ]; then
+            echo "::notice::PyPI publish skipped: PYPI_API_TOKEN is not configured."
+            exit 0
+          fi
+
+          publish_log="$(mktemp)"
+
+          set +e
+          uv publish --check-url https://pypi.org/simple/ dist/* >"$publish_log" 2>&1
+          publish_status=$?
+          set -e
+
+          if [ "$publish_status" -eq 0 ]; then
+            echo "::notice::✅ Published ouroboros-ai==${{ steps.build.outputs.version }} to PyPI"
+            echo "::notice::Install: pip install ouroboros-ai==${{ steps.build.outputs.version }}"
+            exit 0
+          fi
+
+          if grep -Eiq "(invalid or non-existent authentication information|authentication|unauthorized|forbidden|^error:.*40[13])" "$publish_log"; then
+            echo "::notice::PyPI publish skipped: configured credential was rejected by PyPI."
+            exit 0
+          fi
+
+          echo "::error::uv publish failed for a non-authentication reason."
+          python - "$publish_log" <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+
+          text = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
+          token = os.environ.get("UV_PUBLISH_TOKEN", "")
+          if token:
+              text = text.replace(token, "***")
+          print(text, end="")
+          PY
+          exit "$publish_status"
