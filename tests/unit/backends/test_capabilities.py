@@ -15,6 +15,18 @@ from ouroboros.backends import (
     soft_tool_enforcement_backends,
 )
 
+REQUIRED_SKILL_CAPABILITY_NAMES = {
+    "ask_user",
+    "inspect_code",
+    "call_mcp",
+    "web_research",
+    "run_shell",
+    "refine_answer",
+    "maintain_ledger",
+    "run_closure_gate",
+    "restate_goal",
+}
+
 
 def test_resolves_aliases_to_canonical_names() -> None:
     assert resolve_backend_alias("codex_cli") == "codex"
@@ -68,17 +80,7 @@ def test_codex_skill_execution_guidance_is_registry_owned() -> None:
 
     assert capability is not None
     names = {item.name for item in capability.skill_execution_capabilities}
-    assert {
-        "ask_user",
-        "inspect_code",
-        "call_mcp",
-        "web_research",
-        "run_shell",
-        "refine_answer",
-        "maintain_ledger",
-        "run_closure_gate",
-        "restate_goal",
-    }.issubset(names)
+    assert names == REQUIRED_SKILL_CAPABILITY_NAMES
 
 
 def test_generic_skill_execution_guidance_covers_interview_requirements() -> None:
@@ -86,17 +88,7 @@ def test_generic_skill_execution_guidance_covers_interview_requirements() -> Non
 
     assert capability is not None
     names = {item.name for item in capability.skill_execution_capabilities}
-    assert {
-        "ask_user",
-        "inspect_code",
-        "call_mcp",
-        "web_research",
-        "run_shell",
-        "refine_answer",
-        "maintain_ledger",
-        "run_closure_gate",
-        "restate_goal",
-    }.issubset(names)
+    assert names == REQUIRED_SKILL_CAPABILITY_NAMES
 
 
 def test_renders_codex_skill_capability_guide_as_stable_markdown() -> None:
@@ -120,5 +112,5 @@ def test_renders_generic_skill_capability_guides_for_phase_two_runtimes() -> Non
         guide = render_backend_skill_capability_guide(backend_name)
 
         assert guide.startswith(f"## Ouroboros Skill Capability Guide: {backend_name.title()}\n")
-        assert "### When a skill requires `ask_user`" in guide
-        assert "### When a skill requires `run_closure_gate`" in guide
+        for capability_name in REQUIRED_SKILL_CAPABILITY_NAMES:
+            assert f"### When a skill requires `{capability_name}`" in guide

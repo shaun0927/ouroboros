@@ -75,8 +75,18 @@ class TestInstallHermesSkills:
         )
 
         assert guide.startswith("## Ouroboros Skill Capability Guide: Hermes\n")
-        assert "### When a skill requires `ask_user`" in guide
-        assert "### When a skill requires `run_closure_gate`" in guide
+        for capability_name in (
+            "ask_user",
+            "inspect_code",
+            "call_mcp",
+            "web_research",
+            "run_shell",
+            "refine_answer",
+            "maintain_ledger",
+            "run_closure_gate",
+            "restate_goal",
+        ):
+            assert f"### When a skill requires `{capability_name}`" in guide
 
     def test_replaces_existing_hermes_bundle(self, tmp_path: Path, monkeypatch) -> None:
         """Refreshing the Hermes install should replace managed skill directories."""
