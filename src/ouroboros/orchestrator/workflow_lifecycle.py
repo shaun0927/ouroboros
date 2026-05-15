@@ -170,9 +170,9 @@ def _run_boundary_group_order(
     return (_EVENT_SORT_ORDER[event.event_type], event.event_type.value)
 
 
-def _sort_run_boundary_events(
+def _timestamp_groups(
     events: Iterable[WorkflowLifecycleEvent],
-) -> tuple[WorkflowLifecycleEvent, ...]:
+) -> tuple[tuple[WorkflowLifecycleEvent, ...], ...]:
     sorted_events = sorted(events, key=lambda event: event.timestamp)
     grouped_events: list[list[WorkflowLifecycleEvent]] = []
     for event in sorted_events:
@@ -180,14 +180,29 @@ def _sort_run_boundary_events(
             grouped_events[-1].append(event)
         else:
             grouped_events.append([event])
+    return tuple(tuple(group) for group in grouped_events)
 
+
+def _has_terminal_restart_tie(events: Iterable[WorkflowLifecycleEvent]) -> bool:
+    event_tuple = tuple(events)
+    return any(event.event_type in _TERMINAL_RUN_EVENT_TYPES for event in event_tuple) and any(
+        event.event_type is WorkflowLifecycleEventType.RUN_CREATED for event in event_tuple
+    )
+
+
+def _has_ambiguous_restart_tie(events: Iterable[WorkflowLifecycleEvent]) -> bool:
+    event_tuple = tuple(events)
+    return _has_terminal_restart_tie(event_tuple) and any(
+        event.event_type not in _RUN_EVENT_TYPES for event in event_tuple
+    )
+
+
+def _sort_run_boundary_events(
+    events: Iterable[WorkflowLifecycleEvent],
+) -> tuple[WorkflowLifecycleEvent, ...]:
     ordered_events: list[WorkflowLifecycleEvent] = []
-    for timestamp_events in grouped_events:
-        has_terminal_restart_tie = any(
-            event.event_type in _TERMINAL_RUN_EVENT_TYPES for event in timestamp_events
-        ) and any(
-            event.event_type is WorkflowLifecycleEventType.RUN_CREATED for event in timestamp_events
-        )
+    for timestamp_events in _timestamp_groups(events):
+        has_terminal_restart_tie = _has_terminal_restart_tie(timestamp_events)
         ordered_events.extend(
             sorted(
                 timestamp_events,
@@ -349,6 +364,7 @@ class WorkflowConformanceIssue(BaseModel, frozen=True):
 
     severity: Literal["error", "warning"]
     code: Literal[
+        "ambiguous_run_boundary_timestamp",
         "invalid_spec",
         "unknown_node_id",
         "unknown_edge_id",
@@ -543,6 +559,8 @@ def next_runnable_node_ids(
     dispatch work.
     """
     event_list = tuple(event for event in events if event.workflow_id == spec.spec_id)
+    if any(_has_ambiguous_restart_tie(group) for group in _timestamp_groups(event_list)):
+        return ()
     latest_run_state, latest_run_events = _run_lifecycle_segment(event_list)
     if latest_run_state in {
         WorkflowRunLifecycleState.COMPLETED,
@@ -628,6 +646,20 @@ def validate_workflow_lifecycle_conformance(
                 edge_id=error.edge_id,
             )
         )
+
+    for timestamp_events in _timestamp_groups(event_list):
+        if _has_ambiguous_restart_tie(timestamp_events):
+            issues.append(
+                WorkflowConformanceIssue(
+                    severity="error",
+                    code="ambiguous_run_boundary_timestamp",
+                    message=(
+                        "Timestamp contains a terminal run event, workflow.run.created, "
+                        "and node/edge lifecycle rows; add a distinct timestamp or run id "
+                        "before validating restart conformance."
+                    ),
+                )
+            )
 
     node_ids = {node.node_id for node in spec.nodes}
     edge_ids = {edge.edge_id for edge in spec.edges}

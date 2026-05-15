@@ -509,7 +509,7 @@ def test_next_runnable_allows_new_run_at_terminal_timestamp_after_active_run() -
     assert next_runnable_node_ids(spec, tuple(reversed(events))) == ("node_a",)
 
 
-def test_next_runnable_keeps_same_timestamp_completion_in_closing_run() -> None:
+def test_next_runnable_refuses_ambiguous_same_timestamp_restart_completion() -> None:
     spec = _spec()
     start = datetime(2026, 5, 15, tzinfo=UTC)
     boundary = start + timedelta(seconds=1)
@@ -537,7 +537,38 @@ def test_next_runnable_keeps_same_timestamp_completion_in_closing_run() -> None:
         ),
     )
 
-    assert next_runnable_node_ids(spec, events) == ("node_a",)
+    assert next_runnable_node_ids(spec, events) == ()
+
+
+def test_next_runnable_refuses_ambiguous_same_timestamp_restart_node_state() -> None:
+    spec = _spec()
+    start = datetime(2026, 5, 15, tzinfo=UTC)
+    boundary = start + timedelta(seconds=1)
+    events = (
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            timestamp=start,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_COMPLETED,
+            workflow_id=spec.spec_id,
+            timestamp=boundary,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            timestamp=boundary,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.NODE_STARTED,
+            workflow_id=spec.spec_id,
+            node_id="node_a",
+            timestamp=boundary,
+        ),
+    )
+
+    assert next_runnable_node_ids(spec, events) == ()
 
 
 def test_next_runnable_scopes_node_state_to_latest_run_after_restart() -> None:
