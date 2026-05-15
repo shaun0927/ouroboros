@@ -432,3 +432,43 @@ def test_pending_step_in_closed_stage_is_unknown() -> None:
         "pending_steps_present",
         "pending_steps_after_stage_end",
     )
+
+
+def test_pending_failed_step_is_unknown() -> None:
+    pending_failed = StepRecord(
+        step_id="step_pending_failed",
+        run_id="run_1",
+        stage_id="stage_1",
+        kind=StepKind.TOOL_CALL,
+        ended_at=None,
+        ok=False,
+        source_event_ids=("evt_pending_failed",),
+    )
+
+    snapshot = build_run_snapshot(
+        run=_run(),
+        stages=[_stage("step_pending_failed")],
+        steps=[pending_failed],
+    )
+
+    assert snapshot.status is RunSnapshotStatus.UNKNOWN
+    assert snapshot.safe_resume is False
+    assert snapshot.pending_step_ids == ("step_pending_failed",)
+    assert snapshot.failed_step_ids == ()
+    assert snapshot.resume_blockers == (
+        "status_unknown",
+        "pending_steps_present",
+        "pending_failed_steps_present",
+    )
+
+
+def test_ended_run_without_verdict_is_unknown() -> None:
+    snapshot = build_run_snapshot(
+        run=_run(ended=True),
+        stages=[_stage("step_done")],
+        steps=[_step("step_done", ended=True, ok=True)],
+    )
+
+    assert snapshot.status is RunSnapshotStatus.UNKNOWN
+    assert snapshot.safe_resume is False
+    assert snapshot.resume_blockers == ("status_unknown",)
