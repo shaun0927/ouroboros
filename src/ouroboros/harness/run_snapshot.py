@@ -104,7 +104,7 @@ def build_run_snapshot(
         ),
         source_event_ids=_snapshot_source_event_ids(
             steps=step_tuple,
-            verdict=verdict if not unlinked_supplied_verdict else None,
+            verdict=verdict,
         ),
         recorded_at=recorded_at or datetime.now(UTC),
         metadata=MappingProxyType(metadata),

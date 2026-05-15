@@ -254,6 +254,7 @@ def test_unlinked_same_run_verdict_blocks_resume_conservatively() -> None:
         run_id="run_1",
         scope="run",
         outcome=VerdictOutcome.PASS,
+        evidence_event_ids=("evt_verdict_unlinked",),
     )
 
     snapshot = build_run_snapshot(run=_run(), stages=[_stage()], verdict=verdict)
@@ -261,6 +262,7 @@ def test_unlinked_same_run_verdict_blocks_resume_conservatively() -> None:
     assert snapshot.status is RunSnapshotStatus.UNKNOWN
     assert snapshot.safe_resume is False
     assert snapshot.verdict_id is None
+    assert snapshot.source_event_ids == ("evt_verdict_unlinked",)
     assert snapshot.resume_blockers == ("status_unknown", "unlinked_verdict_present")
 
 
