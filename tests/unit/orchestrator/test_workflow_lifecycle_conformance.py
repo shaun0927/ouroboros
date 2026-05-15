@@ -142,6 +142,75 @@ def test_conformance_allows_new_run_created_after_terminal_boundary() -> None:
     assert report.errors == ()
 
 
+def test_conformance_accepts_new_run_created_at_terminal_timestamp() -> None:
+    spec = _spec()
+    start = datetime(2026, 5, 15, tzinfo=UTC)
+    boundary = start + timedelta(seconds=1)
+    events = (
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            timestamp=start,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_COMPLETED,
+            workflow_id=spec.spec_id,
+            timestamp=boundary,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            timestamp=boundary,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.NODE_STARTED,
+            workflow_id=spec.spec_id,
+            node_id="node_a",
+            timestamp=boundary + timedelta(seconds=1),
+        ),
+    )
+
+    report = validate_workflow_lifecycle_conformance(spec, events)
+
+    assert report.ok is True
+    assert report.errors == ()
+
+
+def test_conformance_still_flags_later_event_after_same_timestamp_terminal_group() -> None:
+    spec = _spec()
+    start = datetime(2026, 5, 15, tzinfo=UTC)
+    boundary = start + timedelta(seconds=1)
+    events = (
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            timestamp=start,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.NODE_COMPLETED,
+            workflow_id=spec.spec_id,
+            node_id="node_a",
+            timestamp=boundary,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_COMPLETED,
+            workflow_id=spec.spec_id,
+            timestamp=boundary,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.EDGE_TRAVERSED,
+            workflow_id=spec.spec_id,
+            edge_id="edge_a_end",
+            timestamp=boundary + timedelta(seconds=1),
+        ),
+    )
+
+    report = validate_workflow_lifecycle_conformance(spec, events)
+
+    assert report.ok is False
+    assert [issue.code for issue in report.errors] == ["event_after_terminal_run"]
+
+
 def test_conformance_flags_events_after_terminal_run() -> None:
     spec = _spec()
     start = datetime(2026, 5, 15, tzinfo=UTC)
