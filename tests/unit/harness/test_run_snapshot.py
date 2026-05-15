@@ -32,8 +32,13 @@ def _run(*, ended: bool = False, verdict_id: str | None = None) -> RunRecord:
     )
 
 
-def _stage() -> StageRecord:
-    return StageRecord(stage_id="stage_1", run_id="run_1", kind=StageKind.EXECUTE)
+def _stage(*step_ids: str) -> StageRecord:
+    return StageRecord(
+        stage_id="stage_1",
+        run_id="run_1",
+        kind=StageKind.EXECUTE,
+        step_ids=step_ids,
+    )
 
 
 def _step(step_id: str, *, ended: bool, ok: bool | None) -> StepRecord:
@@ -57,7 +62,7 @@ def test_running_snapshot_with_pending_work_is_safe_to_resume() -> None:
 
     snapshot = build_run_snapshot(
         run=_run(),
-        stages=[_stage()],
+        stages=[_stage("step_done", "step_pending")],
         steps=[completed, pending],
         artifacts=[artifact],
         source_event_ids=("evt_step_done", "evt_step_pending"),
@@ -78,7 +83,7 @@ def test_running_snapshot_with_pending_work_is_safe_to_resume() -> None:
 def test_failed_step_blocks_resume() -> None:
     snapshot = build_run_snapshot(
         run=_run(),
-        stages=[_stage()],
+        stages=[_stage("step_failed")],
         steps=[_step("step_failed", ended=True, ok=False)],
     )
 
@@ -97,7 +102,9 @@ def test_human_escalation_verdict_is_waiting_but_not_safe_resume() -> None:
         evidence_event_ids=("evt_verdict",),
     )
 
-    snapshot = build_run_snapshot(run=_run(verdict_id="verdict_1"), verdict=verdict)
+    snapshot = build_run_snapshot(
+        run=_run(verdict_id="verdict_1"), stages=[_stage()], verdict=verdict
+    )
 
     assert snapshot.status is RunSnapshotStatus.WAITING
     assert snapshot.safe_resume is False
@@ -113,7 +120,11 @@ def test_terminal_verdicts_block_resume() -> None:
         outcome=VerdictOutcome.PASS,
     )
 
-    snapshot = build_run_snapshot(run=_run(ended=True, verdict_id="verdict_pass"), verdict=verdict)
+    snapshot = build_run_snapshot(
+        run=_run(ended=True, verdict_id="verdict_pass"),
+        stages=[_stage()],
+        verdict=verdict,
+    )
 
     assert snapshot.status is RunSnapshotStatus.COMPLETED
     assert snapshot.safe_resume is False
@@ -133,7 +144,11 @@ def test_snapshot_record_enforces_safe_resume_invariant() -> None:
 
 
 def test_snapshot_metadata_is_read_only() -> None:
-    snapshot = build_run_snapshot(run=_run(), steps=[_step("step_pending", ended=False, ok=None)])
+    snapshot = build_run_snapshot(
+        run=_run(),
+        stages=[_stage("step_pending")],
+        steps=[_step("step_pending", ended=False, ok=None)],
+    )
     with pytest.raises(TypeError):
         snapshot.metadata["new"] = "value"  # type: ignore[index]
 
@@ -153,14 +168,14 @@ def test_rejects_foreign_projection_records() -> None:
         legacy_inferred=True,
     )
     with pytest.raises(ValueError, match="belongs to run"):
-        build_run_snapshot(run=_run(), stages=[_stage()], steps=[foreign_step])
+        build_run_snapshot(run=_run(), stages=[_stage("step_foreign")], steps=[foreign_step])
 
 
 def test_rejects_artifacts_not_owned_by_snapshot_steps() -> None:
     artifact = ArtifactRecord(artifact_id="artifact_orphan", step_id="step_missing", kind="log")
 
     with pytest.raises(ValueError, match="unknown step"):
-        build_run_snapshot(run=_run(), artifacts=[artifact])
+        build_run_snapshot(run=_run(), stages=[_stage()], artifacts=[artifact])
 
 
 def test_rejects_foreign_or_ac_scoped_verdicts() -> None:
@@ -171,7 +186,7 @@ def test_rejects_foreign_or_ac_scoped_verdicts() -> None:
         outcome=VerdictOutcome.PASS,
     )
     with pytest.raises(ValueError, match="belongs to run"):
-        build_run_snapshot(run=_run(), verdict=foreign)
+        build_run_snapshot(run=_run(), stages=[_stage()], verdict=foreign)
 
     ac_verdict = VerdictRecord(
         verdict_id="verdict_ac",
@@ -181,30 +196,48 @@ def test_rejects_foreign_or_ac_scoped_verdicts() -> None:
         outcome=VerdictOutcome.PASS,
     )
     with pytest.raises(ValueError, match="run-scoped"):
-        build_run_snapshot(run=_run(), verdict=ac_verdict)
+        build_run_snapshot(run=_run(), stages=[_stage()], verdict=ac_verdict)
 
 
 def test_ended_run_with_stale_pending_step_is_not_safe_resume() -> None:
     snapshot = build_run_snapshot(
         run=_run(ended=True),
-        stages=[_stage()],
+        stages=[_stage("step_stale_pending")],
         steps=[_step("step_stale_pending", ended=False, ok=None)],
     )
 
-    assert snapshot.status is RunSnapshotStatus.COMPLETED
+    assert snapshot.status is RunSnapshotStatus.UNKNOWN
     assert snapshot.safe_resume is False
     assert snapshot.pending_step_ids == ("step_stale_pending",)
-    assert snapshot.resume_blockers == ("terminal_status:completed",)
+    assert snapshot.resume_blockers == ("status_unknown", "pending_steps_present")
 
 
 def test_missing_linked_run_verdict_blocks_resume_conservatively() -> None:
     snapshot = build_run_snapshot(
         run=_run(verdict_id="verdict_missing"),
-        stages=[_stage()],
+        stages=[_stage("step_pending")],
         steps=[_step("step_pending", ended=False, ok=None)],
     )
 
     assert snapshot.status is RunSnapshotStatus.UNKNOWN
     assert snapshot.safe_resume is False
     assert snapshot.verdict_id == "verdict_missing"
-    assert snapshot.resume_blockers == ("status_unknown", "linked_verdict_missing")
+    assert snapshot.resume_blockers == (
+        "status_unknown",
+        "pending_steps_present",
+        "linked_verdict_missing",
+    )
+
+
+def test_rejects_incomplete_declared_stage_bundle() -> None:
+    with pytest.raises(ValueError, match="RunRecord.stage_ids"):
+        build_run_snapshot(run=_run(), stages=[])
+
+
+def test_rejects_incomplete_declared_step_bundle() -> None:
+    with pytest.raises(ValueError, match="StageRecord 'stage_1'.step_ids"):
+        build_run_snapshot(
+            run=_run(),
+            stages=[_stage("step_missing")],
+            steps=[_step("step_present", ended=False, ok=None)],
+        )

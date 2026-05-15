@@ -112,18 +112,41 @@ def _validate_projection_bundle(
 ) -> None:
     stage_ids = {stage.stage_id for stage in stages}
     step_ids = {step.step_id for step in steps}
-
     for stage in stages:
         if stage.run_id != run.run_id:
             msg = f"StageRecord {stage.stage_id!r} belongs to run {stage.run_id!r}, not {run.run_id!r}"
             raise ValueError(msg)
 
+    declared_stage_ids = set(run.stage_ids)
+    if declared_stage_ids != stage_ids:
+        missing_stage_ids = sorted(declared_stage_ids - stage_ids)
+        extra_stage_ids = sorted(stage_ids - declared_stage_ids)
+        msg = _format_bundle_mismatch(
+            "RunRecord.stage_ids",
+            missing=missing_stage_ids,
+            extra=extra_stage_ids,
+        )
+        raise ValueError(msg)
+
     for step in steps:
         if step.run_id != run.run_id:
             msg = f"StepRecord {step.step_id!r} belongs to run {step.run_id!r}, not {run.run_id!r}"
             raise ValueError(msg)
-        if stage_ids and step.stage_id not in stage_ids:
+        if step.stage_id not in stage_ids:
             msg = f"StepRecord {step.step_id!r} references unknown stage {step.stage_id!r}"
+            raise ValueError(msg)
+
+    for stage in stages:
+        declared_step_ids = set(stage.step_ids)
+        stage_step_ids = {step.step_id for step in steps if step.stage_id == stage.stage_id}
+        if declared_step_ids != stage_step_ids:
+            missing_step_ids = sorted(declared_step_ids - stage_step_ids)
+            extra_step_ids = sorted(stage_step_ids - declared_step_ids)
+            msg = _format_bundle_mismatch(
+                f"StageRecord {stage.stage_id!r}.step_ids",
+                missing=missing_step_ids,
+                extra=extra_step_ids,
+            )
             raise ValueError(msg)
 
     for artifact in artifacts:
@@ -141,6 +164,16 @@ def _validate_projection_bundle(
         if run.verdict_id is not None and run.verdict_id != verdict.verdict_id:
             msg = "RunRecord.verdict_id must match the supplied VerdictRecord"
             raise ValueError(msg)
+
+
+def _format_bundle_mismatch(owner: str, *, missing: list[str], extra: list[str]) -> str:
+    details: list[str] = []
+    if missing:
+        details.append(f"missing {missing!r}")
+    if extra:
+        details.append(f"unexpected {extra!r}")
+    detail = "; ".join(details) or "mismatched projection records"
+    return f"{owner} does not match supplied projection bundle: {detail}"
 
 
 def _derive_status(
@@ -167,7 +200,7 @@ def _derive_status(
     if failed_step_ids:
         return RunSnapshotStatus.FAILED
     if run.ended_at is not None:
-        if unknown_step_ids:
+        if pending_step_ids or unknown_step_ids:
             return RunSnapshotStatus.UNKNOWN
         return RunSnapshotStatus.COMPLETED
     if pending_step_ids:
@@ -196,6 +229,8 @@ def _resume_blockers(
         blockers.append("human_input_required")
     if status is RunSnapshotStatus.UNKNOWN:
         blockers.append("status_unknown")
+    if status is RunSnapshotStatus.UNKNOWN and pending_step_ids:
+        blockers.append("pending_steps_present")
     if missing_linked_verdict:
         blockers.append("linked_verdict_missing")
     if failed_step_ids:
