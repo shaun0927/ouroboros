@@ -141,7 +141,7 @@ def test_snapshot_record_enforces_safe_resume_invariant() -> None:
     with pytest.raises(ValidationError, match="only valid"):
         RunSnapshotRecord(run_id="run_1", status=RunSnapshotStatus.WAITING, safe_resume=True)
 
-    with pytest.raises(ValidationError, match="resume_blockers"):
+    with pytest.raises(ValidationError, match="unsafe non-terminal"):
         RunSnapshotRecord(
             run_id="run_1",
             status=RunSnapshotStatus.RUNNING,
@@ -249,7 +249,7 @@ def test_rejects_incomplete_declared_step_bundle() -> None:
         )
 
 
-def test_rejects_unlinked_same_run_verdict() -> None:
+def test_unlinked_same_run_verdict_blocks_resume_conservatively() -> None:
     verdict = VerdictRecord(
         verdict_id="verdict_unlinked",
         run_id="run_1",
@@ -257,8 +257,12 @@ def test_rejects_unlinked_same_run_verdict() -> None:
         outcome=VerdictOutcome.PASS,
     )
 
-    with pytest.raises(ValueError, match="RunRecord.verdict_id"):
-        build_run_snapshot(run=_run(), stages=[_stage()], verdict=verdict)
+    snapshot = build_run_snapshot(run=_run(), stages=[_stage()], verdict=verdict)
+
+    assert snapshot.status is RunSnapshotStatus.UNKNOWN
+    assert snapshot.safe_resume is False
+    assert snapshot.verdict_id is None
+    assert snapshot.resume_blockers == ("status_unknown", "unlinked_verdict_present")
 
 
 def test_rejects_out_of_order_declared_stage_bundle() -> None:

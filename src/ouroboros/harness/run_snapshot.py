@@ -62,10 +62,12 @@ def build_run_snapshot(
     )
 
     missing_linked_verdict = run.verdict_id is not None and verdict is None
+    unlinked_supplied_verdict = verdict is not None and run.verdict_id is None
     status = _derive_status(
         run=run,
         verdict=verdict,
         missing_linked_verdict=missing_linked_verdict,
+        unlinked_supplied_verdict=unlinked_supplied_verdict,
         pending_step_ids=pending_step_ids,
         failed_step_ids=failed_step_ids,
         unknown_step_ids=unknown_step_ids,
@@ -76,6 +78,7 @@ def build_run_snapshot(
         failed_step_ids,
         unknown_step_ids,
         missing_linked_verdict=missing_linked_verdict,
+        unlinked_supplied_verdict=unlinked_supplied_verdict,
     )
     safe_resume = status is RunSnapshotStatus.RUNNING and bool(pending_step_ids) and not blockers
 
@@ -95,7 +98,11 @@ def build_run_snapshot(
         failed_step_ids=failed_step_ids,
         unknown_step_ids=unknown_step_ids,
         artifact_ids=tuple(artifact.artifact_id for artifact in artifact_tuple),
-        verdict_id=verdict.verdict_id if verdict is not None else run.verdict_id,
+        verdict_id=(
+            verdict.verdict_id
+            if verdict is not None and not unlinked_supplied_verdict
+            else run.verdict_id
+        ),
         source_event_ids=tuple(source_event_ids),
         recorded_at=recorded_at or datetime.now(UTC),
         metadata=MappingProxyType(metadata),
@@ -179,7 +186,7 @@ def _validate_projection_bundle(
         if verdict.scope != "run":
             msg = "build_run_snapshot requires a run-scoped VerdictRecord"
             raise ValueError(msg)
-        if run.verdict_id != verdict.verdict_id:
+        if run.verdict_id is not None and run.verdict_id != verdict.verdict_id:
             msg = "RunRecord.verdict_id must match the supplied VerdictRecord"
             raise ValueError(msg)
 
@@ -199,10 +206,13 @@ def _derive_status(
     run: RunRecord,
     verdict: VerdictRecord | None,
     missing_linked_verdict: bool,
+    unlinked_supplied_verdict: bool,
     pending_step_ids: tuple[str, ...],
     failed_step_ids: tuple[str, ...],
     unknown_step_ids: tuple[str, ...],
 ) -> RunSnapshotStatus:
+    if unlinked_supplied_verdict:
+        return RunSnapshotStatus.UNKNOWN
     if verdict is not None:
         if verdict.outcome is VerdictOutcome.PASS:
             return RunSnapshotStatus.COMPLETED
@@ -235,6 +245,7 @@ def _resume_blockers(
     unknown_step_ids: tuple[str, ...],
     *,
     missing_linked_verdict: bool,
+    unlinked_supplied_verdict: bool,
 ) -> tuple[str, ...]:
     blockers: list[str] = []
     if status in {
@@ -251,6 +262,8 @@ def _resume_blockers(
         blockers.append("pending_steps_present")
     if missing_linked_verdict:
         blockers.append("linked_verdict_missing")
+    if unlinked_supplied_verdict:
+        blockers.append("unlinked_verdict_present")
     if failed_step_ids:
         blockers.append("failed_steps_present")
     if unknown_step_ids:
