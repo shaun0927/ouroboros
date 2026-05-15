@@ -248,6 +248,8 @@ def _state_from_answered_event(
         ):
             return None
         normalized_values = tuple(str(value).strip() for value in selected_values)
+        if len(set(normalized_values)) != len(normalized_values):
+            return None
         options = _request_options(current)
         if any(value not in options for value in normalized_values):
             return None

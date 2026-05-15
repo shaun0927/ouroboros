@@ -328,6 +328,21 @@ def test_incompatible_answered_events_do_not_close_pending_request() -> None:
             BaseEvent(
                 type="hitl.answered",
                 aggregate_type="hitl",
+                aggregate_id="hitl-select",
+                data={
+                    "request_id": "hitl-select",
+                    "actor": "local-user",
+                    "response_kind": "selection",
+                    "selected_values": ["Approve", " Approve "],
+                },
+            ),
+            6,
+            "evt_duplicate_selection",
+        ),
+        _with_time(
+            BaseEvent(
+                type="hitl.answered",
+                aggregate_type="hitl",
                 aggregate_id="hitl-no-timeout",
                 data={
                     "request_id": "hitl-no-timeout",
@@ -335,7 +350,7 @@ def test_incompatible_answered_events_do_not_close_pending_request() -> None:
                     "response_kind": "timeout",
                 },
             ),
-            6,
+            7,
             "evt_timeout_answer_without_timeout",
         ),
         _with_time(
@@ -345,7 +360,7 @@ def test_incompatible_answered_events_do_not_close_pending_request() -> None:
                 aggregate_id="hitl-no-timeout",
                 data={"request_id": "hitl-no-timeout", "reason": "deadline elapsed"},
             ),
-            7,
+            8,
             "evt_timeout_event_without_timeout",
         ),
     ]
