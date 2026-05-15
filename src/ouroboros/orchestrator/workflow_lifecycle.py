@@ -166,12 +166,13 @@ def _run_boundary_sort_key(event: WorkflowLifecycleEvent) -> tuple[datetime, int
     return (event.timestamp, order, event.event_type.value)
 
 
-def _run_lifecycle_state(
+def _run_lifecycle_segment(
     events: Iterable[WorkflowLifecycleEvent],
-) -> WorkflowRunLifecycleState | None:
+) -> tuple[WorkflowRunLifecycleState | None, tuple[WorkflowLifecycleEvent, ...]]:
     active_run = False
     terminal_state: WorkflowRunLifecycleState | None = None
     terminal_allows_restart = False
+    latest_segment: list[WorkflowLifecycleEvent] = []
     for event in sorted(events, key=_run_boundary_sort_key):
         if terminal_state is not None:
             if (
@@ -181,10 +182,15 @@ def _run_lifecycle_state(
                 active_run = True
                 terminal_state = None
                 terminal_allows_restart = False
+                latest_segment = [event]
+                continue
+            latest_segment.append(event)
             continue
         if event.event_type is WorkflowLifecycleEventType.RUN_CREATED:
             active_run = True
+            latest_segment = [event]
             continue
+        latest_segment.append(event)
         if event.event_type in _TERMINAL_RUN_EVENT_TYPES:
             terminal_state = {
                 WorkflowLifecycleEventType.RUN_COMPLETED: WorkflowRunLifecycleState.COMPLETED,
@@ -194,10 +200,10 @@ def _run_lifecycle_state(
             terminal_allows_restart = active_run
             active_run = False
     if terminal_state is not None:
-        return terminal_state
+        return terminal_state, tuple(latest_segment)
     if active_run:
-        return WorkflowRunLifecycleState.CREATED
-    return None
+        return WorkflowRunLifecycleState.CREATED, tuple(latest_segment)
+    return None, tuple(latest_segment)
 
 
 def _normalize_non_blank(name: str, value: str) -> str:
@@ -503,7 +509,7 @@ def next_runnable_node_ids(
     dispatch work.
     """
     event_list = tuple(event for event in events if event.workflow_id == spec.spec_id)
-    latest_run_state = _run_lifecycle_state(event_list)
+    latest_run_state, latest_run_events = _run_lifecycle_segment(event_list)
     if latest_run_state in {
         WorkflowRunLifecycleState.COMPLETED,
         WorkflowRunLifecycleState.FAILED,
@@ -511,7 +517,7 @@ def next_runnable_node_ids(
     }:
         return ()
 
-    states = effective_node_states(event_list)
+    states = effective_node_states(latest_run_events)
     completed = {
         node_id
         for node_id, state in states.items()
@@ -520,7 +526,7 @@ def next_runnable_node_ids(
     latest_node_attempts: dict[str, int | None] = {}
     latest_node_completed_at: dict[str, datetime] = {}
     traversed_edge_events: dict[str, list[WorkflowLifecycleEvent]] = {}
-    for event in sorted(event_list, key=_event_sort_key):
+    for event in sorted(latest_run_events, key=_event_sort_key):
         if event.event_type in _NODE_EVENT_TYPES and event.node_id is not None:
             latest_node_attempts[event.node_id] = event.attempt
             if event.event_type is WorkflowLifecycleEventType.NODE_COMPLETED:
