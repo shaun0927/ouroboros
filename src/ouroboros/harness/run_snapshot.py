@@ -156,6 +156,22 @@ def _validate_projection_bundle(
             msg = f"ArtifactRecord {artifact.artifact_id!r} references unknown step {artifact.step_id!r}"
             raise ValueError(msg)
 
+    for step in steps:
+        supplied_artifact_ids = tuple(
+            artifact.artifact_id for artifact in artifacts if artifact.step_id == step.step_id
+        )
+        if step.artifact_ids != supplied_artifact_ids:
+            declared_artifact_ids = set(step.artifact_ids)
+            step_artifact_ids = set(supplied_artifact_ids)
+            missing_artifact_ids = sorted(declared_artifact_ids - step_artifact_ids)
+            extra_artifact_ids = sorted(step_artifact_ids - declared_artifact_ids)
+            msg = _format_bundle_mismatch(
+                f"StepRecord {step.step_id!r}.artifact_ids",
+                missing=missing_artifact_ids,
+                extra=extra_artifact_ids,
+            )
+            raise ValueError(msg)
+
     if verdict is not None:
         if verdict.run_id != run.run_id:
             msg = f"VerdictRecord {verdict.verdict_id!r} belongs to run {verdict.run_id!r}, not {run.run_id!r}"

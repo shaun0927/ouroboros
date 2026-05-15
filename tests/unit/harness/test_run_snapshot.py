@@ -41,7 +41,9 @@ def _stage(*step_ids: str) -> StageRecord:
     )
 
 
-def _step(step_id: str, *, ended: bool, ok: bool | None) -> StepRecord:
+def _step(
+    step_id: str, *, ended: bool, ok: bool | None, artifact_ids: tuple[str, ...] = ()
+) -> StepRecord:
     start = datetime(2026, 5, 15, tzinfo=UTC)
     return StepRecord(
         step_id=step_id,
@@ -52,11 +54,12 @@ def _step(step_id: str, *, ended: bool, ok: bool | None) -> StepRecord:
         ended_at=start + timedelta(seconds=1) if ended else None,
         ok=ok,
         source_event_ids=(f"evt_{step_id}",),
+        artifact_ids=artifact_ids,
     )
 
 
 def test_running_snapshot_with_pending_work_is_safe_to_resume() -> None:
-    completed = _step("step_done", ended=True, ok=True)
+    completed = _step("step_done", ended=True, ok=True, artifact_ids=("artifact_1",))
     pending = _step("step_pending", ended=False, ok=None)
     artifact = ArtifactRecord(artifact_id="artifact_1", step_id="step_done", kind="log")
 
@@ -134,6 +137,9 @@ def test_terminal_verdicts_block_resume() -> None:
 def test_snapshot_record_enforces_safe_resume_invariant() -> None:
     with pytest.raises(ValidationError, match="only valid"):
         RunSnapshotRecord(run_id="run_1", status=RunSnapshotStatus.COMPLETED, safe_resume=True)
+
+    with pytest.raises(ValidationError, match="only valid"):
+        RunSnapshotRecord(run_id="run_1", status=RunSnapshotStatus.WAITING, safe_resume=True)
 
     with pytest.raises(ValidationError, match="resume_blockers"):
         RunSnapshotRecord(
@@ -277,4 +283,26 @@ def test_rejects_out_of_order_declared_step_bundle() -> None:
             run=_run(),
             stages=[_stage("step_first", "step_second")],
             steps=[step_second, step_first],
+        )
+
+
+def test_rejects_missing_declared_step_artifact() -> None:
+    with pytest.raises(ValueError, match="StepRecord 'step_done'.artifact_ids"):
+        build_run_snapshot(
+            run=_run(),
+            stages=[_stage("step_done")],
+            steps=[_step("step_done", ended=True, ok=True, artifact_ids=("artifact_missing",))],
+            artifacts=[],
+        )
+
+
+def test_rejects_unexpected_step_artifact() -> None:
+    artifact = ArtifactRecord(artifact_id="artifact_extra", step_id="step_done", kind="log")
+
+    with pytest.raises(ValueError, match="StepRecord 'step_done'.artifact_ids"):
+        build_run_snapshot(
+            run=_run(),
+            stages=[_stage("step_done")],
+            steps=[_step("step_done", ended=True, ok=True)],
+            artifacts=[artifact],
         )
