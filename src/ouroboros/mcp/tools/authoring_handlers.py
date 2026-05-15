@@ -78,7 +78,7 @@ _SUGGESTED_INTERVIEW_ID_RE = re.compile(r"^interview_[a-f0-9]{16}$")
 
 _LIVE_AMBIGUITY_MAX_RETRIES = 3
 
-_REQUIRED_CLIENT_GATES: tuple[str, ...] = (
+REQUIRED_CLIENT_GATES: tuple[str, ...] = (
     # TODO(#1008): derive required gate names from the interview skill /
     # backend capability registry once non-skippable gates have a structured
     # source of truth instead of a Markdown-only checklist.
@@ -100,9 +100,9 @@ def _normalize_client_gates(value: Any) -> frozenset[str]:
 def get_client_gate_status(arguments: dict[str, Any]) -> dict[str, Any]:
     """Return required/accepted/missing client gate metadata for seed generation."""
     accepted = _normalize_client_gates(arguments.get("client_gates"))
-    missing = tuple(gate for gate in _REQUIRED_CLIENT_GATES if gate not in accepted)
+    missing = tuple(gate for gate in REQUIRED_CLIENT_GATES if gate not in accepted)
     status: dict[str, Any] = {
-        "required_client_gates": _REQUIRED_CLIENT_GATES,
+        "required_client_gates": REQUIRED_CLIENT_GATES,
         "accepted_client_gates": tuple(sorted(accepted)),
         "missing_client_gates": missing,
     }
@@ -1200,7 +1200,7 @@ class InterviewHandler:
                     "ambiguity_score": score.overall_score if score is not None else None,
                     "milestone": _milestone_for_score(score),
                     "seed_ready": score.is_ready_for_seed if score is not None else None,
-                    "required_client_gates": _REQUIRED_CLIENT_GATES,
+                    "required_client_gates": REQUIRED_CLIENT_GATES,
                 },
             )
         )

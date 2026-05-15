@@ -6,8 +6,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from ouroboros.auto.adapters import HandlerInterviewBackend
+from ouroboros.auto.adapters import HandlerError, HandlerInterviewBackend, HandlerSeedGenerator
 from ouroboros.core.types import Result
+from ouroboros.mcp.errors import MCPToolError
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
 
 
@@ -43,3 +44,28 @@ async def test_auto_interview_backend_ignores_seed_ready_client_gate_metadata(tm
 
     assert turn.session_id == "interview_auto"
     assert turn.seed_ready is True
+
+
+@pytest.mark.asyncio
+async def test_auto_seed_generator_passes_client_gate_acknowledgements() -> None:
+    """The opt-in hard gate must not break maintained auto seed generation."""
+    handler = AsyncMock()
+    handler.handle = AsyncMock(
+        return_value=Result.err(
+            MCPToolError("stop after capturing arguments", tool_name="ouroboros_generate_seed")
+        )
+    )
+    generator = HandlerSeedGenerator(handler)
+
+    with pytest.raises(HandlerError):
+        await generator("interview_auto")
+
+    handler.handle.assert_awaited_once_with(
+        {
+            "session_id": "interview_auto",
+            "client_gates": (
+                "seed_ready_acceptance_guard",
+                "restate_goal_approved",
+            ),
+        }
+    )

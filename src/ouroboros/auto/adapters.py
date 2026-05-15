@@ -15,7 +15,11 @@ from ouroboros.auto.interview_driver import InterviewBackend, InterviewTurn
 from ouroboros.core.seed import Seed
 from ouroboros.mcp.errors import MCPServerError
 from ouroboros.mcp.job_manager import JobManager, JobStatus
-from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
+from ouroboros.mcp.tools.authoring_handlers import (
+    REQUIRED_CLIENT_GATES,
+    GenerateSeedHandler,
+    InterviewHandler,
+)
 from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
 from ouroboros.mcp.tools.execution_handlers import StartExecuteSeedHandler
 from ouroboros.mcp.tools.qa import QAHandler
@@ -144,8 +148,17 @@ class HandlerSeedGenerator:
         self.handler = handler
 
     async def __call__(self, session_id: str) -> Seed:
+        # AutoPipeline reaches this adapter only after its own interview driver
+        # closure gate records a seed-ready interview. Pass the maintained
+        # first-party acknowledgement set so the opt-in MCP hard gate can be
+        # enabled without breaking `ooo auto` seed generation.
         result = _unwrap(
-            await self.handler.handle({"session_id": session_id}),
+            await self.handler.handle(
+                {
+                    "session_id": session_id,
+                    "client_gates": REQUIRED_CLIENT_GATES,
+                }
+            ),
             tool_name="ouroboros_generate_seed",
         )
         text = result.content[0].text if result.content else ""
