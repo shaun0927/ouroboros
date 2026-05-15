@@ -95,6 +95,7 @@ def _make_replaying_event_store() -> tuple[AsyncMock, list[BaseEvent]]:
         ("no errors, 3 passed", True),
         ("no tests failed, 3 passed", True),
         ("exit code 0", True),
+        ("success", True),
         ("1 failed, 3 passed", False),
         ("2 errors, 1 passed", False),
         ("FAILED tests/test_app.py::test_auth", False),
@@ -2592,6 +2593,87 @@ class TestParallelACExecutor:
             if event.type == "execution.ac.typed_evidence.observed"
         )
         assert evidence_event.data["verifier_passed"] is False
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_verifier_accepts_exit_code_only_test_success(self, tmp_path) -> None:
+        """Regression for #978 observation: Codex may omit pytest stdout but keep exit_code=0."""
+        hello_file = tmp_path / "hello.py"
+        test_file = tmp_path / "test_hello.py"
+        hello_file.write_text('def hello():\n    return "hello"\n', encoding="utf-8")
+        test_file.write_text(
+            "from hello import hello\n\n"
+            "def test_hello_returns_hello():\n"
+            "    assert hello() == 'hello'\n",
+            encoding="utf-8",
+        )
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                "```json\n"
+                "{\n"
+                '  "files_touched": ["hello.py", "test_hello.py"],\n'
+                '  "commands_run": ["python -m pytest test_hello.py"],\n'
+                '  "tests_passed": ["test_hello.py::test_hello_returns_hello"]\n'
+                "}\n"
+                "```",
+                native_session_id="codex-session-exit-code-only-pytest",
+                support_messages=(
+                    AgentMessage(
+                        type="assistant",
+                        content=f"Calling tool: Edit: {hello_file}",
+                        tool_name="Edit",
+                        data={"tool_input": {"file_path": str(hello_file)}},
+                    ),
+                    AgentMessage(
+                        type="assistant",
+                        content=f"Calling tool: Edit: {test_file}",
+                        tool_name="Edit",
+                        data={"tool_input": {"file_path": str(test_file)}},
+                    ),
+                    AgentMessage(
+                        type="assistant",
+                        content="Calling tool: Bash: /bin/zsh -lc 'python -m pytest test_hello.py'",
+                        tool_name="Bash",
+                        data={
+                            "tool_input": {
+                                "command": "/bin/zsh -lc 'python -m pytest test_hello.py'"
+                            },
+                            "exit_code": 0,
+                        },
+                    ),
+                ),
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+            task_cwd=str(tmp_path),
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content='Create hello.py with hello() returning "hello".',
+            session_id="orch_123",
+            tools=["Read"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is True
+        assert result.atomic_verifier_verdict is not None
+        assert result.atomic_verifier_verdict.passed is True
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_passed"] is True
 
     @pytest.mark.asyncio
     async def test_fat_harness_verifier_rejects_test_not_covered_by_success_chunk(

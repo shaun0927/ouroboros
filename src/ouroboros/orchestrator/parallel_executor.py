@@ -503,10 +503,13 @@ def _looks_like_test_command(command: str) -> bool:
 def _message_contains_test_success(message: AgentMessage) -> bool:
     """Return True when one message says a test command passed."""
     parts = [message.content]
-    for key in ("result_preview", "output", "stdout"):
+    for key in ("result_preview", "output", "stdout", "status", "subtype"):
         value = message.data.get(key)
         if isinstance(value, str):
             parts.append(value)
+    exit_code = message.data.get("exit_code")
+    if type(exit_code) is int:
+        parts.append(f"exit code {exit_code}")
     text = "\n".join(parts).lower()
     zero_failure_pattern = (
         r"\b(0\s+(failed|failures?|errors?)|no\s+(tests?\s+)?(failed|failures?|errors?))\b"
