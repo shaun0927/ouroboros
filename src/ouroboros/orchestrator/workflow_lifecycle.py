@@ -160,9 +160,9 @@ def _run_boundary_group_order(
     event: WorkflowLifecycleEvent,
     *,
     has_terminal_restart_tie: bool,
-    active_run_at_timestamp: bool,
+    prefer_restart_tie: bool,
 ) -> tuple[int, str]:
-    if not has_terminal_restart_tie or not active_run_at_timestamp:
+    if not has_terminal_restart_tie or not prefer_restart_tie:
         return (_EVENT_SORT_ORDER[event.event_type], event.event_type.value)
     if event.event_type in _TERMINAL_RUN_EVENT_TYPES:
         return (100, event.event_type.value)
@@ -209,10 +209,13 @@ def _run_lifecycle_segment(
     latest_segment: list[WorkflowLifecycleEvent] = []
     latest_segment_ambiguous = False
     post_terminal_violation = False
-    for timestamp_events in _timestamp_groups(events):
+    timestamp_group_list = _timestamp_groups(events)
+    for group_index, timestamp_events in enumerate(timestamp_group_list):
         active_run_at_timestamp = active_run
+        has_later_events = group_index < len(timestamp_group_list) - 1
+        prefer_restart_tie = active_run_at_timestamp or has_later_events
         timestamp_ambiguous = (
-            active_run_at_timestamp
+            prefer_restart_tie
             and _has_terminal_restart_tie(timestamp_events)
             and _has_scheduling_event(timestamp_events)
         )
@@ -221,12 +224,14 @@ def _run_lifecycle_segment(
             key=lambda item: _run_boundary_group_order(
                 item,
                 has_terminal_restart_tie=_has_terminal_restart_tie(timestamp_events),
-                active_run_at_timestamp=active_run_at_timestamp,
+                prefer_restart_tie=prefer_restart_tie,
             ),
         ):
             if terminal_state is not None:
-                can_restart_after_terminal = terminal_allows_restart or (
-                    terminal_timestamp is not None and event.timestamp > terminal_timestamp
+                can_restart_after_terminal = (
+                    terminal_allows_restart
+                    or (terminal_timestamp is not None and event.timestamp > terminal_timestamp)
+                    or (prefer_restart_tie and event.timestamp == terminal_timestamp)
                 )
                 if (
                     event.event_type is WorkflowLifecycleEventType.RUN_CREATED
@@ -685,10 +690,13 @@ def validate_workflow_lifecycle_conformance(
     terminal_seen_at: datetime | None = None
     active_run = False
     terminal_allows_restart = False
-    for timestamp_events in _timestamp_groups(event_list):
+    timestamp_group_list = _timestamp_groups(event_list)
+    for group_index, timestamp_events in enumerate(timestamp_group_list):
         active_run_at_timestamp = active_run
+        has_later_events = group_index < len(timestamp_group_list) - 1
+        prefer_restart_tie = active_run_at_timestamp or has_later_events
         if (
-            active_run_at_timestamp
+            prefer_restart_tie
             and _has_terminal_restart_tie(timestamp_events)
             and _has_scheduling_event(timestamp_events)
         ):
@@ -709,12 +717,14 @@ def validate_workflow_lifecycle_conformance(
             key=lambda item: _run_boundary_group_order(
                 item,
                 has_terminal_restart_tie=_has_terminal_restart_tie(timestamp_events),
-                active_run_at_timestamp=active_run_at_timestamp,
+                prefer_restart_tie=prefer_restart_tie,
             ),
         ):
             if terminal_seen:
-                can_restart_after_terminal = terminal_allows_restart or (
-                    terminal_seen_at is not None and event.timestamp > terminal_seen_at
+                can_restart_after_terminal = (
+                    terminal_allows_restart
+                    or (terminal_seen_at is not None and event.timestamp > terminal_seen_at)
+                    or (prefer_restart_tie and event.timestamp == terminal_seen_at)
                 )
                 if (
                     event.event_type is WorkflowLifecycleEventType.RUN_CREATED
