@@ -310,3 +310,43 @@ def test_rejects_unexpected_step_artifact() -> None:
             steps=[_step("step_done", ended=True, ok=True)],
             artifacts=[artifact],
         )
+
+
+def test_terminal_verdict_with_pending_step_is_unknown() -> None:
+    verdict = VerdictRecord(
+        verdict_id="verdict_pass",
+        run_id="run_1",
+        scope="run",
+        outcome=VerdictOutcome.PASS,
+    )
+
+    snapshot = build_run_snapshot(
+        run=_run(verdict_id="verdict_pass"),
+        stages=[_stage("step_pending")],
+        steps=[_step("step_pending", ended=False, ok=None)],
+        verdict=verdict,
+    )
+
+    assert snapshot.status is RunSnapshotStatus.UNKNOWN
+    assert snapshot.safe_resume is False
+    assert snapshot.resume_blockers == ("status_unknown", "pending_steps_present")
+
+
+def test_pass_verdict_with_failed_step_is_unknown() -> None:
+    verdict = VerdictRecord(
+        verdict_id="verdict_pass",
+        run_id="run_1",
+        scope="run",
+        outcome=VerdictOutcome.PASS,
+    )
+
+    snapshot = build_run_snapshot(
+        run=_run(verdict_id="verdict_pass"),
+        stages=[_stage("step_failed")],
+        steps=[_step("step_failed", ended=True, ok=False)],
+        verdict=verdict,
+    )
+
+    assert snapshot.status is RunSnapshotStatus.UNKNOWN
+    assert snapshot.safe_resume is False
+    assert snapshot.resume_blockers == ("status_unknown", "failed_steps_present")

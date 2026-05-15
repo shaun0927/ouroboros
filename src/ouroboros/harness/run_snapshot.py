@@ -214,6 +214,13 @@ def _derive_status(
     if unlinked_supplied_verdict:
         return RunSnapshotStatus.UNKNOWN
     if verdict is not None:
+        if _verdict_conflicts_with_steps(
+            verdict=verdict,
+            pending_step_ids=pending_step_ids,
+            failed_step_ids=failed_step_ids,
+            unknown_step_ids=unknown_step_ids,
+        ):
+            return RunSnapshotStatus.UNKNOWN
         if verdict.outcome is VerdictOutcome.PASS:
             return RunSnapshotStatus.COMPLETED
         if verdict.outcome is VerdictOutcome.FAIL:
@@ -236,6 +243,22 @@ def _derive_status(
     if unknown_step_ids:
         return RunSnapshotStatus.UNKNOWN
     return RunSnapshotStatus.RUNNING
+
+
+def _verdict_conflicts_with_steps(
+    *,
+    verdict: VerdictRecord,
+    pending_step_ids: tuple[str, ...],
+    failed_step_ids: tuple[str, ...],
+    unknown_step_ids: tuple[str, ...],
+) -> bool:
+    if verdict.outcome in {
+        VerdictOutcome.PASS,
+        VerdictOutcome.FAIL,
+        VerdictOutcome.CANCELLED,
+    } and (pending_step_ids or unknown_step_ids):
+        return True
+    return verdict.outcome is VerdictOutcome.PASS and bool(failed_step_ids)
 
 
 def _resume_blockers(
