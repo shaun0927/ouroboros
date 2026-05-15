@@ -218,6 +218,17 @@ class VerdictOutcome(StrEnum):
     UNKNOWN = "unknown"
 
 
+class RunSnapshotStatus(StrEnum):
+    """Effective run status for safe-resume inspection."""
+
+    RUNNING = "running"
+    WAITING = "waiting"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    UNKNOWN = "unknown"
+
+
 # ---------------------------------------------------------------------------
 # Record models
 # ---------------------------------------------------------------------------
@@ -485,6 +496,83 @@ class VerdictRecord(BaseModel, frozen=True):
         return self
 
 
+class RunSnapshotRecord(BaseModel, frozen=True):
+    model_config = ConfigDict(extra="forbid")
+
+    """Read-model snapshot of a run suitable for safe-resume decisions.
+
+    The snapshot summarizes the current projection bundle without becoming a
+    dispatcher. ``safe_resume`` is explicit and evidence-linked so callers can
+    distinguish a resumable interrupted run from a terminal or under-evidenced
+    one before attempting side effects.
+
+    Attributes:
+        snapshot_id: Stable identifier for the snapshot row.
+        run_id: Identifier of the owning :class:`RunRecord`.
+        status: Effective run status inferred by the snapshot builder.
+        safe_resume: Whether a caller may attempt resume from this read model.
+        resume_blockers: Human-readable blocker codes when resume is unsafe.
+        stage_ids: Stages present in the snapshot.
+        completed_step_ids: Steps that ended with ``ok=True``.
+        pending_step_ids: Steps that have no ``ended_at``.
+        failed_step_ids: Steps that ended with ``ok=False``.
+        unknown_step_ids: Ended steps whose ``ok`` value is unknown.
+        artifact_ids: Artifacts visible to the snapshot.
+        verdict_id: Optional linked verdict.
+        source_event_ids: Event evidence used to derive this snapshot.
+        recorded_at: Timestamp for when the snapshot was assembled.
+        metadata: Free-form read-only metadata.
+    """
+
+    schema_version: ProjectionSchemaVersion = PROJECTION_SCHEMA_VERSION
+    snapshot_id: Identifier = Field(default_factory=lambda: _new_id("snapshot"))
+    run_id: Identifier
+    status: RunSnapshotStatus
+    safe_resume: bool
+    resume_blockers: IdentifierTuple = Field(default_factory=tuple)
+    stage_ids: IdentifierTuple = Field(default_factory=tuple)
+    completed_step_ids: IdentifierTuple = Field(default_factory=tuple)
+    pending_step_ids: IdentifierTuple = Field(default_factory=tuple)
+    failed_step_ids: IdentifierTuple = Field(default_factory=tuple)
+    unknown_step_ids: IdentifierTuple = Field(default_factory=tuple)
+    artifact_ids: IdentifierTuple = Field(default_factory=tuple)
+    verdict_id: Identifier | None = Field(default=None)
+    source_event_ids: IdentifierTuple = Field(default_factory=tuple)
+    recorded_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    metadata: FrozenMetadata = Field(default_factory=_empty_frozen_metadata)
+
+    @field_validator("recorded_at")
+    @classmethod
+    def _recorded_at_must_be_aware(cls, value: datetime | None, info: Any) -> datetime | None:
+        checked = _require_aware_datetime(info.field_name, value)
+        assert checked is not None
+        return checked
+
+    @field_validator("verdict_id")
+    @classmethod
+    def _verdict_id_not_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        if not stripped:
+            msg = "RunSnapshotRecord.verdict_id must be None or a non-blank identifier"
+            raise ValueError(msg)
+        return stripped
+
+    @model_validator(mode="after")
+    def _validate_safe_resume_contract(self) -> RunSnapshotRecord:
+        if self.safe_resume and self.status not in {RunSnapshotStatus.RUNNING, RunSnapshotStatus.WAITING}:
+            msg = "RunSnapshotRecord.safe_resume is only valid for running or waiting runs"
+            raise ValueError(msg)
+        if self.safe_resume and self.resume_blockers:
+            msg = "RunSnapshotRecord.safe_resume cannot include resume_blockers"
+            raise ValueError(msg)
+        if not self.safe_resume and self.status in {RunSnapshotStatus.RUNNING, RunSnapshotStatus.WAITING} and not self.resume_blockers:
+            msg = "unsafe non-terminal RunSnapshotRecord must explain resume_blockers"
+            raise ValueError(msg)
+        return self
+
+
 class RunRecord(BaseModel, frozen=True):
     model_config = ConfigDict(extra="forbid")
 
@@ -550,6 +638,8 @@ __all__ = [
     "ProjectionSchemaVersion",
     "IdentifierTuple",
     "RunRecord",
+    "RunSnapshotRecord",
+    "RunSnapshotStatus",
     "StageKind",
     "StageRecord",
     "StepKind",

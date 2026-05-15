@@ -33,6 +33,8 @@ from ouroboros.harness.journal import (
 from ouroboros.harness.projection import (
     ArtifactRecord,
     RunRecord,
+    RunSnapshotRecord,
+    RunSnapshotStatus,
     StageKind,
     StageRecord,
     StepKind,
@@ -40,6 +42,7 @@ from ouroboros.harness.projection import (
     VerdictOutcome,
     VerdictRecord,
 )
+from ouroboros.harness.run_snapshot import build_run_snapshot
 
 __all__ = [
     "ArtifactRecord",
@@ -52,6 +55,8 @@ __all__ = [
     "EventStoreEvidenceReader",
     "EvidenceManifest",
     "RunRecord",
+    "RunSnapshotRecord",
+    "RunSnapshotStatus",
     "ClaimTermGuard",
     "ClaimTermGuardFact",
     "ClaimTermGuardVerdict",
@@ -64,6 +69,7 @@ __all__ = [
     "TraceGuardValidator",
     "VerdictOutcome",
     "VerdictRecord",
+    "build_run_snapshot",
     "deterministic_claim_term_guard",
     "evaluate_deliver_claim",
     "filter_events_for_ac",
