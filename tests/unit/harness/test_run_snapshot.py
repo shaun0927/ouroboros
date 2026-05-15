@@ -241,3 +241,40 @@ def test_rejects_incomplete_declared_step_bundle() -> None:
             stages=[_stage("step_missing")],
             steps=[_step("step_present", ended=False, ok=None)],
         )
+
+
+def test_rejects_unlinked_same_run_verdict() -> None:
+    verdict = VerdictRecord(
+        verdict_id="verdict_unlinked",
+        run_id="run_1",
+        scope="run",
+        outcome=VerdictOutcome.PASS,
+    )
+
+    with pytest.raises(ValueError, match="RunRecord.verdict_id"):
+        build_run_snapshot(run=_run(), stages=[_stage()], verdict=verdict)
+
+
+def test_rejects_out_of_order_declared_stage_bundle() -> None:
+    run = RunRecord(
+        run_id="run_1",
+        seed_id="seed_1",
+        stage_ids=("stage_1", "stage_2"),
+    )
+    stage_1 = StageRecord(stage_id="stage_1", run_id="run_1", kind=StageKind.EXECUTE)
+    stage_2 = StageRecord(stage_id="stage_2", run_id="run_1", kind=StageKind.EVALUATE)
+
+    with pytest.raises(ValueError, match="RunRecord.stage_ids"):
+        build_run_snapshot(run=run, stages=[stage_2, stage_1])
+
+
+def test_rejects_out_of_order_declared_step_bundle() -> None:
+    step_first = _step("step_first", ended=True, ok=True)
+    step_second = _step("step_second", ended=False, ok=None)
+
+    with pytest.raises(ValueError, match="StageRecord 'stage_1'.step_ids"):
+        build_run_snapshot(
+            run=_run(),
+            stages=[_stage("step_first", "step_second")],
+            steps=[step_second, step_first],
+        )

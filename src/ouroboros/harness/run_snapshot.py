@@ -112,13 +112,14 @@ def _validate_projection_bundle(
 ) -> None:
     stage_ids = {stage.stage_id for stage in stages}
     step_ids = {step.step_id for step in steps}
+    supplied_stage_ids = tuple(stage.stage_id for stage in stages)
     for stage in stages:
         if stage.run_id != run.run_id:
             msg = f"StageRecord {stage.stage_id!r} belongs to run {stage.run_id!r}, not {run.run_id!r}"
             raise ValueError(msg)
 
-    declared_stage_ids = set(run.stage_ids)
-    if declared_stage_ids != stage_ids:
+    if run.stage_ids != supplied_stage_ids:
+        declared_stage_ids = set(run.stage_ids)
         missing_stage_ids = sorted(declared_stage_ids - stage_ids)
         extra_stage_ids = sorted(stage_ids - declared_stage_ids)
         msg = _format_bundle_mismatch(
@@ -137,9 +138,10 @@ def _validate_projection_bundle(
             raise ValueError(msg)
 
     for stage in stages:
-        declared_step_ids = set(stage.step_ids)
-        stage_step_ids = {step.step_id for step in steps if step.stage_id == stage.stage_id}
-        if declared_step_ids != stage_step_ids:
+        supplied_step_ids = tuple(step.step_id for step in steps if step.stage_id == stage.stage_id)
+        if stage.step_ids != supplied_step_ids:
+            declared_step_ids = set(stage.step_ids)
+            stage_step_ids = set(supplied_step_ids)
             missing_step_ids = sorted(declared_step_ids - stage_step_ids)
             extra_step_ids = sorted(stage_step_ids - declared_step_ids)
             msg = _format_bundle_mismatch(
@@ -161,7 +163,7 @@ def _validate_projection_bundle(
         if verdict.scope != "run":
             msg = "build_run_snapshot requires a run-scoped VerdictRecord"
             raise ValueError(msg)
-        if run.verdict_id is not None and run.verdict_id != verdict.verdict_id:
+        if run.verdict_id != verdict.verdict_id:
             msg = "RunRecord.verdict_id must match the supplied VerdictRecord"
             raise ValueError(msg)
 
