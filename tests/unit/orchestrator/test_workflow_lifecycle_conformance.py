@@ -232,7 +232,7 @@ def test_conformance_allows_clean_restart_after_truncated_terminal_slice() -> No
     assert report.errors == ()
 
 
-def test_conformance_allows_checkpoint_at_restart_timestamp() -> None:
+def test_conformance_rejects_checkpoint_at_restart_timestamp() -> None:
     spec = _spec()
     start = datetime(2026, 5, 15, tzinfo=UTC)
     boundary = start + timedelta(seconds=1)
@@ -262,8 +262,8 @@ def test_conformance_allows_checkpoint_at_restart_timestamp() -> None:
 
     report = validate_workflow_lifecycle_conformance(spec, events)
 
-    assert report.ok is True
-    assert report.errors == ()
+    assert report.ok is False
+    assert "ambiguous_run_boundary_timestamp" in {issue.code for issue in report.errors}
 
 
 def test_conformance_rejects_run_created_before_terminal() -> None:

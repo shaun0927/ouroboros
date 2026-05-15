@@ -195,6 +195,7 @@ def _has_scheduling_event(events: Iterable[WorkflowLifecycleEvent]) -> bool:
     return any(
         event.event_type in _NODE_EVENT_TYPES
         or event.event_type is WorkflowLifecycleEventType.EDGE_TRAVERSED
+        or event.event_type is WorkflowLifecycleEventType.CHECKPOINT_SAVED
         for event in events
     )
 
@@ -704,8 +705,8 @@ def validate_workflow_lifecycle_conformance(
                     code="ambiguous_run_boundary_timestamp",
                     message=(
                         "Timestamp contains a terminal run event, workflow.run.created, "
-                        "and node/edge lifecycle rows; add a distinct timestamp or run id "
-                        "before validating restart conformance."
+                        "and node/edge/checkpoint lifecycle rows; add a distinct timestamp "
+                        "or run id before validating restart conformance."
                     ),
                 )
             )

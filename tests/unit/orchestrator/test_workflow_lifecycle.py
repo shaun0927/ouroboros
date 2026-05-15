@@ -553,7 +553,7 @@ def test_next_runnable_allows_clean_restart_after_truncated_terminal_slice() -> 
     assert next_runnable_node_ids(spec, events) == ("node_a",)
 
 
-def test_next_runnable_allows_checkpoint_at_restart_timestamp() -> None:
+def test_next_runnable_refuses_checkpoint_at_restart_timestamp() -> None:
     spec = _spec()
     start = datetime(2026, 5, 15, tzinfo=UTC)
     boundary = start + timedelta(seconds=1)
@@ -581,7 +581,7 @@ def test_next_runnable_allows_checkpoint_at_restart_timestamp() -> None:
         ),
     )
 
-    assert next_runnable_node_ids(spec, events) == ("node_a",)
+    assert next_runnable_node_ids(spec, events) == ()
 
 
 def test_next_runnable_refuses_ambiguous_same_timestamp_restart_completion() -> None:
