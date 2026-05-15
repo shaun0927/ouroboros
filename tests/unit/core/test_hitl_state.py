@@ -344,6 +344,53 @@ def test_malformed_timeout_and_cancel_events_do_not_close_pending_request() -> N
     assert pending_human_input_requests(events) == snapshots
 
 
+def test_terminal_events_missing_request_context_do_not_close_pending_request() -> None:
+    timeout_request = _request(
+        "hitl-timeout-missing-context", timeout_action=HumanInputTimeoutAction.CANCEL
+    )
+    cancel_request = _request("hitl-cancel-missing-context")
+    events = [
+        _with_time(create_hitl_requested_event(timeout_request), 0, "evt_timeout_req"),
+        _with_time(create_hitl_requested_event(cancel_request), 1, "evt_cancel_req"),
+        _with_time(
+            BaseEvent(
+                type="hitl.timed_out",
+                aggregate_type="hitl",
+                aggregate_id="hitl-timeout-missing-context",
+                data={
+                    "request_id": "hitl-timeout-missing-context",
+                    "session_id": "session-1",
+                    "reason": "deadline elapsed",
+                },
+            ),
+            2,
+            "evt_timeout_missing_run_context",
+        ),
+        _with_time(
+            BaseEvent(
+                type="hitl.cancelled",
+                aggregate_type="hitl",
+                aggregate_id="hitl-cancel-missing-context",
+                data={
+                    "request_id": "hitl-cancel-missing-context",
+                    "reason": "user aborted",
+                    "actor": "local-user",
+                },
+            ),
+            3,
+            "evt_cancel_missing_session_context",
+        ),
+    ]
+
+    snapshots = project_human_input_state(events)
+
+    assert tuple(snapshot.state for snapshot in snapshots) == (
+        HumanInputState.PENDING,
+        HumanInputState.PENDING,
+    )
+    assert pending_human_input_requests(events) == snapshots
+
+
 def test_mismatched_timeout_and_cancel_events_do_not_close_pending_request() -> None:
     timeout_request = _request(
         "hitl-timeout-mismatch", timeout_action=HumanInputTimeoutAction.CANCEL

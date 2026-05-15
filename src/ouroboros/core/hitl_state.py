@@ -137,7 +137,7 @@ def project_human_input_state(events: Iterable[BaseEvent]) -> tuple[HumanInputSn
             if (
                 _optional_str(event.data.get("reason")) is None
                 or not _request_timeout_is_terminal(current)
-                or not _event_context_matches_request(event, current)
+                or not _terminal_event_context_matches_request(event, current)
             ):
                 continue
             snapshots[request_id] = _snapshot_from_terminal(
@@ -151,7 +151,7 @@ def project_human_input_state(events: Iterable[BaseEvent]) -> tuple[HumanInputSn
         if event.type == HumanInputRequest.CANCELLED_EVENT_TYPE:
             if _optional_str(
                 event.data.get("reason")
-            ) is None or not _event_context_matches_request(event, current):
+            ) is None or not _terminal_event_context_matches_request(event, current):
                 continue
             snapshots[request_id] = _snapshot_from_terminal(
                 current,
@@ -287,6 +287,16 @@ def _event_context_matches_request(event: BaseEvent, current: HumanInputSnapshot
     for key in ("session_id", "run_id", "invocation_id"):
         event_value = _optional_str(event.data.get(key))
         if event_value is not None and event_value != getattr(current, key):
+            return False
+    return True
+
+
+def _terminal_event_context_matches_request(event: BaseEvent, current: HumanInputSnapshot) -> bool:
+    if _optional_str(event.data.get("session_id")) != current.session_id:
+        return False
+    for key in ("run_id", "invocation_id"):
+        current_value = getattr(current, key)
+        if current_value is not None and _optional_str(event.data.get(key)) != current_value:
             return False
     return True
 
