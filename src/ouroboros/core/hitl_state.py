@@ -196,22 +196,34 @@ def _state_from_answered_event(event: BaseEvent) -> HumanInputState | None:
         return None
 
     response_kind = event.data.get("response_kind")
+    has_text = "text" in event.data
+    has_selection = "selected_values" in event.data
+    has_approval = "approval_decision" in event.data
+
     if response_kind == HumanInputResponseKind.CANCEL.value:
-        return HumanInputState.CANCELLED
+        return None if has_text or has_selection or has_approval else HumanInputState.CANCELLED
     if response_kind == HumanInputResponseKind.TIMEOUT.value:
-        return HumanInputState.TIMED_OUT
+        return None if has_text or has_selection or has_approval else HumanInputState.TIMED_OUT
     if response_kind == HumanInputResponseKind.TEXT.value:
+        if has_selection or has_approval:
+            return None
         return (
             HumanInputState.ANSWERED if _optional_str(event.data.get("text")) is not None else None
         )
     if response_kind == HumanInputResponseKind.SELECTION.value:
+        if has_text or has_approval:
+            return None
         selected_values = event.data.get("selected_values")
-        if isinstance(selected_values, list | tuple) and any(
-            _optional_str(value) is not None for value in selected_values
+        if (
+            isinstance(selected_values, list | tuple)
+            and bool(selected_values)
+            and all(_optional_str(value) is not None for value in selected_values)
         ):
             return HumanInputState.ANSWERED
         return None
     if response_kind == HumanInputResponseKind.APPROVAL.value:
+        if has_text or has_selection:
+            return None
         return (
             HumanInputState.ANSWERED
             if isinstance(event.data.get("approval_decision"), bool)

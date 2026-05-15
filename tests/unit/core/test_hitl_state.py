@@ -142,10 +142,47 @@ def test_malformed_answered_events_do_not_close_pending_request() -> None:
         3,
         "evt_missing_answer_content",
     )
-
-    snapshots = project_human_input_state(
-        [requested, missing_kind, unknown_kind, missing_answer_content]
+    invalid_selection = _with_time(
+        BaseEvent(
+            type="hitl.answered",
+            aggregate_type="hitl",
+            aggregate_id="hitl-1",
+            data={
+                "request_id": "hitl-1",
+                "actor": "local-user",
+                "response_kind": "selection",
+                "selected_values": ["Approve", 7],
+            },
+        ),
+        4,
+        "evt_invalid_selection",
     )
+    cancel_with_answer_content = _with_time(
+        BaseEvent(
+            type="hitl.answered",
+            aggregate_type="hitl",
+            aggregate_id="hitl-1",
+            data={
+                "request_id": "hitl-1",
+                "actor": "local-user",
+                "response_kind": "cancel",
+                "text": "never mind",
+            },
+        ),
+        5,
+        "evt_cancel_with_answer_content",
+    )
+
+    malformed_events = [
+        requested,
+        missing_kind,
+        unknown_kind,
+        missing_answer_content,
+        invalid_selection,
+        cancel_with_answer_content,
+    ]
+
+    snapshots = project_human_input_state(malformed_events)
 
     assert len(snapshots) == 1
     assert snapshots[0].state is HumanInputState.PENDING
