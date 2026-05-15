@@ -214,10 +214,8 @@ def _run_lifecycle_segment(
     for timestamp_events in timestamp_group_list:
         active_run_at_timestamp = active_run
         prefer_restart_tie = active_run_at_timestamp
-        timestamp_ambiguous = (
-            prefer_restart_tie
-            and _has_terminal_restart_tie(timestamp_events)
-            and _has_scheduling_event(timestamp_events)
+        timestamp_ambiguous = _has_terminal_restart_tie(timestamp_events) and _has_scheduling_event(
+            timestamp_events
         )
         for event in sorted(
             timestamp_events,
@@ -705,11 +703,7 @@ def validate_workflow_lifecycle_conformance(
     for timestamp_events in timestamp_group_list:
         active_run_at_timestamp = active_run
         prefer_restart_tie = active_run_at_timestamp
-        if (
-            prefer_restart_tie
-            and _has_terminal_restart_tie(timestamp_events)
-            and _has_scheduling_event(timestamp_events)
-        ):
+        if _has_terminal_restart_tie(timestamp_events) and _has_scheduling_event(timestamp_events):
             issues.append(
                 WorkflowConformanceIssue(
                     severity="error",

@@ -230,6 +230,34 @@ def test_conformance_rejects_same_timestamp_restart_from_truncated_terminal_slic
     assert "event_after_terminal_run" in {issue.code for issue in report.errors}
 
 
+def test_conformance_rejects_truncated_restart_with_same_timestamp_activity() -> None:
+    spec = _spec()
+    start = datetime(2026, 5, 15, tzinfo=UTC)
+    events = (
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_COMPLETED,
+            workflow_id=spec.spec_id,
+            timestamp=start,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            timestamp=start,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.NODE_STARTED,
+            workflow_id=spec.spec_id,
+            node_id="node_a",
+            timestamp=start,
+        ),
+    )
+
+    report = validate_workflow_lifecycle_conformance(spec, events)
+
+    assert report.ok is False
+    assert "ambiguous_run_boundary_timestamp" in {issue.code for issue in report.errors}
+
+
 def test_conformance_allows_clean_restart_after_truncated_terminal_slice() -> None:
     spec = _spec()
     start = datetime(2026, 5, 15, tzinfo=UTC)

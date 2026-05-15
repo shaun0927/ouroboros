@@ -534,6 +534,31 @@ def test_next_runnable_refuses_same_timestamp_restart_from_truncated_terminal_sl
     assert next_runnable_node_ids(spec, events) == ()
 
 
+def test_next_runnable_refuses_truncated_restart_with_same_timestamp_activity() -> None:
+    spec = _spec()
+    start = datetime(2026, 5, 15, tzinfo=UTC)
+    events = (
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_COMPLETED,
+            workflow_id=spec.spec_id,
+            timestamp=start,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.RUN_CREATED,
+            workflow_id=spec.spec_id,
+            timestamp=start,
+        ),
+        WorkflowLifecycleEvent(
+            event_type=WorkflowLifecycleEventType.NODE_STARTED,
+            workflow_id=spec.spec_id,
+            node_id="node_a",
+            timestamp=start,
+        ),
+    )
+
+    assert next_runnable_node_ids(spec, events) == ()
+
+
 def test_next_runnable_allows_clean_restart_after_truncated_terminal_slice() -> None:
     spec = _spec()
     start = datetime(2026, 5, 15, tzinfo=UTC)
