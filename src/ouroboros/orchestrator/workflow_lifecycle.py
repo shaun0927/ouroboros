@@ -530,9 +530,7 @@ def validate_workflow_lifecycle_conformance(
     so callers may pass a mixed EventStore replay safely.
     """
 
-    event_list = tuple(
-        event for event in events if event.workflow_id == spec.spec_id
-    )
+    event_list = tuple(event for event in events if event.workflow_id == spec.spec_id)
     issues: list[WorkflowConformanceIssue] = []
 
     validation = validate_workflow(spec)
