@@ -313,10 +313,15 @@ def _event_request_id(event: BaseEvent) -> str | None:
         HumanInputRequest.CANCELLED_EVENT_TYPE,
     }:
         return None
-    value = event.data.get("request_id") or event.aggregate_id
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return None
+    data_request_id = _optional_str(event.data.get("request_id"))
+    aggregate_request_id = _optional_str(event.aggregate_id)
+    if (
+        data_request_id is not None
+        and aggregate_request_id is not None
+        and data_request_id != aggregate_request_id
+    ):
+        return None
+    return data_request_id or aggregate_request_id
 
 
 def _required_str(data: Mapping[str, Any], key: str, event_id: str) -> str:

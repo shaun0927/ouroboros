@@ -196,6 +196,51 @@ def test_malformed_answered_events_do_not_close_pending_request() -> None:
     assert pending_human_input_requests(malformed_events) == snapshots
 
 
+def test_mismatched_event_request_identifiers_are_ignored() -> None:
+    request = _request("hitl-identity")
+    events = [
+        _with_time(create_hitl_requested_event(request), 0, "evt_requested"),
+        _with_time(
+            BaseEvent(
+                type="hitl.cancelled",
+                aggregate_type="hitl",
+                aggregate_id="other-hitl",
+                data={
+                    "request_id": "hitl-identity",
+                    "session_id": "session-1",
+                    "run_id": "run-1",
+                    "invocation_id": "invoke-1",
+                    "reason": "user aborted",
+                    "actor": "local-user",
+                },
+            ),
+            1,
+            "evt_mismatched_cancel",
+        ),
+        _with_time(
+            BaseEvent(
+                type="hitl.requested",
+                aggregate_type="hitl",
+                aggregate_id="other-request",
+                data={
+                    "request_id": "hitl-spoofed",
+                    "session_id": "session-1",
+                    "resume_target": "plan:resume",
+                },
+            ),
+            2,
+            "evt_mismatched_request",
+        ),
+    ]
+
+    snapshots = project_human_input_state(events)
+
+    assert len(snapshots) == 1
+    assert snapshots[0].request_id == "hitl-identity"
+    assert snapshots[0].state is HumanInputState.PENDING
+    assert pending_human_input_requests(events) == snapshots
+
+
 def test_malformed_requested_event_does_not_abort_projection() -> None:
     valid_request = _request("hitl-valid")
     malformed_request = BaseEvent(
