@@ -3737,18 +3737,25 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                     and context_governance_audit.get("context_governed") is True
                 )
                 if context_is_governed:
-                    other_list = (
-                        "Sibling tasks in progress are summarized in the governed "
-                        "sibling-status section above."
-                    )
+                    if self._fat_harness_mode and self._execution_profile is not None:
+                        other_list = (
+                            "Sibling/future ACs are summarized in the governed "
+                            "sibling-status section above as out-of-scope boundary "
+                            "context."
+                        )
+                    else:
+                        other_list = (
+                            "Sibling tasks in progress are summarized in the governed "
+                            "sibling-status section above."
+                        )
                 else:
                     sibling_heading = (
                         "Sibling/future ACs that are OUT OF SCOPE for this dispatch:"
                         if self._fat_harness_mode and self._execution_profile is not None
                         else "Sibling tasks in progress:"
                     )
-                    other_list = sibling_heading + "\n" + "\n".join(
-                        f"- {ac[:80]}" for ac in other_acs
+                    other_list = (
+                        sibling_heading + "\n" + "\n".join(f"- {ac[:80]}" for ac in other_acs)
                     )
                 if self._fat_harness_mode and self._execution_profile is not None:
                     parallel_section = (

@@ -1443,7 +1443,11 @@ class TestParallelACExecutor:
         assert "outside the current dispatch" in runtime.last_prompt
         assert "Do not satisfy those criteria now" in runtime.last_prompt
         assert "do not pre-create their files, tests, docs, or evidence" in runtime.last_prompt
-        assert "Sibling tasks in progress:" not in runtime.last_prompt
+        assert "Sibling/future ACs are summarized in the governed sibling-status" in (
+            runtime.last_prompt
+        )
+        assert "as out-of-scope boundary context" in runtime.last_prompt
+        assert "Sibling tasks in progress" not in runtime.last_prompt
 
     @pytest.mark.asyncio
     async def test_fat_harness_accepts_validation_evidence_after_code_fence(self) -> None:
