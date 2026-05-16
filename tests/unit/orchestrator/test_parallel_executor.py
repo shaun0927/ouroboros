@@ -1375,6 +1375,238 @@ class TestParallelACExecutor:
         assert "explicitly state: [TASK_COMPLETE]" not in runtime.last_prompt
 
     @pytest.mark.asyncio
+    async def test_fat_harness_docs_only_ac_uses_docs_evidence_contract(self, tmp_path) -> None:
+        """Regression for #961: README-only ACs must not require prior test IDs."""
+        readme = tmp_path / "README.md"
+        readme.write_text("# String utils\n", encoding="utf-8")
+
+        event_store, appended_events = _make_replaying_event_store()
+        runtime = _FinalMessageRuntime(
+            "```json\n"
+            "{\n"
+            '  "files_touched": ["README.md"],\n'
+            '  "commands_run": ["grep -n slugify README.md"]\n'
+            "}\n"
+            "```",
+            native_session_id="codex-session-docs-only-current-ac",
+            support_messages=(
+                AgentMessage(
+                    type="assistant",
+                    content=f"Calling tool: Edit: {readme}",
+                    tool_name="Edit",
+                    data={"tool_input": {"file_path": str(readme)}},
+                ),
+                AgentMessage(
+                    type="assistant",
+                    content="Calling tool: Bash: grep -n slugify README.md",
+                    tool_name="Bash",
+                    data={
+                        "tool_input": {"command": "grep -n slugify README.md"},
+                        "output": "12:slugify('Hello World') -> hello-world",
+                        "exit_code": 0,
+                    },
+                ),
+            ),
+            cwd=str(tmp_path),
+        )
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+            task_cwd=str(tmp_path),
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=2,
+            ac_content="Document slugify and truncate usage in README.md.",
+            session_id="orch_123",
+            tools=["Read", "Edit", "Bash"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship string utilities",
+            depth=0,
+            start_time=datetime.now(UTC),
+            sibling_acs=[
+                (0, "Create string_utils.py with slugify(text) and test_slugify.py."),
+                (1, "Add truncate(text, max_length) and test_truncate.py."),
+                (2, "Document slugify and truncate usage in README.md."),
+            ],
+        )
+
+        assert result.success is True
+        assert result.error is None
+        assert runtime.last_prompt is not None
+        assert "documentation-only current AC" in runtime.last_prompt
+        assert "files_touched, commands_run" in runtime.last_prompt
+        assert "files_touched, commands_run, tests_passed" not in runtime.last_prompt
+        assert result.typed_evidence is not None
+        assert "tests_passed" not in result.typed_evidence.data
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["required_fields"] == ["files_touched", "commands_run"]
+        assert evidence_event.data["verifier_passed"] is True
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_markdown_code_ac_keeps_test_evidence_required(
+        self, tmp_path
+    ) -> None:
+        """A markdown-related implementation AC must not be misclassified as docs-only."""
+        parser_file = tmp_path / "src" / "markdown_parser.py"
+        parser_file.parent.mkdir()
+        parser_file.write_text("def parse(text):\n    return text\n", encoding="utf-8")
+        test_file = tmp_path / "tests" / "test_markdown_parser.py"
+        test_file.parent.mkdir()
+        test_file.write_text("def test_parse():\n    assert True\n", encoding="utf-8")
+
+        event_store, appended_events = _make_replaying_event_store()
+        runtime = _FinalMessageRuntime(
+            "```json\n"
+            "{\n"
+            '  "files_touched": ["src/markdown_parser.py", "tests/test_markdown_parser.py"],\n'
+            '  "commands_run": ["python -m pytest tests/test_markdown_parser.py"],\n'
+            '  "tests_passed": ["tests/test_markdown_parser.py::test_parse"]\n'
+            "}\n"
+            "```",
+            native_session_id="codex-session-markdown-code-ac",
+            support_messages=(
+                AgentMessage(
+                    type="assistant",
+                    content=f"Calling tool: Edit: {parser_file}",
+                    tool_name="Edit",
+                    data={"tool_input": {"file_path": str(parser_file)}},
+                ),
+                AgentMessage(
+                    type="assistant",
+                    content=f"Calling tool: Edit: {test_file}",
+                    tool_name="Edit",
+                    data={"tool_input": {"file_path": str(test_file)}},
+                ),
+                AgentMessage(
+                    type="assistant",
+                    content="Calling tool: Bash: python -m pytest tests/test_markdown_parser.py",
+                    tool_name="Bash",
+                    data={
+                        "tool_input": {"command": "python -m pytest tests/test_markdown_parser.py"},
+                        "output": "tests/test_markdown_parser.py::test_parse passed; 1 passed",
+                        "exit_code": 0,
+                    },
+                ),
+            ),
+            cwd=str(tmp_path),
+        )
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+            task_cwd=str(tmp_path),
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Implement a markdown parser and usage examples.",
+            session_id="orch_123",
+            tools=["Read", "Edit", "Bash"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship markdown support",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is True
+        assert runtime.last_prompt is not None
+        assert "documentation-only current AC" not in runtime.last_prompt
+        assert "files_touched, commands_run, tests_passed" in runtime.last_prompt
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["required_fields"] == [
+            "files_touched",
+            "commands_run",
+            "tests_passed",
+        ]
+        assert evidence_event.data["verifier_passed"] is True
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_docs_only_ac_rejects_prior_test_id_bleed(self, tmp_path) -> None:
+        """Docs-only ACs may omit tests, but non-empty stale tests_passed is still checked."""
+        readme = tmp_path / "README.md"
+        readme.write_text("# String utils\n", encoding="utf-8")
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                "```json\n"
+                "{\n"
+                '  "files_touched": ["README.md"],\n'
+                '  "commands_run": ["grep -n slugify README.md"],\n'
+                '  "tests_passed": ["test_slugify.py::test_slugify"]\n'
+                "}\n"
+                "```",
+                native_session_id="codex-session-docs-only-prior-test-bleed",
+                support_messages=(
+                    AgentMessage(
+                        type="assistant",
+                        content=f"Calling tool: Edit: {readme}",
+                        tool_name="Edit",
+                        data={"tool_input": {"file_path": str(readme)}},
+                    ),
+                    AgentMessage(
+                        type="assistant",
+                        content="Calling tool: Bash: grep -n slugify README.md",
+                        tool_name="Bash",
+                        data={
+                            "tool_input": {"command": "grep -n slugify README.md"},
+                            "output": "12:slugify('Hello World') -> hello-world",
+                            "exit_code": 0,
+                        },
+                    ),
+                ),
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+            task_cwd=str(tmp_path),
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=2,
+            ac_content="Document slugify and truncate usage in README.md.",
+            session_id="orch_123",
+            tools=["Read", "Edit", "Bash"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship string utilities",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "tests_passed: test_slugify.py::test_slugify" in result.error
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["required_fields"] == ["files_touched", "commands_run"]
+        assert evidence_event.data["verifier_failure_class"] == "FABRICATION_SUSPECTED"
+
+    @pytest.mark.asyncio
     async def test_fat_harness_sibling_context_marks_siblings_out_of_scope(self) -> None:
         """Fat-harness sibling context must be a boundary, not an invitation."""
         event_store, _ = _make_replaying_event_store()

@@ -103,7 +103,7 @@ from ouroboros.orchestrator.policy import (
     PolicySessionRole,
     evaluate_capability_policy,
 )
-from ouroboros.orchestrator.profile_loader import ExecutionProfile
+from ouroboros.orchestrator.profile_loader import EvidenceSchema, ExecutionProfile
 from ouroboros.orchestrator.runtime_message_projection import (
     project_runtime_message,
 )
@@ -134,6 +134,67 @@ MIN_SUB_ACS = 2
 MAX_SUB_ACS = 5
 DECOMPOSITION_TIMEOUT_SECONDS = 60.0
 _IMPLEMENTATION_SESSION_KIND = "implementation_session"
+
+
+_DOC_ONLY_TARGET_RE = re.compile(
+    r"\b(readme(?:\.md)?|docs?/|docs?|documentation|guide|manual|changelog)\b",
+    re.IGNORECASE,
+)
+_DOC_ONLY_ACTION_RE = re.compile(
+    r"\b(document|describe|explain|add|update|create|fix|write|improve)\b",
+    re.IGNORECASE,
+)
+_CODE_IMPLEMENTATION_ACTION_RE = re.compile(
+    r"\b(implement|build|develop|ship)\b",
+    re.IGNORECASE,
+)
+_TEST_EVIDENCE_RE = re.compile(
+    r"\b(test|tests?|pytest|unit\s+test|integration\s+test)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_documentation_only_ac(ac_content: str) -> bool:
+    """Return True when an AC asks only for documentation/README work.
+
+    The code profile normally requires runnable test evidence. Normal usage can
+    still include a final docs-only AC (for example README usage examples after
+    code ACs already passed). Such an AC should be verified by docs evidence
+    from the current runtime session, not by re-claiming prior code test IDs.
+    """
+    normalized = " ".join(ac_content.split())
+    if not normalized:
+        return False
+    if _TEST_EVIDENCE_RE.search(normalized):
+        return False
+    if _CODE_IMPLEMENTATION_ACTION_RE.search(normalized):
+        return False
+    return bool(_DOC_ONLY_TARGET_RE.search(normalized)) and bool(
+        _DOC_ONLY_ACTION_RE.search(normalized)
+    )
+
+
+def _effective_evidence_schema_for_ac(
+    profile: ExecutionProfile,
+    ac_content: str,
+) -> EvidenceSchema:
+    """Return the active evidence schema for one atomic AC dispatch."""
+    schema = profile.evidence_schema
+    if not _is_documentation_only_ac(ac_content) or "tests_passed" not in schema.required:
+        return schema
+    required = tuple(field for field in schema.required if field != "tests_passed")
+    rejected_if = tuple(
+        expr for expr in schema.rejected_if if not expr.strip().startswith("tests_passed")
+    )
+    return EvidenceSchema(required=required, rejected_if=rejected_if)
+
+
+def _profile_with_evidence_schema(
+    profile: ExecutionProfile,
+    schema: EvidenceSchema,
+) -> ExecutionProfile:
+    """Return a shallow profile copy using an AC-specific evidence schema."""
+    return profile.model_copy(update={"evidence_schema": schema})
 
 
 def _subtask_event_label(content: str, *, max_length: int = 50) -> str:
@@ -3789,7 +3850,18 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
             file_listing = "(unable to list)"
 
         if self._fat_harness_mode and self._execution_profile is not None:
-            required_fields = ", ".join(self._execution_profile.evidence_schema.required)
+            effective_schema = _effective_evidence_schema_for_ac(
+                self._execution_profile, ac_content
+            )
+            required_fields = ", ".join(effective_schema.required)
+            doc_only_note = ""
+            if _is_documentation_only_ac(ac_content):
+                doc_only_note = (
+                    "This is a documentation-only current AC: verify the requested docs "
+                    "with current-session README/docs evidence such as Edit plus grep/read/diff. "
+                    "Do not include tests_passed unless this current AC explicitly required "
+                    "code tests and you ran those tests in this runtime session.\n"
+                )
             completion_instruction = (
                 "## Current AC Scope Contract\n"
                 "You are responsible only for the current acceptance criterion in "
@@ -3798,7 +3870,8 @@ Respond with either "ATOMIC" or the JSON array only, nothing else.
                 "related files, future functions, tests, or docs, treat that work as "
                 "out of scope unless the current AC explicitly requires it.\n"
                 "Your final evidence JSON must cite only files, commands, and tests "
-                "directly changed or run for this current AC in this runtime session.\n\n"
+                "directly changed or run for this current AC in this runtime session.\n"
+                f"{doc_only_note}\n"
                 "Use the available tools to accomplish this task. Report progress through "
                 "tool-visible work, not a prose-only completion claim.\n"
                 "When complete, emit exactly ONE fenced JSON evidence record as the "
@@ -4121,6 +4194,7 @@ Files present:
             duration = (datetime.now(UTC) - start_time).total_seconds()
 
             typed_evidence, typed_validation, typed_error = self._observe_atomic_typed_evidence(
+                ac_content=ac_content,
                 final_message=final_message,
                 success=success,
             )
@@ -4267,6 +4341,7 @@ Files present:
     def _observe_atomic_typed_evidence(
         self,
         *,
+        ac_content: str,
         final_message: str,
         success: bool,
     ) -> tuple[EvidenceRecord | None, ValidationResult | None, str | None]:
@@ -4282,7 +4357,14 @@ Files present:
 
         try:
             record = extract_evidence(final_message)
-            validation = validate_evidence(self._execution_profile, record)
+            effective_schema = _effective_evidence_schema_for_ac(
+                self._execution_profile,
+                ac_content,
+            )
+            validation = validate_evidence(
+                _profile_with_evidence_schema(self._execution_profile, effective_schema),
+                record,
+            )
         except ProfileEvidenceConfigError:
             raise
         except EvidenceError as exc:
@@ -4348,9 +4430,15 @@ Files present:
 
         verifier = self._atomic_verifier
         try:
+            effective_schema = _effective_evidence_schema_for_ac(
+                self._execution_profile, ac_content
+            )
+            effective_profile = _profile_with_evidence_schema(
+                self._execution_profile, effective_schema
+            )
             verdict = (
                 verifier(
-                    profile=self._execution_profile,
+                    profile=effective_profile,
                     ac=ac_content,
                     leaf_output=final_message,
                     record=typed_evidence,
@@ -4359,6 +4447,7 @@ Files present:
                 else self._verify_atomic_evidence_against_runtime_messages(
                     messages=messages,
                     typed_evidence=typed_evidence,
+                    ac_content=ac_content,
                 )
             )
         except VerifierContractError:
@@ -4375,6 +4464,7 @@ Files present:
         *,
         messages: tuple[AgentMessage, ...],
         typed_evidence: EvidenceRecord,
+        ac_content: str,
     ) -> VerifierVerdict:
         """Verify leaf evidence is backed by runtime transcript events.
 
@@ -4398,10 +4488,20 @@ Files present:
                 _runtime_support_messages_for_field("commands_run", support_messages),
             )
         )
+        effective_schema = _effective_evidence_schema_for_ac(self._execution_profile, ac_content)
+        required_fields = set(effective_schema.required)
+        fields_to_verify = list(effective_schema.required)
         for field_name in self._execution_profile.evidence_schema.required:
+            if field_name not in required_fields and _flatten_evidence_values(
+                typed_evidence.get(field_name)
+            ):
+                fields_to_verify.append(field_name)
+
+        for field_name in fields_to_verify:
             values = tuple(_flatten_evidence_values(typed_evidence.get(field_name)))
             if not values:
-                unsupported.append(f"{field_name}: no concrete claim values")
+                if field_name in required_fields:
+                    unsupported.append(f"{field_name}: no concrete claim values")
                 continue
             field_messages = _runtime_support_messages_for_field(field_name, support_messages)
             for value in values:
@@ -4462,7 +4562,9 @@ Files present:
             "session_id": session_id,
             "acceptance_criterion": ac_content,
             "profile": self._execution_profile.profile,
-            "required_fields": list(self._execution_profile.evidence_schema.required),
+            "required_fields": list(
+                _effective_evidence_schema_for_ac(self._execution_profile, ac_content).required
+            ),
             "observe_only": not self._fat_harness_mode,
             "enforced": self._fat_harness_mode,
             "fat_harness_mode": self._fat_harness_mode,
