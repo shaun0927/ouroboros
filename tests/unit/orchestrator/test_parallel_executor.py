@@ -1538,6 +1538,107 @@ class TestParallelACExecutor:
         ]
         assert evidence_event.data["verifier_passed"] is True
 
+    @pytest.mark.parametrize(
+        "ac_content",
+        [
+            "Add slugify() and update README.md.",
+            "Fix parser bug and document it in docs/.",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_fat_harness_mixed_code_and_docs_ac_keeps_test_evidence_required(
+        self, tmp_path, ac_content: str
+    ) -> None:
+        """Mixed implementation/docs ACs must not drop tests_passed from code profile evidence."""
+        source_file = tmp_path / "src" / "string_utils.py"
+        source_file.parent.mkdir()
+        source_file.write_text("def slugify(text):\n    return text.lower()\n", encoding="utf-8")
+        test_file = tmp_path / "tests" / "test_string_utils.py"
+        test_file.parent.mkdir()
+        test_file.write_text("def test_slugify():\n    assert True\n", encoding="utf-8")
+        readme = tmp_path / "README.md"
+        readme.write_text("# String utils\n", encoding="utf-8")
+
+        event_store, appended_events = _make_replaying_event_store()
+        runtime = _FinalMessageRuntime(
+            "```json\n"
+            "{\n"
+            '  "files_touched": ["src/string_utils.py", "tests/test_string_utils.py", "README.md"],\n'
+            '  "commands_run": ["python -m pytest tests/test_string_utils.py"],\n'
+            '  "tests_passed": ["tests/test_string_utils.py::test_slugify"]\n'
+            "}\n"
+            "```",
+            native_session_id="codex-session-mixed-code-docs-ac",
+            support_messages=(
+                AgentMessage(
+                    type="assistant",
+                    content=f"Calling tool: Edit: {source_file}",
+                    tool_name="Edit",
+                    data={"tool_input": {"file_path": str(source_file)}},
+                ),
+                AgentMessage(
+                    type="assistant",
+                    content=f"Calling tool: Edit: {test_file}",
+                    tool_name="Edit",
+                    data={"tool_input": {"file_path": str(test_file)}},
+                ),
+                AgentMessage(
+                    type="assistant",
+                    content=f"Calling tool: Edit: {readme}",
+                    tool_name="Edit",
+                    data={"tool_input": {"file_path": str(readme)}},
+                ),
+                AgentMessage(
+                    type="assistant",
+                    content="Calling tool: Bash: python -m pytest tests/test_string_utils.py",
+                    tool_name="Bash",
+                    data={
+                        "tool_input": {"command": "python -m pytest tests/test_string_utils.py"},
+                        "output": "tests/test_string_utils.py::test_slugify passed; 1 passed",
+                        "exit_code": 0,
+                    },
+                ),
+            ),
+            cwd=str(tmp_path),
+        )
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+            task_cwd=str(tmp_path),
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content=ac_content,
+            session_id="orch_123",
+            tools=["Read", "Edit", "Bash"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship string utilities",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is True
+        assert runtime.last_prompt is not None
+        assert "documentation-only current AC" not in runtime.last_prompt
+        assert "files_touched, commands_run, tests_passed" in runtime.last_prompt
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["required_fields"] == [
+            "files_touched",
+            "commands_run",
+            "tests_passed",
+        ]
+        assert evidence_event.data["verifier_passed"] is True
+
     @pytest.mark.asyncio
     async def test_fat_harness_docs_only_ac_rejects_prior_test_id_bleed(self, tmp_path) -> None:
         """Docs-only ACs may omit tests, but non-empty stale tests_passed is still checked."""

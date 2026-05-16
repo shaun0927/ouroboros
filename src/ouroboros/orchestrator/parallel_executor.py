@@ -148,6 +148,17 @@ _CODE_IMPLEMENTATION_ACTION_RE = re.compile(
     r"\b(implement|build|develop|ship)\b",
     re.IGNORECASE,
 )
+_CODE_WORK_SIGNAL_RE = re.compile(
+    r"("
+    r"\b[a-zA-Z_][a-zA-Z0-9_]*\s*\("
+    r"|"
+    r"\.(?:py|pyi|js|jsx|ts|tsx|go|rs|java|kt|c|cc|cpp|h|hpp|swift|rb|php|sh|zsh|fish)\b"
+    r"|"
+    r"\b(parser|function|module|api|endpoint|class|method|cli\s+flag|flag|command|"
+    r"bug|runtime|workflow|validator|validation|implementation)\b"
+    r")",
+    re.IGNORECASE,
+)
 _TEST_EVIDENCE_RE = re.compile(
     r"\b(test|tests?|pytest|unit\s+test|integration\s+test)\b",
     re.IGNORECASE,
@@ -168,6 +179,10 @@ def _is_documentation_only_ac(ac_content: str) -> bool:
     if _TEST_EVIDENCE_RE.search(normalized):
         return False
     if _CODE_IMPLEMENTATION_ACTION_RE.search(normalized):
+        return False
+    if _CODE_WORK_SIGNAL_RE.search(normalized):
+        return False
+    if len(_DOC_ONLY_ACTION_RE.findall(normalized)) > 1:
         return False
     return bool(_DOC_ONLY_TARGET_RE.search(normalized)) and bool(
         _DOC_ONLY_ACTION_RE.search(normalized)
