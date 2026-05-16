@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import sys
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -69,9 +70,81 @@ class TestCodexSetup:
 
         contents = (tmp_path / ".codex" / "config.toml").read_text(encoding="utf-8")
 
-        assert 'command = "/Users/me/.local/bin/ouroboros"' in contents
-        assert 'args = ["mcp", "serve", "--runtime", "codex", "--llm-backend", "codex"]' in contents
+        assert f"command = {json.dumps(sys.executable)}" in contents
+        assert (
+            'args = ["-m", "ouroboros", "mcp", "serve", "--runtime", "codex", '
+            '"--llm-backend", "codex"]'
+        ) in contents
         assert 'command = "uvx"' not in contents
+
+    def test_register_codex_mcp_server_refreshes_stale_dev_module_entry(
+        self, tmp_path: Path
+    ) -> None:
+        """Setup-owned dev module configs should be repairable after venv moves."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text(
+            "\n".join(
+                [
+                    "# Ouroboros MCP hookup for Codex CLI.",
+                    "[mcp_servers.ouroboros]",
+                    'command = "/stale/venv/bin/python"',
+                    (
+                        'args = ["-m", "ouroboros", "mcp", "serve", "--runtime", '
+                        '"codex", "--llm-backend", "codex"]'
+                    ),
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup.importlib_metadata.version",
+                return_value="0.38.3.dev110",
+            ),
+        ):
+            setup_cmd._register_codex_mcp_server()
+
+        contents = codex_config.read_text(encoding="utf-8")
+
+        assert f"command = {json.dumps(sys.executable)}" in contents
+        assert "/stale/venv/bin/python" not in contents
+
+    def test_register_codex_mcp_server_refreshes_legacy_direct_dev_entry(
+        self, tmp_path: Path
+    ) -> None:
+        """Earlier setup-owned direct executable configs should not become stuck."""
+        codex_config = tmp_path / ".codex" / "config.toml"
+        codex_config.parent.mkdir(parents=True)
+        codex_config.write_text(
+            "\n".join(
+                [
+                    "# Ouroboros MCP hookup for Codex CLI.",
+                    "[mcp_servers.ouroboros]",
+                    'command = "/old/venv/bin/ouroboros"',
+                    ('args = ["mcp", "serve", "--runtime", "codex", "--llm-backend", "codex"]'),
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup.importlib_metadata.version",
+                return_value="0.38.3.dev110",
+            ),
+        ):
+            setup_cmd._register_codex_mcp_server()
+
+        contents = codex_config.read_text(encoding="utf-8")
+
+        assert f"command = {json.dumps(sys.executable)}" in contents
+        assert "/old/venv/bin/ouroboros" not in contents
 
     def test_register_codex_mcp_server_rewrites_existing_block_without_timeout(
         self,
