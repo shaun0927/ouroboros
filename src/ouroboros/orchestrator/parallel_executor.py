@@ -658,6 +658,34 @@ def _message_contains_test_success(message: AgentMessage) -> bool:
     return _text_contains_test_success("\n".join(parts))
 
 
+def _runtime_message_test_proof_text(message: AgentMessage) -> str:
+    """Return runtime-produced text that can prove test output for a Bash chunk.
+
+    Assistant narration after a Bash call is useful transcript context, but it
+    is not runtime output for that command. Keep summary matching tied to the
+    Bash output/result payloads and tool-result messages that runtimes emit.
+    """
+    resultish = message.type in {"result", "tool_result"} or message.data.get(
+        "subtype"
+    ) == "tool_result"
+    parts: list[str] = []
+    if resultish:
+        parts.append(message.content)
+    for key in ("result_preview", "output", "stdout", "stderr", "tool_result_text"):
+        value = message.data.get(key)
+        if isinstance(value, str):
+            parts.append(value)
+    tool_result = message.data.get("tool_result")
+    if isinstance(tool_result, dict):
+        for key in ("text_content", "content", "output", "stdout", "stderr"):
+            value = tool_result.get(key)
+            if isinstance(value, str):
+                parts.append(value)
+    elif isinstance(tool_result, str):
+        parts.append(tool_result)
+    return "\n".join(parts)
+
+
 def _test_claim_file_part(value: str) -> str | None:
     """Return the file path portion of a pytest node-id style claim."""
     stripped = value.strip()
@@ -695,16 +723,33 @@ def _claim_summary_matches_runtime_chunk(
     return _text_contains_test_success(summary)
 
 
+def _claim_contains_command_success_summary(*, command: str, claim: str) -> bool:
+    """Return True when a test claim appends a success summary to a command."""
+    normalized_command = _normalized_evidence_text(command)
+    normalized_claim = _normalized_evidence_text(claim)
+    if not normalized_command or normalized_command not in normalized_claim:
+        return False
+    summary = normalized_claim.split(normalized_command, 1)[1].strip(" :-")
+    return bool(summary) and _text_contains_test_success(summary)
+
+
 def _test_command_targets_claim(
     *,
     command: str,
     claim: str,
     chunk_text: str,
+    chunk_test_proof_text: str,
     messages: tuple[AgentMessage, ...],
     task_cwd: str | None,
 ) -> bool:
     """Return True when a successful test command can cover a test claim."""
     needle = claim.strip().lower()
+    if _claim_contains_command_success_summary(command=command, claim=claim):
+        return _claim_summary_matches_runtime_chunk(
+            command=command,
+            claim=claim,
+            chunk_text=chunk_test_proof_text,
+        )
     if needle and needle in chunk_text:
         return True
 
@@ -715,7 +760,11 @@ def _test_command_targets_claim(
     normalized_command = command.lower()
     if normalized_file in chunk_text or normalized_file in normalized_command:
         return True
-    if _claim_summary_matches_runtime_chunk(command=command, claim=claim, chunk_text=chunk_text):
+    if _claim_summary_matches_runtime_chunk(
+        command=command,
+        claim=claim,
+        chunk_text=chunk_test_proof_text,
+    ):
         return True
 
     # A broad suite command such as ``pytest`` can cover a node-id claim when
@@ -763,11 +812,15 @@ def _runtime_messages_support_test_claim(
         if not any(_message_contains_test_success(item) for item in chunk):
             continue
         chunk_text = "\n".join(_runtime_message_search_text(item) for item in chunk)
+        chunk_test_proof_text = "\n".join(
+            _runtime_message_test_proof_text(item) for item in chunk
+        )
         if any(
             _test_command_targets_claim(
                 command=command,
                 claim=value,
                 chunk_text=chunk_text,
+                chunk_test_proof_text=chunk_test_proof_text,
                 messages=messages,
                 task_cwd=task_cwd,
             )

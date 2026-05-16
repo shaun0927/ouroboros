@@ -3400,6 +3400,14 @@ class TestParallelACExecutor:
                             "exit_code": 0,
                         },
                     ),
+                    AgentMessage(
+                        type="assistant",
+                        content=(
+                            "Tests passed: python -m unittest test_slugify.py: "
+                            "Ran 4 tests in 0.000s OK"
+                        ),
+                        data={},
+                    ),
                 ),
                 cwd=str(tmp_path),
             ),
