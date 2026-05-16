@@ -250,7 +250,7 @@ class TestCodexDoctor:
             {"OUROBOROS_AGENT_RUNTIME": "codex"},
         )
 
-    def test_list_stdio_mcp_tool_names_uses_protocol_without_local_mcp_import(
+    def test_list_stdio_mcp_tool_names_uses_jsonl_protocol_without_local_mcp_import(
         self,
         tmp_path: Path,
     ) -> None:
@@ -266,22 +266,14 @@ class TestCodexDoctor:
                 sys.stderr.buffer.flush()
 
                 def read_message():
-                    content_length = None
-                    while True:
-                        line = sys.stdin.buffer.readline()
-                        if not line:
-                            raise SystemExit(0)
-                        line = line.strip()
-                        if not line:
-                            break
-                        key, _, value = line.partition(b":")
-                        if key.lower() == b"content-length":
-                            content_length = int(value.strip())
-                    return json.loads(sys.stdin.buffer.read(content_length))
+                    line = sys.stdin.buffer.readline()
+                    if not line:
+                        raise SystemExit(0)
+                    return json.loads(line)
 
                 def write_message(message):
                     body = json.dumps(message).encode("utf-8")
-                    sys.stdout.buffer.write(b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n\r\n" + body)
+                    sys.stdout.buffer.write(body + b"\n")
                     sys.stdout.buffer.flush()
 
                 initialize = read_message()
@@ -299,6 +291,11 @@ class TestCodexDoctor:
                     },
                 })
                 read_message()  # notifications/initialized
+                write_message({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/message",
+                    "params": {"level": "info", "data": "skip non-response messages"},
+                })
                 tools_list = read_message()
                 write_message({
                     "jsonrpc": "2.0",

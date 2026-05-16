@@ -345,7 +345,7 @@ async def _send_stdio_mcp_message(
     if proc.stdin is None:
         raise RuntimeError("MCP stdio process has no stdin")
     body = json.dumps(message, separators=(",", ":")).encode("utf-8")
-    proc.stdin.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body)
+    proc.stdin.write(body + b"\n")
     await proc.stdin.drain()
 
 
@@ -379,7 +379,6 @@ async def _read_stdio_mcp_message(
     if proc.stdout is None:
         raise RuntimeError("MCP stdio process has no stdout")
 
-    content_length: int | None = None
     while True:
         line = await proc.stdout.readline()
         if line == b"":
@@ -388,23 +387,11 @@ async def _read_stdio_mcp_message(
             raise RuntimeError(f"MCP stdio process exited before response{detail}")
         stripped = line.strip()
         if not stripped:
-            break
-        if stripped.startswith(b"{"):
-            decoded = json.loads(stripped.decode("utf-8"))
-            if not isinstance(decoded, Mapping):
-                raise RuntimeError("MCP stdio response was not a JSON object")
-            return decoded
-        key, separator, value = stripped.partition(b":")
-        if separator and key.lower() == b"content-length":
-            content_length = int(value.strip())
-
-    if content_length is None:
-        raise RuntimeError("MCP stdio response missing Content-Length header")
-    body = await proc.stdout.readexactly(content_length)
-    decoded = json.loads(body.decode("utf-8"))
-    if not isinstance(decoded, Mapping):
-        raise RuntimeError("MCP stdio response was not a JSON object")
-    return decoded
+            continue
+        decoded = json.loads(stripped.decode("utf-8"))
+        if not isinstance(decoded, Mapping):
+            raise RuntimeError("MCP stdio response was not a JSON object")
+        return decoded
 
 
 async def _drain_stdio_mcp_stderr(stderr: asyncio.StreamReader, stderr_buffer: bytearray) -> None:
