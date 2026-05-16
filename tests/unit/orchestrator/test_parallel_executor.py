@@ -1633,6 +1633,9 @@ class TestParallelACExecutor:
             "Add docs command to CLI.",
             "Create docs endpoint.",
             "Fix docs parser bug.",
+            "Update README.md while fixing parser bug.",
+            "Update README.md plus fix parser bug.",
+            "Fix documentation parser bug.",
         ],
     )
     @pytest.mark.asyncio
