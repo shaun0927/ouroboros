@@ -35,6 +35,10 @@ _MCP_PROTOCOL_VERSION = "2024-11-05"
 _MCP_STDERR_TAIL_BYTES = 8192
 
 
+class _StdioMcpFramingMismatch(RuntimeError):
+    """Raised when a stdio MCP response clearly uses another wire framing."""
+
+
 @dataclass(frozen=True, slots=True)
 class _CodexMCPCommandEntry:
     command: str
@@ -273,7 +277,7 @@ async def _list_stdio_mcp_tool_names(
     """
     try:
         return await _list_stdio_mcp_tool_names_with_framing(command, args, env, framing="jsonl")
-    except (json.JSONDecodeError, RuntimeError, TimeoutError):
+    except (json.JSONDecodeError, _StdioMcpFramingMismatch):
         return await _list_stdio_mcp_tool_names_with_framing(
             command, args, env, framing="content-length"
         )
@@ -428,6 +432,8 @@ async def _read_stdio_mcp_message(
         stripped = line.strip()
         if not stripped:
             continue
+        if stripped.lower().startswith(b"content-length:"):
+            raise _StdioMcpFramingMismatch("MCP stdio response used Content-Length framing")
         decoded = json.loads(stripped.decode("utf-8"))
         if not isinstance(decoded, Mapping):
             raise RuntimeError("MCP stdio response was not a JSON object")

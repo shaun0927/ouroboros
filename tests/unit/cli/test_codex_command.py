@@ -8,6 +8,7 @@ import sys
 import textwrap
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from typer.testing import CliRunner
 
 from ouroboros.cli.commands.codex import (
@@ -333,7 +334,9 @@ class TestCodexDoctor:
 
                 first_line = sys.stdin.buffer.readline()
                 if first_line and first_line.lstrip().startswith(b"{"):
-                    raise SystemExit(2)
+                    sys.stdout.buffer.write(b"Content-Length: 2\r\n\r\n{}")
+                    sys.stdout.buffer.flush()
+                    raise SystemExit(0)
 
                 def read_message():
                     headers = {}
@@ -390,6 +393,32 @@ class TestCodexDoctor:
         )
 
         assert tool_names >= _REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST
+
+    def test_list_stdio_mcp_tool_names_surfaces_json_rpc_errors_without_framing_retry(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        server_path = tmp_path / "fake_error_mcp_server.py"
+        server_path.write_text(
+            textwrap.dedent(
+                r"""
+                import json
+                import sys
+
+                initialize = json.loads(sys.stdin.buffer.readline())
+                sys.stdout.buffer.write(json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": initialize["id"],
+                    "error": {"code": -32000, "message": "initialize rejected"},
+                }).encode("utf-8") + b"\n")
+                sys.stdout.buffer.flush()
+                """
+            ),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(RuntimeError, match="initialize rejected"):
+            asyncio.run(_list_stdio_mcp_tool_names(sys.executable, (str(server_path),), {}))
 
     def test_check_auto_dispatch_surface_live_mcp_accepts_uvx_mcp_extra_without_local_mcp(
         self,
