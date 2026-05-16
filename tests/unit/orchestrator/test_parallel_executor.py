@@ -1607,6 +1607,87 @@ class TestParallelACExecutor:
         assert evidence_event.data["verifier_failure_class"] == "FABRICATION_SUSPECTED"
 
     @pytest.mark.asyncio
+    async def test_fat_harness_docs_only_ac_passes_consistent_profile_to_injected_verifier(
+        self, tmp_path
+    ) -> None:
+        """Docs-only AC profile overrides must keep must_produce within required evidence."""
+        readme = tmp_path / "README.md"
+        readme.write_text("# String utils\n", encoding="utf-8")
+        verifier_profiles: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+
+        def _recording_verifier(**kwargs: object) -> VerifierVerdict:
+            profile = kwargs["profile"]
+            verifier_profiles.append(
+                (
+                    tuple(profile.evidence_schema.required),  # type: ignore[attr-defined]
+                    tuple(profile.must_produce),  # type: ignore[attr-defined]
+                )
+            )
+            return VerifierVerdict(passed=True)
+
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                "```json\n"
+                "{\n"
+                '  "files_touched": ["README.md"],\n'
+                '  "commands_run": ["grep -n slugify README.md"]\n'
+                "}\n"
+                "```",
+                native_session_id="codex-session-docs-only-injected-verifier",
+                support_messages=(
+                    AgentMessage(
+                        type="assistant",
+                        content=f"Calling tool: Edit: {readme}",
+                        tool_name="Edit",
+                        data={"tool_input": {"file_path": str(readme)}},
+                    ),
+                    AgentMessage(
+                        type="assistant",
+                        content="Calling tool: Bash: grep -n slugify README.md",
+                        tool_name="Bash",
+                        data={
+                            "tool_input": {"command": "grep -n slugify README.md"},
+                            "output": "12:slugify('Hello World') -> hello-world",
+                            "exit_code": 0,
+                        },
+                    ),
+                ),
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+            atomic_verifier=_recording_verifier,
+            task_cwd=str(tmp_path),
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=2,
+            ac_content="Document slugify and truncate usage in README.md.",
+            session_id="orch_123",
+            tools=["Read", "Edit", "Bash"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship string utilities",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is True
+        assert verifier_profiles == [(("files_touched", "commands_run"), ("files_touched",))]
+        assert set(verifier_profiles[0][1]).issubset(verifier_profiles[0][0])
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["required_fields"] == ["files_touched", "commands_run"]
+        assert evidence_event.data["verifier_passed"] is True
+
+    @pytest.mark.asyncio
     async def test_fat_harness_sibling_context_marks_siblings_out_of_scope(self) -> None:
         """Fat-harness sibling context must be a boundary, not an invitation."""
         event_store, _ = _make_replaying_event_store()

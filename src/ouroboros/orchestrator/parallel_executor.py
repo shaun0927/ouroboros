@@ -194,7 +194,13 @@ def _profile_with_evidence_schema(
     schema: EvidenceSchema,
 ) -> ExecutionProfile:
     """Return a shallow profile copy using an AC-specific evidence schema."""
-    return profile.model_copy(update={"evidence_schema": schema})
+    required_fields = set(schema.required)
+    must_produce = tuple(
+        field for field in profile.must_produce if field in required_fields
+    )
+    return profile.model_copy(
+        update={"evidence_schema": schema, "must_produce": must_produce}
+    )
 
 
 def _subtask_event_label(content: str, *, max_length: int = 50) -> str:
