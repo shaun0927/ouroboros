@@ -31,7 +31,10 @@ class TestCodexSetup:
 
     def test_register_codex_mcp_server_writes_guidance_comment(self, tmp_path: Path) -> None:
         """The generated Codex config should explain the config file split."""
-        with patch("pathlib.Path.home", return_value=tmp_path):
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.importlib_metadata.version", return_value="0.38.2"),
+        ):
             setup_cmd._register_codex_mcp_server()
 
         config_path = tmp_path / ".codex" / "config.toml"
@@ -44,6 +47,31 @@ class TestCodexSetup:
         assert 'OUROBOROS_AGENT_RUNTIME = "codex"' in contents
         assert 'OUROBOROS_LLM_BACKEND = "codex"' in contents
         assert "tool_timeout_sec" not in contents
+        assert 'command = "uvx"' in contents
+        assert 'args = ["--from", "ouroboros-ai[mcp]", "ouroboros", "mcp", "serve"]' in contents
+
+    def test_register_codex_mcp_server_uses_direct_executable_for_dev_build(
+        self, tmp_path: Path
+    ) -> None:
+        """Dev/git installs should not be rewritten to the latest PyPI uvx package."""
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch(
+                "ouroboros.cli.commands.setup.importlib_metadata.version",
+                return_value="0.38.3.dev110",
+            ),
+            patch(
+                "ouroboros.cli.commands.setup.shutil.which",
+                return_value="/Users/me/.local/bin/ouroboros",
+            ),
+        ):
+            setup_cmd._register_codex_mcp_server()
+
+        contents = (tmp_path / ".codex" / "config.toml").read_text(encoding="utf-8")
+
+        assert 'command = "/Users/me/.local/bin/ouroboros"' in contents
+        assert 'args = ["mcp", "serve", "--runtime", "codex", "--llm-backend", "codex"]' in contents
+        assert 'command = "uvx"' not in contents
 
     def test_register_codex_mcp_server_rewrites_existing_block_without_timeout(
         self,
@@ -138,7 +166,10 @@ class TestCodexSetup:
             encoding="utf-8",
         )
 
-        with patch("pathlib.Path.home", return_value=tmp_path):
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.importlib_metadata.version", return_value="0.38.2"),
+        ):
             setup_cmd._register_codex_mcp_server(mode="stdio")
 
         contents = codex_config.read_text(encoding="utf-8")
