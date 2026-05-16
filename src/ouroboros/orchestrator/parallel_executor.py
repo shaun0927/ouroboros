@@ -665,9 +665,9 @@ def _runtime_message_test_proof_text(message: AgentMessage) -> str:
     is not runtime output for that command. Keep summary matching tied to the
     Bash output/result payloads and tool-result messages that runtimes emit.
     """
-    resultish = message.type in {"result", "tool_result"} or message.data.get(
-        "subtype"
-    ) == "tool_result"
+    resultish = (
+        message.type in {"result", "tool_result"} or message.data.get("subtype") == "tool_result"
+    )
     parts: list[str] = []
     if resultish:
         parts.append(message.content)
@@ -812,9 +812,7 @@ def _runtime_messages_support_test_claim(
         if not any(_message_contains_test_success(item) for item in chunk):
             continue
         chunk_text = "\n".join(_runtime_message_search_text(item) for item in chunk)
-        chunk_test_proof_text = "\n".join(
-            _runtime_message_test_proof_text(item) for item in chunk
-        )
+        chunk_test_proof_text = "\n".join(_runtime_message_test_proof_text(item) for item in chunk)
         if any(
             _test_command_targets_claim(
                 command=command,
