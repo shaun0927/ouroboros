@@ -148,7 +148,10 @@ _CODE_IMPLEMENTATION_ACTION_RE = re.compile(
     r"\b(implement|build|develop|ship)\b",
     re.IGNORECASE,
 )
-_CODE_MUTATION_ACTION_RE = re.compile(r"\b(add|fix|create|update)\b", re.IGNORECASE)
+_CODE_MUTATION_ACTION_RE = re.compile(
+    r"\b(add|fix|create|update|change|modify|refactor|repair)\b",
+    re.IGNORECASE,
+)
 _CODE_WORK_SIGNAL_RE = re.compile(
     r"("
     r"\b[a-zA-Z_][a-zA-Z0-9_]*\s*\("
@@ -171,11 +174,17 @@ def _has_mixed_code_and_documentation_work(ac_content: str) -> bool:
     for connector in re.finditer(r"\b(?:and|then)\b|,", ac_content, re.IGNORECASE):
         before = ac_content[: connector.start()]
         after = ac_content[connector.end() :]
-        if not _DOC_ONLY_TARGET_RE.search(after):
-            continue
-        if _DOC_ONLY_TARGET_RE.search(before):
-            continue
-        if _CODE_MUTATION_ACTION_RE.search(before) and _CODE_WORK_SIGNAL_RE.search(before):
+        before_has_docs = bool(_DOC_ONLY_TARGET_RE.search(before))
+        after_has_docs = bool(_DOC_ONLY_TARGET_RE.search(after))
+        before_has_code_work = bool(
+            _CODE_MUTATION_ACTION_RE.search(before) and _CODE_WORK_SIGNAL_RE.search(before)
+        )
+        after_has_code_work = bool(
+            _CODE_MUTATION_ACTION_RE.search(after) and _CODE_WORK_SIGNAL_RE.search(after)
+        )
+        if after_has_docs and not before_has_docs and before_has_code_work:
+            return True
+        if before_has_docs and not after_has_docs and after_has_code_work:
             return True
     return False
 

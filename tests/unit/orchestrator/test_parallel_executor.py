@@ -1624,6 +1624,9 @@ class TestParallelACExecutor:
         [
             "Add slugify() and update README.md.",
             "Fix parser bug and document it in docs/.",
+            "Update README.md and fix parser bug.",
+            "Write docs/api.md and add endpoint validation.",
+            "Document README.md, then create parser.py.",
         ],
     )
     @pytest.mark.asyncio
