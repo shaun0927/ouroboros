@@ -550,6 +550,52 @@ def test_complete_sibling_acs_accepts_shell_wrapped_successful_test_command() ->
     ]
 
 
+def test_complete_sibling_acs_accepts_named_tool_result_test_output() -> None:
+    success_with_named_tool_result = ACExecutionResult(
+        ac_index=0,
+        ac_content="Run the requested test command.",
+        success=True,
+        messages=(
+            AgentMessage(
+                type="tool_use",
+                content="run pytest",
+                tool_name="Bash",
+                data={"tool_input": {"command": "uv run pytest tests/test_hello_auto.py"}},
+            ),
+            AgentMessage(
+                type="tool",
+                content="1 passed in 0.01s",
+                tool_name="Bash",
+                data={"subtype": "tool_result", "stdout": "1 passed in 0.01s"},
+            ),
+        ),
+    )
+    failed_pytest = ACExecutionResult(
+        ac_index=1,
+        ac_content="The exact command `uv run pytest tests/test_hello_auto.py` passes.",
+        success=False,
+        error="worker did not update this AC separately",
+        outcome=ACExecutionOutcome.FAILED,
+    )
+
+    completed_count, level_success, level_failed, results = _complete_sibling_acs_from_evidence(
+        level_results=[success_with_named_tool_result, failed_pytest],
+        ac_statuses={0: "completed", 1: "failed"},
+        failed_indices={1},
+        completed_count=1,
+        level_success=1,
+        level_failed=1,
+    )
+
+    assert completed_count == 2
+    assert level_success == 2
+    assert level_failed == 0
+    assert [result.outcome for result in results] == [
+        ACExecutionOutcome.SUCCEEDED,
+        ACExecutionOutcome.SATISFIED_EXTERNALLY,
+    ]
+
+
 def test_complete_sibling_acs_rejects_compound_runtime_command_alias() -> None:
     success_with_compound_runtime_command = ACExecutionResult(
         ac_index=0,

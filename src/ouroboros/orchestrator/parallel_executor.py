@@ -1054,6 +1054,11 @@ def _runtime_message_test_proof_text(message: AgentMessage) -> str:
     return "\n".join(parts)
 
 
+def _is_tool_result_message(message: AgentMessage) -> bool:
+    """Return True for runtime tool-result messages, including named-tool variants."""
+    return message.type in {"result", "tool_result"} or message.data.get("subtype") == "tool_result"
+
+
 def _test_claim_file_part(value: str) -> str | None:
     """Return the file path portion of a pytest node-id style claim."""
     stripped = value.strip()
@@ -1181,7 +1186,7 @@ def _runtime_messages_support_test_claim(
             continue
         chunk = [message]
         for following in messages[index + 1 :]:
-            if following.tool_name:
+            if following.tool_name and not _is_tool_result_message(following):
                 break
             chunk.append(following)
         if not any(_message_contains_test_success(item) for item in chunk):
@@ -1472,7 +1477,7 @@ def _successful_runtime_test_commands(messages: tuple[AgentMessage, ...]) -> set
             continue
         chunk = [message]
         for following in messages[index + 1 :]:
-            if following.tool_name:
+            if following.tool_name and not _is_tool_result_message(following):
                 break
             chunk.append(following)
         if any(
