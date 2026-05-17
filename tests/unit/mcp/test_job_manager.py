@@ -1134,6 +1134,97 @@ class TestJobManager:
         finally:
             await read_only_store.close()
 
+    async def test_progress_accounting_failure_recovery_is_non_mutating_for_read_only_store(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        database_url = store._database_url
+
+        try:
+            await store.initialize()
+            await store.append(
+                BaseEvent(
+                    type="mcp.job.created",
+                    aggregate_type="job",
+                    aggregate_id="job_recover_failed_read_only",
+                    data={
+                        "job_type": "execute_seed",
+                        "status": JobStatus.RUNNING.value,
+                        "message": "Running execute_seed",
+                        "links": {
+                            "session_id": "orch_recover_failed_read_only",
+                            "execution_id": "exec_recover_failed_read_only",
+                            "lineage_id": None,
+                        },
+                    },
+                )
+            )
+            await store.append(
+                BaseEvent(
+                    type="workflow.progress.updated",
+                    aggregate_type="execution",
+                    aggregate_id="exec_recover_failed_read_only",
+                    data={
+                        "session_id": "orch_recover_failed_read_only",
+                        "completed_count": 0,
+                        "total_count": 1,
+                        "current_phase": "Deliver",
+                    },
+                )
+            )
+            await store.append(
+                BaseEvent(
+                    type="execution.session.completed",
+                    aggregate_type="execution",
+                    aggregate_id="exec_recover_failed_read_only_ac_1",
+                    data={
+                        "execution_id": "exec_recover_failed_read_only",
+                        "session_id": "child_1",
+                        "session_scope_id": "exec_recover_failed_read_only_ac_1",
+                        "success": True,
+                    },
+                )
+            )
+            await store.append(
+                BaseEvent(
+                    type="execution.terminal",
+                    aggregate_type="execution",
+                    aggregate_id="exec_recover_failed_read_only",
+                    data={"session_id": "orch_recover_failed_read_only", "status": "failed"},
+                )
+            )
+        finally:
+            await store.close()
+
+        read_only_store = EventStore(database_url, read_only=True)
+        read_only_manager = JobManager(read_only_store)
+        try:
+            await read_only_store.initialize(create_schema=False)
+            snapshot = await read_only_manager.get_snapshot("job_recover_failed_read_only")
+
+            assert snapshot.status is JobStatus.FAILED
+            assert snapshot.result_meta["failed_from_progress_accounting_stall"] is True
+            assert "workflow progress accounting stalled" in (snapshot.error or "")
+            events, _ = await read_only_store.get_events_after(
+                "job",
+                "job_recover_failed_read_only",
+                last_row_id=0,
+            )
+            terminal_events = [
+                event.type
+                for event in events
+                if event.type
+                in {
+                    "mcp.job.completed",
+                    "mcp.job.failed",
+                    "mcp.job.cancelled",
+                    "mcp.job.interrupted",
+                }
+            ]
+            assert terminal_events == []
+        finally:
+            await read_only_store.close()
+
     async def test_completed_execution_recovery_does_not_beat_concurrent_cancel_request(
         self, tmp_path
     ) -> None:
