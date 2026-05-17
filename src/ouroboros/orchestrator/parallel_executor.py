@@ -1543,29 +1543,30 @@ def _criterion_satisfied_by_evidence(
         _normalize_command(command).casefold() for command in (passed_commands or set()) if command
     }
 
-    positive_file_markers = (
+    existential_file_markers = (
         " exists",
-        " define",
-        " defines",
-        " import",
-        " imports",
-        " assert",
-        " asserts",
         " create",
         " creates",
         " created",
-        " contain",
-        " contains",
+        " is present",
+        " are present",
     )
     for file_path in files:
         if (
             file_path
             and file_path.casefold() in lowered
-            and any(marker in lowered for marker in positive_file_markers)
+            and any(marker in lowered for marker in existential_file_markers)
         ):
             return True
 
-    command_success_markers = (" pass", " passes", " passed", " succeed", " succeeds", " exit code 0")
+    command_success_markers = (
+        " pass",
+        " passes",
+        " passed",
+        " succeed",
+        " succeeds",
+        " exit code 0",
+    )
     if any(marker in lowered for marker in command_success_markers):
         for command in normalized_passed_commands:
             if command and command in normalized_criterion:
@@ -1574,8 +1575,10 @@ def _criterion_satisfied_by_evidence(
 
     command_run_markers = (" run ", " runs ", " execute", " executes", " command ")
     for command in normalized_run_commands:
-        if command and command in normalized_criterion and any(
-            marker in lowered for marker in command_run_markers
+        if (
+            command
+            and command in normalized_criterion
+            and any(marker in lowered for marker in command_run_markers)
         ):
             return True
 

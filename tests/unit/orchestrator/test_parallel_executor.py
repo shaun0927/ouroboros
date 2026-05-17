@@ -77,6 +77,11 @@ def test_criterion_satisfied_by_exact_runtime_evidence() -> None:
 
     assert _criterion_satisfied_by_evidence("`hello_auto.py` exists.", files, commands)
     assert _criterion_satisfied_by_evidence("`tests/test_hello_auto.py` exists.", files, commands)
+    assert not _criterion_satisfied_by_evidence(
+        "`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value.",
+        files,
+        commands,
+    )
     assert _criterion_satisfied_by_evidence(
         "The exact command `uv run pytest tests/test_hello_auto.py` passes.",
         files,
@@ -132,7 +137,7 @@ def test_complete_sibling_acs_from_successful_runtime_evidence() -> None:
     )
     failed_test_file = ACExecutionResult(
         ac_index=1,
-        ac_content="`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value.",
+        ac_content="`tests/test_hello_auto.py` exists.",
         success=False,
         error="worker did not update this AC separately",
         outcome=ACExecutionOutcome.FAILED,
