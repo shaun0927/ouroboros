@@ -34,6 +34,10 @@ Implementation:
 - Create `hello_auto.py` at the repository root.
 - Add a minimal pytest test at `tests/test_hello_auto.py`.
 
+Outputs:
+- `hello_auto.py` exists.
+- `tests/test_hello_auto.py` exists.
+
 Runtime context:
 - This is a local development repository.
 - Local file edits are allowed.

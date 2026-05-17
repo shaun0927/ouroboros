@@ -190,7 +190,9 @@ class AutoHandler:
                         "(e.g. runtime_context, constraints, non_goals). The Driver "
                         "tags matching answers with [from-auto][user_preference] in the "
                         "ledger. Keys must be valid ledger section names; values must "
-                        "be non-empty strings or non-empty lists of strings/numbers."
+                        "be non-empty strings or non-empty lists of strings/numbers. "
+                        "On resume, null/empty values clear the persisted preference "
+                        "for that section."
                     ),
                     required=False,
                 ),
@@ -293,11 +295,7 @@ class AutoHandler:
         user_preferences_supplied = (
             "user_preferences" in arguments and arguments.get("user_preferences") is not None
         )
-        supplied_user_preferences = (
-            _parse_user_preferences(arguments.get("user_preferences"))
-            if user_preferences_supplied
-            else {}
-        )
+        supplied_user_preferences: dict[str, str | None] = {}
         if isinstance(resume, str) and resume:
             state = store.load(resume)
             cwd = state.cwd
@@ -315,6 +313,10 @@ class AutoHandler:
             # ones; otherwise the original session's preferences are reused so
             # the same input converges to the same Seed.
             if user_preferences_supplied:
+                supplied_user_preferences = _parse_user_preferences(
+                    arguments.get("user_preferences"),
+                    allow_deletions=True,
+                )
                 state.user_preferences = _merge_resume_user_preferences(
                     state.goal,
                     state.user_preferences,
@@ -335,6 +337,11 @@ class AutoHandler:
             elif complete_product and not state.complete_product:
                 state.complete_product = True
         else:
+            supplied_user_preferences = (
+                _parse_user_preferences(arguments.get("user_preferences"))
+                if user_preferences_supplied
+                else {}
+            )
             goal = arguments.get("goal")
             if not isinstance(goal, str) or not goal.strip():
                 raise ValueError("goal is required when not resuming")
@@ -755,7 +762,7 @@ class StartAutoHandler:
         state.max_repair_rounds = _positive_int_arg(arguments, "max_repair_rounds", 5)
         state.skip_run = bool(arguments.get("skip_run", False))
         state.complete_product = bool(arguments.get("complete_product", False))
-        supplied_user_preferences: dict[str, str] = {}
+        supplied_user_preferences: dict[str, str | None] = {}
         if "user_preferences" in arguments and arguments.get("user_preferences") is not None:
             supplied_user_preferences = _parse_user_preferences(arguments.get("user_preferences"))
         state.user_preferences = _merge_goal_user_preferences(goal, supplied_user_preferences)
@@ -1261,7 +1268,11 @@ def _optional_pipeline_timeout(arguments: dict[str, Any]) -> float | None:
     return timeout
 
 
-def _parse_user_preferences(value: object) -> dict[str, str]:
+def _parse_user_preferences(
+    value: object,
+    *,
+    allow_deletions: bool = False,
+) -> dict[str, str | None]:
     """Validate and normalise the optional ``user_preferences`` MCP arg.
 
     Returns a dict keyed by ledger section names. Empty input yields an empty
@@ -1271,9 +1282,11 @@ def _parse_user_preferences(value: object) -> dict[str, str]:
 
     Accepted value shapes per key:
 
-    * ``str``  — stripped; must be non-empty.
+    * ``str``  — stripped; must be non-empty unless resume deletion is allowed.
     * ``list[str | int | float]`` — each item stringified+stripped, empties
       dropped, joined with ``"\\n"``; final result must be non-empty.
+    * ``None`` / empty string / empty list — only when ``allow_deletions`` is
+      true, clears a persisted preference for that key.
 
     The downstream ``answerer.py`` still consumes the value as a single
     string (via ``raw_value.strip()``); only the input contract widens.
@@ -1285,7 +1298,7 @@ def _parse_user_preferences(value: object) -> dict[str, str]:
     if not value:
         return {}
     valid_sections = frozenset(REQUIRED_SECTIONS)
-    cleaned: dict[str, str] = {}
+    cleaned: dict[str, str | None] = {}
     for raw_key, raw_val in value.items():
         if not isinstance(raw_key, str):
             raise ValueError("user_preferences keys must be strings")
@@ -1296,9 +1309,15 @@ def _parse_user_preferences(value: object) -> dict[str, str]:
                 f"user_preferences key '{raw_key}' is not a valid ledger section "
                 f"(allowed: {', '.join(sorted(valid_sections))}){hint}"
             )
+        if raw_val is None and allow_deletions:
+            cleaned[raw_key] = None
+            continue
         if isinstance(raw_val, str):
             normalised = raw_val.strip()
             if not normalised:
+                if allow_deletions:
+                    cleaned[raw_key] = None
+                    continue
                 raise ValueError(
                     f"user_preferences['{raw_key}'] must be a non-empty string or "
                     "list of strings/numbers"
@@ -1317,6 +1336,9 @@ def _parse_user_preferences(value: object) -> dict[str, str]:
                 if text:
                     parts.append(text)
             if not parts:
+                if allow_deletions:
+                    cleaned[raw_key] = None
+                    continue
                 raise ValueError(
                     f"user_preferences['{raw_key}'] must be a non-empty string or "
                     "list of strings/numbers"
@@ -1329,22 +1351,30 @@ def _parse_user_preferences(value: object) -> dict[str, str]:
     return cleaned
 
 
-def _merge_goal_user_preferences(goal: str, supplied: dict[str, str]) -> dict[str, str]:
+def _merge_goal_user_preferences(goal: str, supplied: dict[str, str | None]) -> dict[str, str]:
     """Merge explicit MCP preferences over preferences derived from the goal text."""
     merged = _derive_goal_user_preferences(goal)
-    merged.update(supplied)
+    for key, value in supplied.items():
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = value
     return merged
 
 
 def _merge_resume_user_preferences(
     goal: str,
     persisted: dict[str, str],
-    supplied: dict[str, str],
+    supplied: dict[str, str | None],
 ) -> dict[str, str]:
     """Merge resume preferences without dropping previously persisted facts."""
     merged = _derive_goal_user_preferences(goal)
     merged.update(persisted)
-    merged.update(supplied)
+    for key, value in supplied.items():
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = value
     return merged
 
 
@@ -1455,9 +1485,9 @@ def _derive_goal_user_preferences(goal: str) -> dict[str, str]:
     if success:
         preferences["acceptance_criteria"] = success
 
-    implementation = _section_text(sections, "implementation", "task")
-    if implementation:
-        preferences["outputs"] = implementation
+    outputs = _section_text(sections, "outputs", "deliverables")
+    if outputs:
+        preferences["outputs"] = outputs
 
     constraint_lines = _matching_lines(
         goal,

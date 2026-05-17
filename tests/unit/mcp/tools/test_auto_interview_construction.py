@@ -28,6 +28,7 @@ from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
 from ouroboros.mcp.tools.auto_handler import (
     AutoHandler,
     _derive_goal_user_preferences,
+    _merge_resume_user_preferences,
     _reseed_preference_ledger,
     _seed_initial_ledger_from_user_preferences,
 )
@@ -67,6 +68,10 @@ Verify current ooo auto can create hello_auto.py and tests/test_hello_auto.py.
 Implementation:
 - Create `hello_auto.py` at the repository root.
 - Add a minimal pytest test at `tests/test_hello_auto.py`.
+
+Outputs:
+- `hello_auto.py` exists.
+- `tests/test_hello_auto.py` exists.
 
 Runtime context:
 - This is a local development repository.
@@ -142,6 +147,9 @@ Build a data cleanup tool.
 Implementation:
 - Drop every customer table when a user asks for account deletion.
 
+Outputs:
+- A migration that truncates all customer PII tables.
+
 Success criteria:
 - The migration truncates all PII rows.
 """
@@ -155,8 +163,8 @@ Success criteria:
     assert "acceptance_criteria" not in ledger.summary()["evidence_backed_sections"]
 
 
-def test_implementation_section_does_not_fabricate_inputs_preference() -> None:
-    """Only explicitly authored Inputs sections may seed required inputs."""
+def test_implementation_section_does_not_fabricate_io_preferences() -> None:
+    """Only explicitly authored Inputs/Outputs sections may seed required IO."""
     goal = """
 Goal:
 Create a hello world file.
@@ -167,7 +175,7 @@ Implementation:
 
     preferences = _derive_goal_user_preferences(goal)
 
-    assert preferences["outputs"] == "Create `hello.py`."
+    assert "outputs" not in preferences
     assert "inputs" not in preferences
 
 
@@ -190,6 +198,28 @@ def test_resume_preference_override_reseeds_stale_preconfirmed_ledger() -> None:
     constraints = refreshed.sections["constraints"].entries
     active_constraints = [entry.value for entry in constraints if entry.status == "confirmed"]
     assert active_constraints == ["Keep only the corrected local reversible constraint."]
+
+
+def test_resume_preference_override_can_clear_persisted_section() -> None:
+    """Resume callers need an escape hatch for bad preallocated preferences."""
+    original_preferences = {
+        **_derive_goal_user_preferences(_OBSERVATION_GOAL),
+        "constraints": "Stale constraint that should be removed.",
+    }
+
+    refreshed = _reseed_preference_ledger(
+        _OBSERVATION_GOAL,
+        _seed_initial_ledger_from_user_preferences(
+            _OBSERVATION_GOAL, original_preferences
+        ).to_dict(),
+        _merge_resume_user_preferences(
+            _OBSERVATION_GOAL,
+            original_preferences,
+            {"constraints": None},
+        ),
+    )
+
+    assert "constraints" not in refreshed.summary()["evidence_backed_sections"]
 
 
 def test_auto_handler_fresh_session_persists_goal_derived_ledger_preferences(
