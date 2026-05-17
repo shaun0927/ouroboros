@@ -77,6 +77,12 @@ def test_criterion_satisfied_by_exact_runtime_evidence() -> None:
 
     assert _criterion_satisfied_by_evidence("`hello_auto.py` exists.", files, commands)
     assert _criterion_satisfied_by_evidence("`tests/test_hello_auto.py` exists.", files, commands)
+    assert not _criterion_satisfied_by_evidence("`src/hello_auto.py` exists.", files, commands)
+    assert not _criterion_satisfied_by_evidence(
+        "`hello_auto.py` is created with exact content.",
+        files,
+        commands,
+    )
     assert not _criterion_satisfied_by_evidence(
         "`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value.",
         files,
@@ -263,6 +269,39 @@ def test_complete_sibling_acs_accepts_shell_wrapped_successful_test_command() ->
     assert [result.outcome for result in results] == [
         ACExecutionOutcome.SUCCEEDED,
         ACExecutionOutcome.SATISFIED_EXTERNALLY,
+    ]
+
+
+def test_complete_sibling_acs_does_not_rewrite_blocked_results() -> None:
+    success = ACExecutionResult(
+        ac_index=0,
+        ac_content="`hello_auto.py` exists.",
+        success=True,
+        typed_evidence=EvidenceRecord(data={"files_touched": ["tests/test_hello_auto.py"]}),
+    )
+    blocked = ACExecutionResult(
+        ac_index=1,
+        ac_content="`tests/test_hello_auto.py` exists.",
+        success=False,
+        error="Skipped: dependency failed",
+        outcome=ACExecutionOutcome.BLOCKED,
+    )
+
+    completed_count, level_success, level_failed, results = _complete_sibling_acs_from_evidence(
+        level_results=[success, blocked],
+        ac_statuses={0: "completed", 1: "blocked"},
+        failed_indices=set(),
+        completed_count=1,
+        level_success=1,
+        level_failed=0,
+    )
+
+    assert completed_count == 1
+    assert level_success == 1
+    assert level_failed == 0
+    assert [result.outcome for result in results] == [
+        ACExecutionOutcome.SUCCEEDED,
+        ACExecutionOutcome.BLOCKED,
     ]
 
 

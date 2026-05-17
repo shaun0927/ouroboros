@@ -1543,18 +1543,11 @@ def _criterion_satisfied_by_evidence(
         _normalize_command(command).casefold() for command in (passed_commands or set()) if command
     }
 
-    existential_file_markers = (
-        " exists",
-        " create",
-        " creates",
-        " created",
-        " is present",
-        " are present",
-    )
+    existential_file_markers = (" exists", " is present", " are present")
     for file_path in files:
         if (
             file_path
-            and file_path.casefold() in lowered
+            and _criterion_mentions_exact_file_path(criterion, file_path)
             and any(marker in lowered for marker in existential_file_markers)
         ):
             return True
@@ -1585,6 +1578,23 @@ def _criterion_satisfied_by_evidence(
     return False
 
 
+def _criterion_mentions_exact_file_path(criterion: str, file_path: str) -> bool:
+    """Return True when a criterion cites the exact evidence path."""
+    normalized_path = Path(file_path.strip()).as_posix().casefold()
+    if (
+        not normalized_path
+        or Path(normalized_path).is_absolute()
+        or ".." in Path(normalized_path).parts
+    ):
+        return False
+    inline_code_paths = {
+        Path(match.group(1).strip()).as_posix().casefold()
+        for match in re.finditer(r"`([^`]+)`", criterion)
+        if match.group(1).strip()
+    }
+    return normalized_path in inline_code_paths
+
+
 def _complete_sibling_acs_from_evidence(
     *,
     level_results: list[ACExecutionResult],
@@ -1611,7 +1621,7 @@ def _complete_sibling_acs_from_evidence(
         return completed_count, level_success, level_failed, level_results
 
     for result in level_results:
-        if result.success:
+        if result.success or result.outcome != ACExecutionOutcome.FAILED:
             continue
         for source_idx, files, run_commands, passed_commands in successful_evidence:
             if source_idx == result.ac_index:
