@@ -122,15 +122,18 @@ class TestExecuteSeedHandler:
         assert result.is_err
         assert "seed_content or seed_path is required" in str(result.error)
 
-    async def test_handle_sets_fat_harness_mode_for_fresh_runs_not_resumes(
+    async def test_handle_restores_fat_harness_mode_from_session_contract(
         self,
         memory_event_store: EventStore,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """MCP execution gates fresh runs without breaking resume callers."""
+        """MCP resume preserves the acceptance contract chosen at session creation."""
         captured_modes: list[bool] = []
         fresh_tracker = SessionTracker.create("exec_fresh", "seed-123")
-        resume_tracker = SessionTracker.create("exec_resume", "seed-123")
+        gated_resume_tracker = SessionTracker.create("exec_resume", "seed-123").with_progress(
+            {"fat_harness_mode": True}
+        )
+        legacy_resume_tracker = SessionTracker.create("exec_legacy", "seed-123")
 
         workspace = SimpleNamespace(
             effective_cwd="/tmp/ouroboros-worktree",
@@ -144,8 +147,11 @@ class TestExecuteSeedHandler:
                 pass
 
             async def reconstruct_session(self, session_id: str) -> Result:
-                tracker = resume_tracker if session_id == "sess_resume" else fresh_tracker
-                return Result.ok(tracker)
+                trackers = {
+                    "sess_resume": gated_resume_tracker,
+                    "sess_legacy": legacy_resume_tracker,
+                }
+                return Result.ok(trackers.get(session_id, fresh_tracker))
 
             async def mark_failed(self, session_id: str, *, error_message: str) -> None:
                 raise AssertionError(f"unexpected failure mark for {session_id}: {error_message}")
@@ -208,10 +214,15 @@ class TestExecuteSeedHandler:
             {"seed_content": VALID_SEED_YAML, "session_id": "sess_resume", "skip_qa": True},
             synchronous=True,
         )
+        legacy_resumed = await handler.handle(
+            {"seed_content": VALID_SEED_YAML, "session_id": "sess_legacy", "skip_qa": True},
+            synchronous=True,
+        )
 
         assert fresh.is_ok
         assert resumed.is_ok
-        assert captured_modes == [True, False]
+        assert legacy_resumed.is_ok
+        assert captured_modes == [True, True, False]
 
     async def test_handle_reports_execution_handler_config_error(self) -> None:
         """Config failures should surface with execution-handler context."""

@@ -2046,19 +2046,21 @@ class OrchestratorRunner:
             )
 
         tracker = session_result.value
+        initial_progress: dict[str, Any] = {"fat_harness_mode": self._fat_harness_mode}
         if self._task_workspace is not None:
-            progress_result = await self._session_repo.track_progress(
-                tracker.session_id,
-                {"workspace": self._task_workspace.to_progress_dict()},
+            initial_progress["workspace"] = self._task_workspace.to_progress_dict()
+        progress_result = await self._session_repo.track_progress(
+            tracker.session_id,
+            initial_progress,
+        )
+        if progress_result.is_err:
+            log.warning(
+                "orchestrator.runner.initial_progress_seed_failed",
+                session_id=tracker.session_id,
+                error=str(progress_result.error),
             )
-            if progress_result.is_err:
-                log.warning(
-                    "orchestrator.runner.workspace_progress_seed_failed",
-                    session_id=tracker.session_id,
-                    error=str(progress_result.error),
-                )
 
-        return Result.ok(tracker)
+        return Result.ok(tracker.with_progress(initial_progress))
 
     async def execute_precreated_session(
         self,

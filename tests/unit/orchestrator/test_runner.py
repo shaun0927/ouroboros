@@ -446,7 +446,8 @@ class TestOrchestratorRunner:
             )
 
         assert result.is_ok
-        assert result.value is tracker
+        assert result.value.session_id == tracker.session_id
+        assert result.value.progress["fat_harness_mode"] is False
         create_session.assert_awaited_once_with(
             execution_id="exec_prepared",
             seed_id=sample_seed.metadata.seed_id,

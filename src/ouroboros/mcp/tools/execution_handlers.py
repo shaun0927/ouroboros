@@ -442,6 +442,11 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 # Create checkpoint store for execution state persistence
                 checkpoint_store = CheckpointStore()
                 checkpoint_store.initialize()
+                fat_harness_mode = False
+                if is_resume:
+                    fat_harness_mode = tracker.progress.get("fat_harness_mode") is True
+                else:
+                    fat_harness_mode = True
 
                 # Create orchestrator runner
                 runner = OrchestratorRunner(
@@ -457,7 +462,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     task_workspace=workspace,
                     checkpoint_store=checkpoint_store,
                     max_parallel_workers=max_parallel_workers,
-                    fat_harness_mode=not is_resume,
+                    fat_harness_mode=fat_harness_mode,
                 )
 
                 skip_qa = arguments.get("skip_qa", False)
