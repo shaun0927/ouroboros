@@ -1461,7 +1461,7 @@ def _successful_runtime_test_commands(messages: tuple[AgentMessage, ...]) -> set
             alias
             for command in _runtime_message_command_values(message)
             if _looks_like_test_command(command)
-            for alias in _normalized_command_claim_aliases(command)
+            for alias in _runtime_command_evidence_aliases(command)
         }
         if not message_commands:
             continue
@@ -1485,6 +1485,20 @@ def _add_command_evidence(commands: set[str], command: str) -> None:
     if normalized:
         commands.add(normalized)
     commands.update(alias for alias in _normalized_command_claim_aliases(command) if alias)
+
+
+def _add_runtime_command_evidence(commands: set[str], command: str) -> None:
+    """Add runtime command evidence without accepting compound shell aliases."""
+    commands.update(_runtime_command_evidence_aliases(command))
+
+
+def _runtime_command_evidence_aliases(command: str) -> tuple[str, ...]:
+    """Return exact runtime command aliases for sibling reconciliation."""
+    aliases = [_normalized_evidence_text(command)]
+    single_inner_command = _single_command_after_safe_shell_preamble(command)
+    if single_inner_command and single_inner_command not in aliases:
+        aliases.append(single_inner_command)
+    return tuple(alias for alias in aliases if alias)
 
 
 def _evidence_values_from_result(result: ACExecutionResult) -> tuple[set[str], set[str], set[str]]:
@@ -1517,7 +1531,7 @@ def _evidence_values_from_result(result: ACExecutionResult) -> tuple[set[str], s
 
         if message.tool_name == "Bash":
             for command in _runtime_message_command_values(message):
-                _add_command_evidence(run_commands, command)
+                _add_runtime_command_evidence(run_commands, command)
             continue
 
     passed_commands.update(_successful_runtime_test_commands(result.messages))
