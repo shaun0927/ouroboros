@@ -297,6 +297,25 @@ def test_grade_gate_requires_observable_acceptance_behavior_not_keywords() -> No
     )
 
 
+def test_grade_gate_accepts_coding_observation_run_acceptance_criteria() -> None:
+    """Pin concrete coding-task observations as testable acceptance criteria."""
+    ledger = SeedDraftLedger.from_goal("Create hello_auto.py and verify it with pytest")
+    _fill_minimal_ready_ledger(ledger)
+    seed = _seed(
+        goal="Create hello_auto.py and verify it with pytest",
+        ac=(
+            'hello_auto() returns "hello from ooo auto"',
+            "The targeted command uv run pytest tests/test_hello_auto.py passes",
+            "Final report includes auto session id, seed id, files changed, exact test command, and test result",
+        ),
+    )
+
+    result = GradeGate().grade_seed(seed, ledger=ledger)
+
+    assert result.grade == SeedGrade.A
+    assert not any(finding.code == "untestable_acceptance_criteria" for finding in result.findings)
+
+
 def test_grade_gate_rejects_vague_acceptance_criteria() -> None:
     ledger = SeedDraftLedger.from_goal("Build a habit tracker")
     _fill_minimal_ready_ledger(ledger)

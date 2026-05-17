@@ -159,6 +159,9 @@ def test_observable_predicate_matches_grading_observable_contract() -> None:
         "The command writes an artifact file to disk",
         "stderr contains the validation error for invalid input",
         "DELETE /items/{id} responds with HTTP 204",
+        'hello_auto() returns "hello from ooo auto"',
+        "The targeted command uv run pytest tests/test_hello_auto.py passes",
+        "Final report includes auto session id, seed id, files changed, exact test command, and test result",
     )
     for criterion in criteria:
         assert _is_observable(criterion), criterion
@@ -169,10 +172,6 @@ def test_observable_predicate_matches_grading_observable_contract() -> None:
     "criterion",
     [
         "All tests pass",
-        "pytest reports no failures",
-        "Linter reports zero errors",
-        "ruff check passes",
-        "mypy reports no type errors",
         "type check clean with pyright",
         "exit_code must be zero",
     ],
