@@ -270,11 +270,9 @@ def _out_of_scope_evidence_fields_for_ac(
 def _scoped_evidence_record_for_ac(
     profile: ExecutionProfile,
     ac_content: str,
-    record: EvidenceRecord | None,
-) -> EvidenceRecord | None:
+    record: EvidenceRecord,
+) -> EvidenceRecord:
     """Return only evidence fields inside the AC-specific schema."""
-    if record is None:
-        return None
     effective_schema = _effective_evidence_schema_for_ac(profile, ac_content)
     allowed_fields = set(effective_schema.required)
     return EvidenceRecord(
@@ -4715,7 +4713,7 @@ Files present:
             )
             clear_cached_runtime_handle = True
             result_typed_evidence = typed_evidence
-            if success and self._execution_profile is not None:
+            if success and self._execution_profile is not None and typed_evidence is not None:
                 result_typed_evidence = _scoped_evidence_record_for_ac(
                     self._execution_profile,
                     ac_content,
@@ -4907,17 +4905,22 @@ Files present:
             effective_profile = _profile_with_evidence_schema(
                 self._execution_profile, effective_schema
             )
+            scoped_evidence = _scoped_evidence_record_for_ac(
+                self._execution_profile,
+                ac_content,
+                typed_evidence,
+            )
             verdict = (
                 verifier(
                     profile=effective_profile,
                     ac=ac_content,
                     leaf_output=final_message,
-                    record=typed_evidence,
+                    record=scoped_evidence,
                 )
                 if verifier is not None
                 else self._verify_atomic_evidence_against_runtime_messages(
                     messages=messages,
-                    typed_evidence=typed_evidence,
+                    typed_evidence=scoped_evidence,
                     ac_content=ac_content,
                 )
             )
