@@ -304,7 +304,7 @@ class JobManager:
             raise
         except Exception as exc:
             snapshot = await self.get_snapshot(job_id)
-            if snapshot.is_terminal:
+            if snapshot.is_terminal or job_id in self._monitor_terminalized_jobs:
                 return
             completed_result = await self._derive_completed_execution_result(snapshot)
             if completed_result is not None and snapshot.status != JobStatus.CANCEL_REQUESTED:
@@ -321,7 +321,7 @@ class JobManager:
             )
         else:
             snapshot = await self.get_snapshot(job_id)
-            if snapshot.is_terminal:
+            if snapshot.is_terminal or job_id in self._monitor_terminalized_jobs:
                 return
             completed_result = await self._derive_completed_execution_result(snapshot)
             if completed_result is not None and snapshot.status != JobStatus.CANCEL_REQUESTED:
@@ -418,6 +418,20 @@ class JobManager:
                 progress_blocker = await self._derive_progress_accounting_blocker(snapshot)
                 if progress_blocker is not None:
                     self._monitor_terminalized_jobs.add(job_id)
+                    await asyncio.shield(
+                        self._append_event(
+                            "mcp.job.failed",
+                            job_id,
+                            {
+                                "status": JobStatus.FAILED.value,
+                                "message": "Job failed: workflow progress accounting stalled",
+                                "error": progress_blocker,
+                                "result_text": progress_blocker,
+                                "result_meta": {"failed_from_progress_accounting_stall": True},
+                                "is_error": True,
+                            },
+                        )
+                    )
                     runner = self._runner_tasks.pop(job_id, None)
                     if runner is not None and not runner.done():
                         runner.cancel()
@@ -426,18 +440,6 @@ class JobManager:
                     if job_task is not None and not job_task.done():
                         job_task.cancel()
                         job_task.add_done_callback(_consume_task_result)
-                    await self._append_event(
-                        "mcp.job.failed",
-                        job_id,
-                        {
-                            "status": JobStatus.FAILED.value,
-                            "message": "Job failed: workflow progress accounting stalled",
-                            "error": progress_blocker,
-                            "result_text": progress_blocker,
-                            "result_meta": {"failed_from_progress_accounting_stall": True},
-                            "is_error": True,
-                        },
-                    )
                     return
 
             message = await self._derive_status_message(snapshot)

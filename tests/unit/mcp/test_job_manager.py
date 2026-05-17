@@ -222,6 +222,21 @@ class TestJobManager:
                 runner=_runner(),
                 links=JobLinks(session_id="orch_stalled", execution_id="exec_stalled"),
             )
+
+            original_append_event = manager._append_event
+
+            async def _assert_failure_persists_before_teardown(
+                event_type: str, job_id: str, data: dict, **kwargs
+            ) -> None:
+                if event_type == "mcp.job.failed":
+                    runner_task = manager._runner_tasks[job_id]
+                    job_task = manager._tasks[job_id]
+                    assert not runner_task.cancelled()
+                    assert not job_task.cancelled()
+                await original_append_event(event_type, job_id, data, **kwargs)
+
+            manager._append_event = _assert_failure_persists_before_teardown
+
             await store.append(
                 BaseEvent(
                     type="workflow.progress.updated",
