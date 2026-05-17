@@ -1486,11 +1486,33 @@ def _add_runtime_command_evidence(commands: set[str], command: str) -> None:
 
 def _runtime_command_evidence_aliases(command: str) -> tuple[str, ...]:
     """Return exact runtime command aliases for sibling reconciliation."""
-    aliases = [_normalized_evidence_text(command)]
-    single_inner_command = _single_command_after_safe_shell_preamble(command)
+    aliases = [_normalize_command(command)]
+    single_inner_command = _single_exact_command_after_safe_shell_preamble(command)
     if single_inner_command and single_inner_command not in aliases:
         aliases.append(single_inner_command)
     return tuple(alias for alias in aliases if alias)
+
+
+def _single_exact_command_after_safe_shell_preamble(command: str) -> str | None:
+    """Return one wrapped inner command without lowercasing exact evidence."""
+    body = _shell_command_body(command)
+    if body is None:
+        return None
+    segments = tuple(_segments_after_safe_shell_preamble(body))
+    if len(segments) != 1:
+        return None
+    return _normalize_command(segments[0])
+
+
+def _typed_evidence_is_usable_for_sibling_reconciliation(result: ACExecutionResult) -> bool:
+    """Return True when typed evidence was not rejected by validation/verifier."""
+    if result.typed_evidence is None:
+        return False
+    if result.typed_evidence_error:
+        return False
+    if result.typed_evidence_validation is not None and not result.typed_evidence_validation.ok:
+        return False
+    return result.atomic_verifier_verdict is None or result.atomic_verifier_verdict.passed
 
 
 def _evidence_values_from_result(result: ACExecutionResult) -> tuple[set[str], set[str], set[str]]:
@@ -1503,7 +1525,8 @@ def _evidence_values_from_result(result: ACExecutionResult) -> tuple[set[str], s
     run_commands: set[str] = set()
     passed_commands: set[str] = set()
 
-    if result.typed_evidence is not None:
+    if _typed_evidence_is_usable_for_sibling_reconciliation(result):
+        assert result.typed_evidence is not None
         task_cwd = result.runtime_handle.cwd if result.runtime_handle is not None else None
         for value in _flatten_evidence_values(result.typed_evidence.get("files_touched")):
             normalized = (
@@ -1537,11 +1560,9 @@ def _criterion_satisfied_by_evidence(
     passed_commands: set[str] | None = None,
 ) -> bool:
     """Conservatively decide whether evidence satisfies a sibling criterion."""
-    normalized_run_commands = {
-        _normalize_command(command).casefold() for command in run_commands if command
-    }
+    normalized_run_commands = {_normalize_command(command) for command in run_commands if command}
     normalized_passed_commands = {
-        _normalize_command(command).casefold() for command in (passed_commands or set()) if command
+        _normalize_command(command) for command in (passed_commands or set()) if command
     }
 
     for file_path in files:
@@ -1561,7 +1582,7 @@ def _criterion_satisfied_by_evidence(
 
 def _criterion_is_exact_file_presence_ac(criterion: str, file_path: str) -> bool:
     """Return True when the criterion is only an exact file-presence AC."""
-    normalized_path = Path(file_path.strip()).as_posix().casefold()
+    normalized_path = Path(file_path.strip()).as_posix()
     if (
         not normalized_path
         or Path(normalized_path).is_absolute()
@@ -1569,7 +1590,7 @@ def _criterion_is_exact_file_presence_ac(criterion: str, file_path: str) -> bool
     ):
         return False
     inline_code_paths = [
-        Path(match.group(1).strip()).as_posix().casefold()
+        Path(match.group(1).strip()).as_posix()
         for match in re.finditer(r"`([^`]+)`", criterion)
         if match.group(1).strip()
     ]
@@ -1590,7 +1611,7 @@ def _criterion_is_exact_file_presence_ac(criterion: str, file_path: str) -> bool
 def _criterion_inline_code_values(criterion: str) -> list[str]:
     """Return normalized inline-code fragments from a criterion."""
     return [
-        _normalized_evidence_text(match.group(1).strip())
+        _normalize_command(match.group(1).strip())
         for match in re.finditer(r"`([^`]+)`", criterion)
         if match.group(1).strip()
     ]
@@ -1598,7 +1619,7 @@ def _criterion_inline_code_values(criterion: str) -> list[str]:
 
 def _criterion_is_exact_command_pass_ac(criterion: str, command: str) -> bool:
     """Return True when the criterion is only an exact command-pass AC."""
-    normalized_command = _normalized_evidence_text(command)
+    normalized_command = _normalize_command(command)
     if not normalized_command or _criterion_inline_code_values(criterion) != [normalized_command]:
         return False
     normalized = _normalized_evidence_text(
@@ -1621,7 +1642,7 @@ def _criterion_is_exact_command_pass_ac(criterion: str, command: str) -> bool:
 
 def _criterion_is_exact_command_run_ac(criterion: str, command: str) -> bool:
     """Return True when the criterion is only an exact command-run AC."""
-    normalized_command = _normalized_evidence_text(command)
+    normalized_command = _normalize_command(command)
     if not normalized_command or _criterion_inline_code_values(criterion) != [normalized_command]:
         return False
     normalized = _normalized_evidence_text(

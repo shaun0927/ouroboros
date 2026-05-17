@@ -17,7 +17,7 @@ from ouroboros.mcp.types import MCPToolDefinition
 from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.coordinator import CoordinatorReview, FileConflict
 from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
-from ouroboros.orchestrator.evidence_schema import EvidenceRecord
+from ouroboros.orchestrator.evidence_schema import EvidenceRecord, ValidationResult
 from ouroboros.orchestrator.execution_runtime_scope import ExecutionNodeIdentity
 from ouroboros.orchestrator.level_context import ACContextSummary, LevelContext
 from ouroboros.orchestrator.parallel_executor import (
@@ -78,6 +78,7 @@ def test_criterion_satisfied_by_exact_runtime_evidence() -> None:
     assert _criterion_satisfied_by_evidence("`hello_auto.py` exists.", files, commands)
     assert _criterion_satisfied_by_evidence("`tests/test_hello_auto.py` exists.", files, commands)
     assert not _criterion_satisfied_by_evidence("`src/hello_auto.py` exists.", files, commands)
+    assert not _criterion_satisfied_by_evidence("`Hello_Auto.py` exists.", files, commands)
     assert not _criterion_satisfied_by_evidence(
         "`tests/test_hello_auto.py` exists and imports `hello_auto`.",
         files,
@@ -122,6 +123,12 @@ def test_criterion_satisfied_by_exact_runtime_evidence() -> None:
     )
     assert not _criterion_satisfied_by_evidence(
         "The exact command `uv run pytest tests/test_hello_auto.py` passes and covers edge cases.",
+        files,
+        commands,
+        commands,
+    )
+    assert not _criterion_satisfied_by_evidence(
+        "The exact command `uv run pytest Tests/test_hello_auto.py` passes.",
         files,
         commands,
         commands,
@@ -292,6 +299,80 @@ def test_complete_sibling_acs_normalizes_absolute_typed_file_evidence(tmp_path: 
     assert [result.outcome for result in results] == [
         ACExecutionOutcome.SUCCEEDED,
         ACExecutionOutcome.SATISFIED_EXTERNALLY,
+    ]
+
+
+def test_complete_sibling_acs_rejects_invalid_typed_evidence() -> None:
+    success_with_invalid_typed_evidence = ACExecutionResult(
+        ac_index=0,
+        ac_content="`tests/test_hello_auto.py` exists.",
+        success=True,
+        typed_evidence=EvidenceRecord(data={"files_touched": ["tests/test_hello_auto.py"]}),
+        typed_evidence_validation=ValidationResult(ok=False, missing_fields=("tests_passed",)),
+    )
+    failed_file_presence = ACExecutionResult(
+        ac_index=1,
+        ac_content="`tests/test_hello_auto.py` exists.",
+        success=False,
+        error="worker did not update this AC separately",
+        outcome=ACExecutionOutcome.FAILED,
+    )
+
+    completed_count, level_success, level_failed, results = _complete_sibling_acs_from_evidence(
+        level_results=[success_with_invalid_typed_evidence, failed_file_presence],
+        ac_statuses={0: "completed", 1: "failed"},
+        failed_indices={1},
+        completed_count=1,
+        level_success=1,
+        level_failed=1,
+    )
+
+    assert completed_count == 1
+    assert level_success == 1
+    assert level_failed == 1
+    assert [result.outcome for result in results] == [
+        ACExecutionOutcome.SUCCEEDED,
+        ACExecutionOutcome.FAILED,
+    ]
+
+
+def test_complete_sibling_acs_rejects_verifier_failed_typed_evidence() -> None:
+    success_with_rejected_typed_evidence = ACExecutionResult(
+        ac_index=0,
+        ac_content="The exact command `uv run pytest tests/test_hello_auto.py` passes.",
+        success=True,
+        typed_evidence=EvidenceRecord(
+            data={"tests_passed": ["uv run pytest tests/test_hello_auto.py"]}
+        ),
+        atomic_verifier_verdict=VerifierVerdict(
+            passed=False,
+            reasons=("fabricated test output",),
+            failure_class="FABRICATION_SUSPECTED",
+        ),
+    )
+    failed_pytest = ACExecutionResult(
+        ac_index=1,
+        ac_content="The exact command `uv run pytest tests/test_hello_auto.py` passes.",
+        success=False,
+        error="worker did not update this AC separately",
+        outcome=ACExecutionOutcome.FAILED,
+    )
+
+    completed_count, level_success, level_failed, results = _complete_sibling_acs_from_evidence(
+        level_results=[success_with_rejected_typed_evidence, failed_pytest],
+        ac_statuses={0: "completed", 1: "failed"},
+        failed_indices={1},
+        completed_count=1,
+        level_success=1,
+        level_failed=1,
+    )
+
+    assert completed_count == 1
+    assert level_success == 1
+    assert level_failed == 1
+    assert [result.outcome for result in results] == [
+        ACExecutionOutcome.SUCCEEDED,
+        ACExecutionOutcome.FAILED,
     ]
 
 
