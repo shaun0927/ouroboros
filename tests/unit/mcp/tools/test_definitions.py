@@ -122,6 +122,97 @@ class TestExecuteSeedHandler:
         assert result.is_err
         assert "seed_content or seed_path is required" in str(result.error)
 
+    async def test_handle_sets_fat_harness_mode_for_fresh_runs_not_resumes(
+        self,
+        memory_event_store: EventStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """MCP execution gates fresh runs without breaking resume callers."""
+        captured_modes: list[bool] = []
+        fresh_tracker = SessionTracker.create("exec_fresh", "seed-123")
+        resume_tracker = SessionTracker.create("exec_resume", "seed-123")
+
+        workspace = SimpleNamespace(
+            effective_cwd="/tmp/ouroboros-worktree",
+            worktree_path="/tmp/ouroboros-worktree",
+            branch="ooo/test",
+            lock_path="/tmp/ouroboros.lock",
+        )
+
+        class FakeSessionRepository:
+            def __init__(self, _event_store: EventStore) -> None:
+                pass
+
+            async def reconstruct_session(self, session_id: str) -> Result:
+                tracker = resume_tracker if session_id == "sess_resume" else fresh_tracker
+                return Result.ok(tracker)
+
+            async def mark_failed(self, session_id: str, *, error_message: str) -> None:
+                raise AssertionError(f"unexpected failure mark for {session_id}: {error_message}")
+
+        class FakeRunner:
+            def __init__(self, *args: object, fat_harness_mode: bool, **kwargs: object) -> None:
+                captured_modes.append(fat_harness_mode)
+
+            async def prepare_session(self, *args: object, **kwargs: object) -> Result:
+                return Result.ok(fresh_tracker)
+
+            async def execute_precreated_session(self, *args: object, **kwargs: object) -> Result:
+                return Result.ok(
+                    SimpleNamespace(
+                        success=True,
+                        execution_id="exec_fresh",
+                        summary={},
+                        final_message="done",
+                    )
+                )
+
+            async def resume_session(self, *args: object, **kwargs: object) -> Result:
+                return Result.ok(
+                    SimpleNamespace(
+                        success=True,
+                        execution_id="exec_resume",
+                        summary={},
+                        final_message="resumed",
+                    )
+                )
+
+        monkeypatch.setattr(
+            "ouroboros.mcp.tools.execution_handlers.SessionRepository",
+            FakeSessionRepository,
+        )
+        monkeypatch.setattr("ouroboros.mcp.tools.execution_handlers.OrchestratorRunner", FakeRunner)
+        monkeypatch.setattr(
+            "ouroboros.mcp.tools.execution_handlers.create_agent_runtime",
+            lambda **_kwargs: SimpleNamespace(runtime_backend="test"),
+        )
+        monkeypatch.setattr(
+            "ouroboros.mcp.tools.execution_handlers.maybe_prepare_task_workspace",
+            lambda *_args, **_kwargs: workspace,
+        )
+        monkeypatch.setattr(
+            "ouroboros.mcp.tools.execution_handlers.maybe_restore_task_workspace",
+            lambda *_args, **_kwargs: workspace,
+        )
+        monkeypatch.setattr(
+            "ouroboros.mcp.tools.execution_handlers.release_lock", lambda *_args: None
+        )
+
+        handler = ExecuteSeedHandler(event_store=memory_event_store)
+
+        fresh = await handler.handle(
+            {"seed_content": VALID_SEED_YAML, "skip_qa": True},
+            synchronous=True,
+        )
+        resumed = await handler.handle(
+            {"seed_content": VALID_SEED_YAML, "session_id": "sess_resume", "skip_qa": True},
+            synchronous=True,
+        )
+
+        assert fresh.is_ok
+        assert resumed.is_ok
+        assert captured_modes == [True, False]
+
     async def test_handle_reports_execution_handler_config_error(self) -> None:
         """Config failures should surface with execution-handler context."""
         handler = ExecuteSeedHandler()
