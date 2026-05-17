@@ -193,6 +193,32 @@ _TEST_MUTATION_WORK_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
+_DOCS_TEST_REFERENCE_RE = re.compile(
+    r"("
+    r"\b(?:document(?:ing)?|guide|manual|instructions?|usage|setup|how\s+to|verification)\b"
+    r".{0,100}\b(?:test\s+command|python\s+-m\s+unittest|pytest|tests?|unit\s+tests?|test\s+setup)\b"
+    r"|"
+    r"\b(?:test\s+command|python\s+-m\s+unittest|pytest|tests?|unit\s+tests?|test\s+setup)\b"
+    r".{0,100}\b(?:document(?:ing)?|guide|manual|instructions?|usage|setup|how\s+to|verification)\b"
+    r")",
+    re.IGNORECASE,
+)
+_NO_MUTATION_VALIDATION_RE = re.compile(
+    r"("
+    r"\bwithout\s+(?:modifying|changing|editing|writing|updating|touching)\b"
+    r"|"
+    r"\bwith\s+no\s+(?:file|code)?\s*(?:modifications?|changes?|edits?|updates?)\b"
+    r"|"
+    r"\bno\s+(?:file|code)?\s*(?:modifications?|changes?|edits?|updates?)\b"
+    r"|"
+    r"\bdo\s+not\s+(?:modify|change|edit|write|update|touch)\b"
+    r")",
+    re.IGNORECASE,
+)
+_EXISTING_VALIDATION_RE = re.compile(
+    r"\b(?:existing|current|already(?:-|\s+)?satisfied|already(?:-|\s+)?implemented)\b",
+    re.IGNORECASE,
+)
 _VALIDATION_ONLY_ACTION_RE = re.compile(
     r"\b(?:run|execute|pass|validate|verify|ensure|confirm|check)\b",
     re.IGNORECASE,
@@ -239,7 +265,14 @@ def _is_documentation_only_ac(ac_content: str) -> bool:
     normalized = " ".join(ac_content.split())
     if not normalized:
         return False
-    if _TEST_WORK_RE.search(normalized):
+    has_docs_target = bool(_DOC_ONLY_TARGET_RE.search(normalized))
+    has_docs_action = bool(_DOC_ONLY_ACTION_RE.search(normalized))
+    documents_test_reference = (
+        has_docs_target and has_docs_action and bool(_DOCS_TEST_REFERENCE_RE.search(normalized))
+    )
+    if _TEST_MUTATION_WORK_RE.search(normalized) and not documents_test_reference:
+        return False
+    if _TEST_WORK_RE.search(normalized) and not documents_test_reference:
         return False
     if _CODE_IMPLEMENTATION_ACTION_RE.search(normalized):
         return False
@@ -256,9 +289,7 @@ def _is_documentation_only_ac(ac_content: str) -> bool:
         )
     ):
         return False
-    return bool(_DOC_ONLY_TARGET_RE.search(normalized)) and bool(
-        _DOC_ONLY_ACTION_RE.search(normalized)
-    )
+    return has_docs_target and has_docs_action
 
 
 def _is_validation_only_ac(ac_content: str) -> bool:
@@ -274,6 +305,15 @@ def _is_validation_only_ac(ac_content: str) -> bool:
         return False
     if _DOC_ONLY_TARGET_RE.search(normalized) and _DOC_ONLY_ACTION_RE.search(normalized):
         return False
+    if (
+        (
+            _NO_MUTATION_VALIDATION_RE.search(normalized)
+            or _EXISTING_VALIDATION_RE.search(normalized)
+        )
+        and _VALIDATION_ONLY_ACTION_RE.search(normalized)
+        and _VALIDATION_ONLY_TEST_SIGNAL_RE.search(normalized)
+    ):
+        return True
     if _TEST_MUTATION_WORK_RE.search(normalized):
         return False
     if _CODE_MUTATION_ACTION_RE.search(normalized) and _CODE_WORK_SIGNAL_RE.search(normalized):

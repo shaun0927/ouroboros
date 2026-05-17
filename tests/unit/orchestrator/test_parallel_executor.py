@@ -123,6 +123,10 @@ def test_message_contains_test_success_handles_zero_failure_summaries(
         "Verify the unit tests pass.",
         "Ensure test_todo.py passes.",
         "Validate the test suite.",
+        "Without modifying any files, verify the existing todo implementation by running python -m unittest test_todo.py successfully.",
+        "Verify the existing test_todo.py coverage without modifying any files. Run python -m unittest test_todo.py successfully.",
+        "Confirm the current implementation by running python -m unittest test_todo.py.",
+        "Check the already-satisfied test suite with python -m unittest test_todo.py.",
     ),
 )
 def test_validation_only_ac_drops_files_touched_requirement(ac_content: str) -> None:
@@ -144,6 +148,8 @@ def test_validation_only_ac_drops_files_touched_requirement(ac_content: str) -> 
         "Ensure tests cover invalid inputs.",
         "Check tests into the repo for the new parser.",
         "Check in tests for the new parser.",
+        "Update existing test_todo.py coverage for invalid index handling.",
+        "Add coverage to test_todo.py and run python -m unittest test_todo.py.",
     ),
 )
 def test_test_writing_and_implementation_acs_keep_files_touched_required(
@@ -1602,6 +1608,18 @@ class TestParallelACExecutor:
             ("Update the changelog for the parser bug.", "CHANGELOG.md"),
             ("Document test setup in README.md.", "README.md"),
             ("Write a unit test guide in docs/testing.md.", "docs/testing.md"),
+            (
+                "Create README.md documenting how to run the CLI and the required test command.",
+                "README.md",
+            ),
+            (
+                "Document CLI usage and the required test command in README.md.",
+                "README.md",
+            ),
+            (
+                "Update README.md with usage and verification instructions for python -m unittest test_todo.py.",
+                "README.md",
+            ),
         ],
     )
     @pytest.mark.asyncio
