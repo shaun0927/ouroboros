@@ -493,6 +493,68 @@ class TestJobManager:
         finally:
             await store.close()
 
+    async def test_completed_execution_recovery_is_idempotent_across_managers(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        first_manager = JobManager(store)
+        second_manager = JobManager(store)
+
+        try:
+            await store.initialize()
+            await store.append(
+                BaseEvent(
+                    type="mcp.job.created",
+                    aggregate_type="job",
+                    aggregate_id="job_recover_multi_manager",
+                    data={
+                        "job_type": "execute_seed",
+                        "status": JobStatus.RUNNING.value,
+                        "message": "Running execute_seed",
+                        "links": {
+                            "session_id": "orch_recover_multi_manager",
+                            "execution_id": "exec_recover_multi_manager",
+                            "lineage_id": None,
+                        },
+                    },
+                )
+            )
+            await store.append(
+                BaseEvent(
+                    type="execution.terminal",
+                    aggregate_type="execution",
+                    aggregate_id="exec_recover_multi_manager",
+                    data={"session_id": "orch_recover_multi_manager", "status": "completed"},
+                )
+            )
+
+            first, second = await asyncio.gather(
+                first_manager.get_snapshot("job_recover_multi_manager"),
+                second_manager.get_snapshot("job_recover_multi_manager"),
+            )
+
+            assert first.status is JobStatus.COMPLETED
+            assert second.status is JobStatus.COMPLETED
+            events, _ = await store.get_events_after(
+                "job",
+                "job_recover_multi_manager",
+                last_row_id=0,
+            )
+            terminal_events = [
+                event.type
+                for event in events
+                if event.type
+                in {
+                    "mcp.job.completed",
+                    "mcp.job.failed",
+                    "mcp.job.cancelled",
+                    "mcp.job.interrupted",
+                }
+            ]
+            assert terminal_events == ["mcp.job.completed"]
+        finally:
+            await store.close()
+
     async def test_completed_execution_recovery_does_not_beat_concurrent_cancel_request(
         self, tmp_path
     ) -> None:

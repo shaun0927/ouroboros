@@ -11,6 +11,7 @@ import logging
 from typing import Any
 from uuid import uuid4
 
+from ouroboros.core.errors import PersistenceError
 from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.agent_process import AgentProcessHandle
 from ouroboros.orchestrator.events import create_execution_terminal_event
@@ -80,6 +81,7 @@ def _safe_meta(value: Any) -> Any:
 
 
 _JOB_TTL = timedelta(hours=1)
+_RECOVERED_COMPLETION_EVENT_ID_PREFIX = "mcp-job-recovered-completed-"
 logger = logging.getLogger(__name__)
 
 
@@ -374,6 +376,7 @@ class JobManager:
         result_text: str,
         *,
         check_current: bool = True,
+        event_id: str | None = None,
     ) -> bool:
         """Persist durable job completion derived from terminal execution evidence."""
         if check_current:
@@ -390,6 +393,7 @@ class JobManager:
                 "result_meta": {"completed_from_execution_terminal": True},
                 "is_error": False,
             },
+            event_id=event_id,
         )
         return True
 
@@ -637,11 +641,21 @@ class JobManager:
                 and latest_status_event.data.get("status") == JobStatus.CANCEL_REQUESTED.value
             ):
                 return _snapshot_with_status_event(snapshot, latest_status_event, cursor)
-            completed = await self._append_execution_completed_event(
-                snapshot.job_id,
-                completed_result,
-                check_current=False,
-            )
+            try:
+                completed = await self._append_execution_completed_event(
+                    snapshot.job_id,
+                    completed_result,
+                    check_current=False,
+                    event_id=f"{_RECOVERED_COMPLETION_EVENT_ID_PREFIX}{snapshot.job_id}",
+                )
+            except PersistenceError:
+                events, cursor = await self._event_store.get_events_after(
+                    "job", snapshot.job_id, last_row_id=0
+                )
+                existing_terminal = _latest_job_terminal_event(events)
+                if existing_terminal is not None:
+                    return _snapshot_with_terminal_event(snapshot, existing_terminal, cursor)
+                raise
             if not completed:
                 return snapshot
             events, cursor = await self._event_store.get_events_after(
@@ -955,11 +969,19 @@ class JobManager:
             self._monitors.pop(job_id, None)
         return len(expired)
 
-    async def _append_event(self, event_type: str, job_id: str, data: dict[str, Any]) -> None:
+    async def _append_event(
+        self,
+        event_type: str,
+        job_id: str,
+        data: dict[str, Any],
+        *,
+        event_id: str | None = None,
+    ) -> None:
         """Persist one job event."""
         await self._ensure_initialized()
         await self._event_store.append(
             BaseEvent(
+                id=event_id or str(uuid4()),
                 type=event_type,
                 aggregate_type="job",
                 aggregate_id=job_id,
