@@ -307,6 +307,7 @@ If `ouroboros_auto` is unavailable or interpreted as normal text, stop and repor
     )
     assert "Previous last_question" in preferences["failure_modes"]
     assert "Manual fallback used: no." in preferences["failure_modes"]
+    assert "Recursive auto invocation occurred: no." in preferences["failure_modes"]
 
 
 def test_structured_auto_goal_preserves_non_allowlisted_execution_criteria() -> None:

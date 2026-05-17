@@ -1568,6 +1568,7 @@ def _derive_goal_user_preferences(goal: str) -> dict[str, str]:
             "interpreted as normal text",
             "previous ",
             "manual fallback",
+            "recursive auto invocation",
         ),
     )
     if failure_lines:
