@@ -1531,7 +1531,6 @@ def _criterion_satisfied_by_evidence(
     passed_commands: set[str] | None = None,
 ) -> bool:
     """Conservatively decide whether evidence satisfies a sibling criterion."""
-    lowered = criterion.casefold()
     normalized_run_commands = {
         _normalize_command(command).casefold() for command in run_commands if command
     }
@@ -1543,27 +1542,12 @@ def _criterion_satisfied_by_evidence(
         if file_path and _criterion_is_exact_file_presence_ac(criterion, file_path):
             return True
 
-    command_success_markers = (
-        " pass",
-        " passes",
-        " passed",
-        " succeed",
-        " succeeds",
-        " exit code 0",
-    )
-    if any(marker in lowered for marker in command_success_markers):
-        for command in normalized_passed_commands:
-            if command and _criterion_is_exact_command_pass_ac(criterion, command):
-                return True
-        return False
+    for command in normalized_passed_commands:
+        if command and _criterion_is_exact_command_pass_ac(criterion, command):
+            return True
 
-    command_run_markers = (" run ", " runs ", " execute", " executes", " command ")
     for command in normalized_run_commands:
-        if (
-            command
-            and _criterion_is_exact_command_run_ac(criterion, command)
-            and any(marker in lowered for marker in command_run_markers)
-        ):
+        if command and _criterion_is_exact_command_run_ac(criterion, command):
             return True
 
     return False
