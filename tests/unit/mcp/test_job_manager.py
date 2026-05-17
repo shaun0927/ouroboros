@@ -132,7 +132,6 @@ class TestJobManager:
         finally:
             await store.close()
 
-
     async def test_monitor_completes_job_when_workflow_progress_is_complete(self, tmp_path) -> None:
         store = _build_store(tmp_path)
         manager = JobManager(store)
@@ -172,8 +171,185 @@ class TestJobManager:
 
             assert snapshot.result_text == "Workflow complete: 2/2 ACs completed"
             assert snapshot.result_meta["completed_from_workflow_progress"] is True
+            events, _ = await store.get_events_after("job", started.job_id, last_row_id=0)
+            terminal_events = [
+                event
+                for event in events
+                if event.type
+                in {
+                    "mcp.job.completed",
+                    "mcp.job.failed",
+                    "mcp.job.cancelled",
+                    "mcp.job.interrupted",
+                }
+            ]
+            assert [event.type for event in terminal_events] == ["mcp.job.completed"]
         finally:
             stop.set()
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
+    async def test_cancel_requested_wins_over_complete_workflow_progress(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+
+        try:
+            stop = asyncio.Event()
+
+            async def _runner() -> MCPToolResult:
+                await stop.wait()
+                return MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="late done"),),
+                    is_error=False,
+                )
+
+            started = await manager.start_job(
+                job_type="execute_seed",
+                initial_message="queued",
+                runner=_runner(),
+                links=JobLinks(session_id="orch_cancel", execution_id="exec_cancel"),
+            )
+            await store.append(
+                BaseEvent(
+                    type="workflow.progress.updated",
+                    aggregate_type="execution",
+                    aggregate_id="exec_cancel",
+                    data={
+                        "completed_count": 2,
+                        "total_count": 2,
+                        "current_phase": "Deliver",
+                    },
+                )
+            )
+
+            snapshot = await manager.cancel_job(started.job_id)
+            assert snapshot.status in {JobStatus.CANCEL_REQUESTED, JobStatus.CANCELLED}
+
+            await asyncio.sleep(1.2)
+            snapshot = await manager.get_snapshot(started.job_id)
+
+            assert snapshot.status in {JobStatus.CANCEL_REQUESTED, JobStatus.CANCELLED}
+            assert snapshot.result_meta.get("completed_from_workflow_progress") is not True
+        finally:
+            stop.set()
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
+    async def test_workflow_completion_waits_for_runner_cancellation_before_terminal_event(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+
+        try:
+            cancel_seen = asyncio.Event()
+            release = asyncio.Event()
+
+            async def _runner() -> MCPToolResult:
+                try:
+                    await asyncio.sleep(10)
+                except asyncio.CancelledError:
+                    cancel_seen.set()
+                    await release.wait()
+                    raise
+                return MCPToolResult()
+
+            started = await manager.start_job(
+                job_type="execute_seed",
+                initial_message="queued",
+                runner=_runner(),
+                links=JobLinks(session_id="orch_wait", execution_id="exec_wait"),
+            )
+            await store.append(
+                BaseEvent(
+                    type="workflow.progress.updated",
+                    aggregate_type="execution",
+                    aggregate_id="exec_wait",
+                    data={"completed_count": 1, "total_count": 1},
+                )
+            )
+
+            await asyncio.wait_for(cancel_seen.wait(), timeout=2)
+            snapshot = await manager.get_snapshot(started.job_id)
+            assert snapshot.is_terminal is False
+
+            release.set()
+            snapshot = await _wait_for_job_status(
+                manager, started.job_id, JobStatus.COMPLETED, timeout=2.0
+            )
+
+            assert snapshot.result_text == "Workflow complete: 1/1 ACs completed"
+            events, _ = await store.get_events_after("job", started.job_id, last_row_id=0)
+            assert [
+                event.type
+                for event in events
+                if event.type.startswith("mcp.job.") and event.type != "mcp.job.updated"
+            ].count("mcp.job.completed") == 1
+        finally:
+            release.set()
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
+    async def test_cancel_requested_wins_after_workflow_completion_is_staged(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+
+        try:
+            cancel_seen = asyncio.Event()
+            release = asyncio.Event()
+
+            async def _runner() -> MCPToolResult:
+                try:
+                    await asyncio.sleep(10)
+                except asyncio.CancelledError:
+                    cancel_seen.set()
+                    await release.wait()
+                    raise
+                return MCPToolResult()
+
+            started = await manager.start_job(
+                job_type="execute_seed",
+                initial_message="queued",
+                runner=_runner(),
+                links=JobLinks(session_id="orch_staged_cancel", execution_id="exec_staged_cancel"),
+            )
+            await store.append(
+                BaseEvent(
+                    type="workflow.progress.updated",
+                    aggregate_type="execution",
+                    aggregate_id="exec_staged_cancel",
+                    data={"completed_count": 1, "total_count": 1},
+                )
+            )
+
+            await asyncio.wait_for(cancel_seen.wait(), timeout=2)
+            await manager.update_status(
+                started.job_id, JobStatus.CANCEL_REQUESTED, "Cancellation requested"
+            )
+
+            release.set()
+            snapshot = await _wait_for_job_status(
+                manager, started.job_id, JobStatus.CANCELLED, timeout=2.0
+            )
+
+            assert snapshot.result_meta.get("completed_from_workflow_progress") is not True
+            events, _ = await store.get_events_after("job", started.job_id, last_row_id=0)
+            terminal_events = [
+                event.type
+                for event in events
+                if event.type
+                in {
+                    "mcp.job.completed",
+                    "mcp.job.failed",
+                    "mcp.job.cancelled",
+                    "mcp.job.interrupted",
+                }
+            ]
+            assert terminal_events == ["mcp.job.cancelled"]
+        finally:
+            release.set()
             await _cancel_manager_tasks(manager)
             await store.close()
 
