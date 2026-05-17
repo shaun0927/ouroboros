@@ -505,6 +505,68 @@ class TestJobManager:
             await _cancel_manager_tasks(manager)
             await store.close()
 
+    async def test_execution_terminal_completion_overrides_runner_cancel_exception(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+
+        try:
+            cancel_seen = asyncio.Event()
+
+            async def _runner() -> MCPToolResult:
+                try:
+                    await asyncio.sleep(10)
+                except asyncio.CancelledError as exc:
+                    cancel_seen.set()
+                    raise RuntimeError("cleanup failed after terminal execution") from exc
+                return MCPToolResult()
+
+            started = await manager.start_job(
+                job_type="execute_seed",
+                initial_message="queued",
+                runner=_runner(),
+                links=JobLinks(
+                    session_id="orch_cancel_exception",
+                    execution_id="exec_cancel_exception",
+                ),
+            )
+            await store.append(
+                BaseEvent(
+                    type="execution.terminal",
+                    aggregate_type="execution",
+                    aggregate_id="exec_cancel_exception",
+                    data={"session_id": "orch_cancel_exception", "status": "completed"},
+                )
+            )
+
+            await asyncio.wait_for(cancel_seen.wait(), timeout=2)
+            snapshot = await _wait_for_job_status(
+                manager,
+                started.job_id,
+                JobStatus.COMPLETED,
+                timeout=2.0,
+            )
+
+            assert snapshot.result_meta["completed_from_execution_terminal"] is True
+            assert snapshot.error is None
+            events, _ = await store.get_events_after("job", started.job_id, last_row_id=0)
+            terminal_events = [
+                event.type
+                for event in events
+                if event.type
+                in {
+                    "mcp.job.completed",
+                    "mcp.job.failed",
+                    "mcp.job.cancelled",
+                    "mcp.job.interrupted",
+                }
+            ]
+            assert terminal_events == ["mcp.job.completed"]
+        finally:
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
     async def test_completed_execution_recovery_writes_single_terminal_event_with_concurrent_readers(
         self, tmp_path
     ) -> None:

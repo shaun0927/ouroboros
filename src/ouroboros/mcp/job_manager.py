@@ -305,6 +305,10 @@ class JobManager:
             snapshot = await self.get_snapshot(job_id)
             if snapshot.is_terminal:
                 return
+            completed_result = await self._derive_completed_execution_result(snapshot)
+            if completed_result is not None and snapshot.status != JobStatus.CANCEL_REQUESTED:
+                await self._append_execution_completed_event(job_id, completed_result)
+                return
             await self._append_event(
                 "mcp.job.failed",
                 job_id,
