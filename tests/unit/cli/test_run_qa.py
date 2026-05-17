@@ -81,12 +81,19 @@ def test_resolve_fat_harness_mode_defaults_to_enabled() -> None:
     assert _resolve_fat_harness_mode(VALID_SEED_DATA) is True
 
 
-def test_resolve_fat_harness_mode_accepts_old_execution_mode_as_noop() -> None:
-    """Old PR-4 seeds should resume, but the selector no longer changes mode."""
-    for execution_mode in ("fat_harness", "legacy"):
-        seed_data = {**VALID_SEED_DATA, "orchestrator": {"execution_mode": execution_mode}}
+def test_resolve_fat_harness_mode_accepts_fat_harness_execution_mode() -> None:
+    """Explicit fat-harness mode remains accepted after #978 P5."""
+    seed_data = {**VALID_SEED_DATA, "orchestrator": {"execution_mode": "fat_harness"}}
 
-        assert _resolve_fat_harness_mode(seed_data) is True
+    assert _resolve_fat_harness_mode(seed_data) is True
+
+
+def test_resolve_fat_harness_mode_rejects_legacy_execution_mode() -> None:
+    """#978 P5 removes the legacy self-report fallback selector."""
+    seed_data = {**VALID_SEED_DATA, "orchestrator": {"execution_mode": "legacy"}}
+
+    with pytest.raises(typer.Exit):
+        _resolve_fat_harness_mode(seed_data)
 
 
 def test_resolve_fat_harness_mode_rejects_unknown_execution_mode() -> None:

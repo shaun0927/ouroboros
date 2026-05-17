@@ -55,8 +55,9 @@ SDK and does not add plugin dispatch behavior.
   dependency.
 - No live `parallel_executor` dispatch source change.
 - No `Seed.acceptance_criteria` migration to `PlannedAC`.
-- No default-path flip, #978 P5 legacy fallback removal, or evidence-policy
-  relaxation.
+- No evidence-policy relaxation, workflow runtime default changes, or
+  reintroduction of legacy self-report acceptance in default conformance
+  fixtures.
 - No network, provider credential, cloud, or production side effects in default
   conformance fixtures.
 

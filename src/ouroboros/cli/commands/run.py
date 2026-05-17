@@ -243,18 +243,24 @@ def _load_skip_completed_markers(
 
 
 def _resolve_fat_harness_mode(seed_data: dict[str, Any]) -> bool:
-    """Default CLI runs to fat-harness after #920 PR-5.
+    """Typed evidence plus verifier PASS is the only CLI acceptance path.
 
     ``seed.orchestrator.execution_mode`` was the temporary #920 PR-4 opt-in
-    selector. After the default flip it is accepted only as a no-op
-    compatibility shim so existing seeds and resumptions are not stranded.
+    selector. After #978 P5, ``legacy`` is rejected instead of silently
+    accepting a self-report fallback selector.
     """
     orchestrator_config = seed_data.get("orchestrator")
     if not isinstance(orchestrator_config, dict):
         return True
 
     execution_mode = orchestrator_config.get("execution_mode")
-    if execution_mode not in (None, "", "fat_harness", "legacy"):
+    if execution_mode == "legacy":
+        print_error(
+            "seed.orchestrator.execution_mode='legacy' was removed after #978 P5; "
+            "typed evidence plus verifier PASS is now required for acceptance."
+        )
+        raise typer.Exit(1)
+    if execution_mode not in (None, "", "fat_harness"):
         print_error(
             "seed.orchestrator.execution_mode is no longer configurable after "
             f"the fat-harness default flip (got {execution_mode!r})."
@@ -656,7 +662,7 @@ def workflow(
     Reads the seed YAML configuration and runs the Ouroboros workflow.
     Orchestrator mode is enabled by default.
 
-    Use --no-orchestrator for legacy standard workflow mode.
+    Use --no-orchestrator only for the non-orchestrated standard workflow path.
     Use --resume to continue a previous session.
     Use --mcp-config to connect to external MCP servers for additional tools.
 

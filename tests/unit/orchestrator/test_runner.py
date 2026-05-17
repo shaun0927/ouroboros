@@ -311,8 +311,13 @@ class TestOrchestratorRunner:
         mock_event_store: AsyncMock,
         mock_console: MagicMock,
     ) -> OrchestratorRunner:
-        """Create a runner with mocked dependencies."""
-        return OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        """Create a runner for legacy plumbing tests without evidence gating."""
+        return OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            fat_harness_mode=False,
+        )
 
     @pytest.mark.asyncio
     async def test_execute_seed_success(
@@ -1080,6 +1085,7 @@ class TestOrchestratorRunner:
             mock_event_store,
             mock_console,
             task_workspace=_task_workspace(),
+            fat_harness_mode=False,
         )
 
         with (
@@ -1111,6 +1117,7 @@ class TestOrchestratorRunner:
             mock_event_store,
             mock_console,
             task_workspace=_task_workspace(),
+            fat_harness_mode=False,
         )
         tracker = SessionTracker.create("exec_setup", sample_seed.metadata.seed_id)
 
@@ -1146,6 +1153,7 @@ class TestOrchestratorRunner:
             mock_event_store,
             mock_console,
             task_workspace=_task_workspace(),
+            fat_harness_mode=False,
         )
         tracker = SessionTracker.create("exec_tools", sample_seed.metadata.seed_id)
 
@@ -1200,6 +1208,7 @@ class TestOrchestratorRunner:
             mock_event_store,
             mock_console,
             task_workspace=_task_workspace(),
+            fat_harness_mode=False,
         )
         completed_tracker = SessionTracker.create("exec", "seed").with_status(
             SessionStatus.COMPLETED
@@ -1219,14 +1228,14 @@ class TestOrchestratorRunner:
         release_lock_mock.assert_called_once_with("/tmp/worktree/.locks/repo/orch_test.json")
 
     @pytest.mark.asyncio
-    async def test_fat_harness_resume_is_blocked_before_legacy_direct_execution(
+    async def test_resume_is_blocked_before_ungated_direct_execution(
         self,
         mock_adapter: MagicMock,
         mock_event_store: AsyncMock,
         mock_console: MagicMock,
         sample_seed: Seed,
     ) -> None:
-        """Fat-harness resume must not bypass typed evidence acceptance."""
+        """Resume must not bypass typed evidence acceptance."""
         from ouroboros.core.types import Result
 
         runner = OrchestratorRunner(
@@ -1253,7 +1262,8 @@ class TestOrchestratorRunner:
             result = await runner.resume_session("sess_resume", sample_seed)
 
         assert result.is_err
-        assert "Fat-harness resume is blocked" in result.error.message
+        assert "Resume is blocked" in result.error.message
+        assert "typed evidence plus verifier PASS" in result.error.message
         assert result.error.details["resume_blocked"] == "typed_evidence_gate_required"
         get_merged_tools.assert_not_called()
         execute_task.assert_not_called()
@@ -1275,6 +1285,7 @@ class TestOrchestratorRunner:
             mock_event_store,
             mock_console,
             task_workspace=_task_workspace(),
+            fat_harness_mode=False,
         )
         running_tracker = SessionTracker.create("exec_resume", "seed_resume").with_status(
             SessionStatus.RUNNING
@@ -2089,12 +2100,15 @@ class TestOrchestratorRunner:
     @pytest.mark.asyncio
     async def test_execute_parallel_passes_execution_profile_to_executor(
         self,
-        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
         sample_seed: Seed,
     ) -> None:
         """Runner wiring should make profile-aware decomposition live in production."""
         from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
 
+        runner = OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
         tracker = SessionTracker.create("exec_parallel", sample_seed.metadata.seed_id)
         dependency_graph = DependencyGraph(
             nodes=(ACNode(index=0, content=sample_seed.acceptance_criteria[0]),),
@@ -2153,7 +2167,7 @@ class TestOrchestratorRunner:
         assert profile is not None
         assert profile.profile == sample_seed.task_type == "code"
         assert profile.axis == "testable_unit"
-        assert captured_init["fat_harness_mode"] is False
+        assert captured_init["fat_harness_mode"] is True
 
     @pytest.mark.asyncio
     async def test_execute_parallel_passes_fat_harness_mode_to_executor(
@@ -2772,6 +2786,7 @@ class TestOrchestratorRunner:
             mock_console,
             inherited_runtime_handle=inherited_handle,
             inherited_tools=["WebFetch", "mcp__chrome-devtools__click"],
+            fat_harness_mode=False,
         )
 
         from ouroboros.core.types import Result
@@ -3509,8 +3524,13 @@ class TestCancellationPolling:
         mock_event_store: AsyncMock,
         mock_console: MagicMock,
     ) -> OrchestratorRunner:
-        """Create a runner with mocked dependencies."""
-        return OrchestratorRunner(mock_adapter, mock_event_store, mock_console)
+        """Create a runner for legacy plumbing tests without evidence gating."""
+        return OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            fat_harness_mode=False,
+        )
 
     @pytest.mark.asyncio
     async def test_check_cancellation_returns_false_when_no_event(

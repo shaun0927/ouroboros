@@ -1,20 +1,21 @@
 # #978 TraceGuard observation protocol
 
-This document defines the reproducible observation loop for #978 / #961 after the
-fat-harness default flip and before any #978 P5 legacy self-report fallback
-removal.
+This document defines the reproducible observation loop for #978 / #961 typed
+evidence readiness. After the post-#1082 broader positive signal and #978 P5
+removal, use this protocol as a regression check that acceptance still flows
+through typed evidence plus verifier PASS.
 
 ## Scope
 
 This protocol is observation-only. It does not authorize:
 
-- removing the legacy self-report fallback;
-- changing default `ooo run` behavior;
+- reintroducing legacy self-report acceptance;
+- changing `ooo run` evidence semantics beyond typed evidence plus verifier PASS;
 - adding a new AgentOS substrate surface;
-- treating one controlled run as P5 readiness.
+- treating one controlled run alone as future release readiness.
 
-The goal is to prove, with EventStore evidence, that fat-harness atomic AC
-acceptance can complete through:
+The goal is to prove, with EventStore evidence, that atomic AC acceptance
+continues to complete through:
 
 ```text
 typed evidence present -> schema-valid typed evidence -> verifier ran -> verifier PASS
@@ -34,8 +35,8 @@ git log --oneline -8
 ```
 
 For post-#1026 observation, `main` must include the merge commit for PR #1026.
-If #1026 is not merged yet, the run is diagnostic only and must not be recorded
-as clean-main P5-readiness evidence.
+If required typed-evidence/verifier commits are missing, the run is diagnostic
+only and must not be recorded as clean-main evidence-gate readiness evidence.
 
 ## Controlled seed: non-overlapping positive path
 
@@ -187,7 +188,7 @@ A full controlled pass is stronger and should also show the CLI run succeeds.
 - `typed_evidence_present=false` or `typed_evidence_valid=false`: prompt/extractor/schema seam remains blocked.
 - `verifier_ran=false`: verifier invocation is still gated before it can judge evidence.
 - `verifier_passed=false`: inspect `verifier_reasons` / `enforcement_error`; this is usually an evidence-matching or real-failure blocker.
-- Manual pytest passing while verifier fails: implementation may be correct, but P5 remains blocked because acceptance did not pass through the evidence gate.
+- Manual pytest passing while verifier fails: implementation may be correct, but acceptance did not pass through the evidence gate; treat this as a regression blocker.
 
 ## Reporting template
 
@@ -233,12 +234,13 @@ Manual sanity check:
 
 Conclusion:
 - Positive controlled signal: yes/no
-- #978 P5 remains blocked: yes/no
+- #978 P5 regression suspected: yes/no
 - Next observation/fix needed:
 ````
 
-## P5 readiness boundary
+## Post-P5 readiness boundary
 
-A positive controlled run is not enough to open #978 P5. Per #961, fallback
-removal still requires a later release/usage observation cycle that shows no
-regressive fabrication or semantic-miss signal under normal usage.
+A single controlled run remains insufficient for future release confidence. The
+post-#1082 broader observation provided the positive signal for #978 P5 removal;
+future failures should be treated as evidence-gate regressions or follow-up
+fixes, not as justification to restore legacy self-report acceptance.
