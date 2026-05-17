@@ -270,6 +270,28 @@ def _resolve_fat_harness_mode(seed_data: dict[str, Any]) -> bool:
     return True
 
 
+def _resolve_resume_fat_harness_mode(
+    seed_data: dict[str, Any],
+    progress: dict[str, Any],
+) -> bool:
+    """Resolve resume acceptance mode from persisted contract with safe migration.
+
+    New sessions persist ``fat_harness_mode`` at prepare time. Historical
+    sessions may not have that field, so only an explicit historical
+    ``execution_mode: legacy`` selector resumes ungated; unknown/missing state
+    falls back to the conservative typed-evidence gate.
+    """
+    persisted = progress.get("fat_harness_mode")
+    if isinstance(persisted, bool):
+        return persisted
+
+    orchestrator_config = seed_data.get("orchestrator")
+    return not (
+        isinstance(orchestrator_config, dict)
+        and orchestrator_config.get("execution_mode") == "legacy"
+    )
+
+
 def _resolve_max_parallel_workers() -> int:
     """Resolve the parallel worker cap from environment, config, then default."""
     env_value = os.environ.get("OUROBOROS_MAX_PARALLEL_WORKERS", "").strip()
@@ -448,7 +470,10 @@ async def _run_orchestrator(
             )
             session_id_for_run = resume_session
             execution_id = reconstructed.value.execution_id
-            resolved_fat_harness_mode = reconstructed.value.progress.get("fat_harness_mode") is True
+            resolved_fat_harness_mode = _resolve_resume_fat_harness_mode(
+                seed_data,
+                reconstructed.value.progress,
+            )
         else:
             session_id_for_run = f"orch_{uuid4().hex[:12]}"
             execution_id = f"exec_{uuid4().hex[:12]}"

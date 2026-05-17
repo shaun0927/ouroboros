@@ -14,6 +14,7 @@ from ouroboros.cli.commands.run import (
     _resolve_fat_harness_mode,
     _resolve_max_decomposition_depth,
     _resolve_max_parallel_workers,
+    _resolve_resume_fat_harness_mode,
     _run_orchestrator,
 )
 from ouroboros.core.types import Result
@@ -102,6 +103,22 @@ def test_resolve_fat_harness_mode_rejects_unknown_execution_mode() -> None:
 
     with pytest.raises(typer.Exit):
         _resolve_fat_harness_mode(seed_data)
+
+
+def test_resolve_resume_fat_harness_mode_uses_persisted_contract() -> None:
+    """Resume prefers the durable session contract over seed selectors."""
+    seed_data = {**VALID_SEED_DATA, "orchestrator": {"execution_mode": "legacy"}}
+
+    assert _resolve_resume_fat_harness_mode(seed_data, {"fat_harness_mode": True}) is True
+    assert _resolve_resume_fat_harness_mode(seed_data, {"fat_harness_mode": False}) is False
+
+
+def test_resolve_resume_fat_harness_mode_migrates_missing_contract_conservatively() -> None:
+    """Only explicit historical legacy selectors resume ungated when contract is absent."""
+    legacy_seed = {**VALID_SEED_DATA, "orchestrator": {"execution_mode": "legacy"}}
+
+    assert _resolve_resume_fat_harness_mode(legacy_seed, {}) is False
+    assert _resolve_resume_fat_harness_mode(VALID_SEED_DATA, {}) is True
 
 
 def test_resolve_max_decomposition_depth_defaults_to_two(monkeypatch: pytest.MonkeyPatch) -> None:

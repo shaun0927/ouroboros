@@ -134,6 +134,7 @@ class TestExecuteSeedHandler:
             {"fat_harness_mode": True}
         )
         legacy_resume_tracker = SessionTracker.create("exec_legacy", "seed-123")
+        missing_contract_tracker = SessionTracker.create("exec_missing", "seed-123")
 
         workspace = SimpleNamespace(
             effective_cwd="/tmp/ouroboros-worktree",
@@ -150,6 +151,7 @@ class TestExecuteSeedHandler:
                 trackers = {
                     "sess_resume": gated_resume_tracker,
                     "sess_legacy": legacy_resume_tracker,
+                    "sess_missing": missing_contract_tracker,
                 }
                 return Result.ok(trackers.get(session_id, fresh_tracker))
 
@@ -224,11 +226,20 @@ class TestExecuteSeedHandler:
             },
             synchronous=True,
         )
+        missing_contract_resumed = await handler.handle(
+            {
+                "seed_content": VALID_SEED_YAML,
+                "session_id": "sess_missing",
+                "skip_qa": True,
+            },
+            synchronous=True,
+        )
 
         assert fresh.is_ok
         assert resumed.is_ok
         assert legacy_resumed.is_ok
-        assert captured_modes == [True, True, False]
+        assert missing_contract_resumed.is_ok
+        assert captured_modes == [True, True, False, True]
 
     async def test_handle_rejects_removed_legacy_execution_mode(self) -> None:
         """MCP execute_seed matches the CLI removal of the legacy selector."""

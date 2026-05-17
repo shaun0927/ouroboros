@@ -464,11 +464,13 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                 # Create checkpoint store for execution state persistence
                 checkpoint_store = CheckpointStore()
                 checkpoint_store.initialize()
-                fat_harness_mode = False
+                fat_harness_mode = True
                 if is_resume:
-                    fat_harness_mode = tracker.progress.get("fat_harness_mode") is True
-                else:
-                    fat_harness_mode = True
+                    persisted_fat_harness_mode = tracker.progress.get("fat_harness_mode")
+                    if isinstance(persisted_fat_harness_mode, bool):
+                        fat_harness_mode = persisted_fat_harness_mode
+                    else:
+                        fat_harness_mode = execution_mode != "legacy"
 
                 # Create orchestrator runner
                 runner = OrchestratorRunner(
