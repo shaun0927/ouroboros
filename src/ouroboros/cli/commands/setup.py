@@ -374,13 +374,16 @@ def _is_source_tree_ouroboros_build() -> bool:
     current_file = Path(__file__).resolve()
     for parent in current_file.parents:
         pyproject = parent / "pyproject.toml"
+        source_package = parent / "src" / "ouroboros"
         if not pyproject.exists():
+            continue
+        if not current_file.is_relative_to(source_package):
             continue
         try:
             pyproject_text = pyproject.read_text(encoding="utf-8")
         except OSError:
             continue
-        if 'name = "ouroboros-ai"' in pyproject_text and (parent / "src" / "ouroboros").is_dir():
+        if 'name = "ouroboros-ai"' in pyproject_text and source_package.is_dir():
             return True
     return False
 

@@ -208,6 +208,30 @@ class TestCodexSetup:
         assert f"command = {json.dumps(sys.executable)}" in contents
         assert 'command = "uvx"' not in contents
 
+    def test_register_codex_mcp_server_keeps_release_uvx_inside_repo_venv(
+        self, tmp_path: Path
+    ) -> None:
+        """A wheel installed in a repo-local venv is still a release install."""
+        repo = tmp_path / "repo"
+        source_package = repo / "src" / "ouroboros"
+        wheel_package = repo / ".venv" / "lib" / "python3.12" / "site-packages" / "ouroboros"
+        source_package.mkdir(parents=True)
+        (repo / "pyproject.toml").write_text('name = "ouroboros-ai"\n', encoding="utf-8")
+        wheel_setup = wheel_package / "cli" / "commands" / "setup.py"
+        wheel_setup.parent.mkdir(parents=True)
+        wheel_setup.write_text("# installed wheel module\n", encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.cli.commands.setup.__file__", str(wheel_setup)),
+            patch("ouroboros.cli.commands.setup.importlib_metadata.version", return_value="0.38.2"),
+        ):
+            setup_cmd._register_codex_mcp_server()
+
+        contents = (tmp_path / ".codex" / "config.toml").read_text(encoding="utf-8")
+        assert 'command = "uvx"' in contents
+        assert f"command = {json.dumps(sys.executable)}" not in contents
+
     def test_register_codex_mcp_server_rewrites_existing_block_without_timeout(
         self,
         tmp_path: Path,
