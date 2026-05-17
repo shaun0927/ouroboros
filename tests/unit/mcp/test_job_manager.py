@@ -132,6 +132,51 @@ class TestJobManager:
         finally:
             await store.close()
 
+
+    async def test_monitor_completes_job_when_workflow_progress_is_complete(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+
+        try:
+            stop = asyncio.Event()
+
+            async def _runner() -> MCPToolResult:
+                await stop.wait()
+                return MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="late done"),),
+                    is_error=False,
+                )
+
+            started = await manager.start_job(
+                job_type="execute_seed",
+                initial_message="queued",
+                runner=_runner(),
+                links=JobLinks(session_id="orch_complete", execution_id="exec_complete"),
+            )
+            await store.append(
+                BaseEvent(
+                    type="workflow.progress.updated",
+                    aggregate_type="execution",
+                    aggregate_id="exec_complete",
+                    data={
+                        "completed_count": 2,
+                        "total_count": 2,
+                        "current_phase": "Deliver",
+                    },
+                )
+            )
+
+            snapshot = await _wait_for_job_status(
+                manager, started.job_id, JobStatus.COMPLETED, timeout=2.0
+            )
+
+            assert snapshot.result_text == "Workflow complete: 2/2 ACs completed"
+            assert snapshot.result_meta["completed_from_workflow_progress"] is True
+        finally:
+            stop.set()
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
     async def test_start_job_completes_and_persists_result(self, tmp_path) -> None:
         store = _build_store(tmp_path)
         manager = JobManager(store)
