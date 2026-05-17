@@ -279,6 +279,31 @@ def test_structured_auto_goal_filters_report_only_success_criteria() -> None:
     assert "uv run pytest tests/test_hello_auto.py" in preferences["acceptance_criteria"]
 
 
+def test_structured_auto_goal_preserves_non_allowlisted_execution_criteria() -> None:
+    goal = """
+Goal:
+Build a CLI validation endpoint.
+
+Success criteria:
+- `validator.py` exists.
+- CLI exits 2 on invalid flags.
+- HTTP 400 responses include a machine-readable error code.
+- JSON output matches the documented schema.
+- The command prints exactly `hello from ooo auto`.
+- Final report includes auto session id, seed id, seed path, and test result.
+"""
+
+    preferences = _derive_goal_user_preferences(goal)
+
+    assert preferences["acceptance_criteria"] == (
+        "`validator.py` exists.\n"
+        "CLI exits 2 on invalid flags.\n"
+        "HTTP 400 responses include a machine-readable error code.\n"
+        "JSON output matches the documented schema.\n"
+        "The command prints exactly `hello from ooo auto`."
+    )
+
+
 def test_resume_preference_override_reseeds_stale_preconfirmed_ledger() -> None:
     """Resume preference overrides must update persisted ledger source of truth."""
     original_preferences = _derive_goal_user_preferences(_OBSERVATION_GOAL)

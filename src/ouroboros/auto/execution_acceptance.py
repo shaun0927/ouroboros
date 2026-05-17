@@ -4,38 +4,28 @@ from __future__ import annotations
 
 from ouroboros.core.seed import Seed
 
-_META_NEEDLES = (
+_AUTO_REPORTING_CRITERION_PHRASES = (
     "auto session id",
     "auto-session",
     "blocker recurrence",
+    "`ooo auto` is dispatched",
+    "ooo auto is dispatched",
     "dispatch through mcp",
     "dispatched to the mcp",
+    "handled by ouroboros auto/mcp",
+    "handled by ouroboros auto",
     "final report",
     "interview closure",
     "last_question",
     "manual fallback",
     "mcp dispatch",
-    "ouroboros_auto",
+    "ouroboros_auto` is unavailable",
+    "`ouroboros_auto` is unavailable",
     "previous blocker",
     "run session id",
     "seed grade",
     "seed id",
     "seed path",
-)
-
-_CONCRETE_EXECUTION_NEEDLES = (
-    ".py",
-    "changed files",
-    "create ",
-    "created",
-    "exists",
-    "file",
-    "hello_auto",
-    "pytest",
-    "return",
-    "test",
-    "uv run",
-    "write",
 )
 
 
@@ -52,18 +42,18 @@ def normalize_execution_acceptance(seed: Seed) -> Seed:
     if not criteria:
         return seed
 
-    concrete = tuple(ac for ac in criteria if _is_concrete_execution_criterion(ac))
-    filtered = tuple(ac for ac in concrete if not _is_auto_observation_criterion(ac))
+    filtered = tuple(ac for ac in criteria if not is_auto_reporting_acceptance_criterion(ac))
     if not filtered or filtered == criteria:
         return seed
     return seed.model_copy(update={"acceptance_criteria": filtered})
 
 
-def _is_auto_observation_criterion(criterion: str) -> bool:
-    lowered = criterion.casefold()
-    return any(needle in lowered for needle in _META_NEEDLES)
+def is_auto_reporting_acceptance_criterion(criterion: str) -> bool:
+    """Return true for wrapper/report-only criteria, not execution requirements.
 
-
-def _is_concrete_execution_criterion(criterion: str) -> bool:
+    This is intentionally a denylist of known auto/session reporting phrases.
+    User-authored execution criteria are preserved by default because the auto
+    Seed contract must not be narrowed by a vocabulary allowlist.
+    """
     lowered = criterion.casefold()
-    return any(needle in lowered for needle in _CONCRETE_EXECUTION_NEEDLES)
+    return any(phrase in lowered for phrase in _AUTO_REPORTING_CRITERION_PHRASES)

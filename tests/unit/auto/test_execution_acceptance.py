@@ -58,3 +58,33 @@ def test_normalize_execution_acceptance_keeps_original_when_filter_would_empty()
     seed = _seed("Final report includes auto session id and seed id.")
 
     assert normalize_execution_acceptance(seed) is seed
+
+
+def test_normalize_execution_acceptance_preserves_mixed_non_keyword_requirements() -> None:
+    seed = _seed(
+        "`foo.py` exists.",
+        "CLI exits 2 on invalid flags.",
+        "HTTP 400 responses include a machine-readable error code.",
+        "JSON output matches the documented schema.",
+        "Final report includes auto session id and seed path.",
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert normalized.acceptance_criteria == (
+        "`foo.py` exists.",
+        "CLI exits 2 on invalid flags.",
+        "HTTP 400 responses include a machine-readable error code.",
+        "JSON output matches the documented schema.",
+    )
+
+
+def test_normalize_execution_acceptance_preserves_expected_ooo_auto_output() -> None:
+    seed = _seed(
+        "The command prints exactly `hello from ooo auto`.",
+        "Manual fallback is not used.",
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert normalized.acceptance_criteria == ("The command prints exactly `hello from ooo auto`.",)

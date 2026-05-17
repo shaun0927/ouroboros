@@ -28,6 +28,7 @@ from ouroboros.auto.answerer import (
     AutoAnswerContext,
     risky_user_preference_blocker_for,
 )
+from ouroboros.auto.execution_acceptance import is_auto_reporting_acceptance_criterion
 from ouroboros.auto.interview_driver import AutoInterviewDriver
 from ouroboros.auto.ledger import (
     REQUIRED_SECTIONS,
@@ -1605,50 +1606,9 @@ def _execution_success_criteria(text: str) -> str:
     lines = [
         line
         for line in (_clean_prompt_line(raw) for raw in text.splitlines())
-        if line
-        and _looks_like_execution_criterion(line)
-        and not _looks_like_auto_report_criterion(line)
+        if line and not is_auto_reporting_acceptance_criterion(line)
     ]
     return "\n".join(dict.fromkeys(lines))
-
-
-def _looks_like_execution_criterion(line: str) -> bool:
-    lowered = line.casefold()
-    return any(
-        needle in lowered
-        for needle in (
-            ".py",
-            "changed files",
-            "create",
-            "exists",
-            "hello_auto",
-            "pytest",
-            "return",
-            "test",
-            "uv run",
-        )
-    )
-
-
-def _looks_like_auto_report_criterion(line: str) -> bool:
-    lowered = line.casefold()
-    return any(
-        needle in lowered
-        for needle in (
-            "auto session id",
-            "blocker",
-            "dispatch",
-            "final report",
-            "interview closure",
-            "last_question",
-            "manual fallback",
-            "ooo auto",
-            "ouroboros_auto",
-            "seed grade",
-            "seed id",
-            "seed path",
-        )
-    )
 
 
 def _matching_lines(text: str, needles: tuple[str, ...]) -> list[str]:
