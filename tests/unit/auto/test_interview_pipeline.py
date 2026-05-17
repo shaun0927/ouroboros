@@ -3771,3 +3771,41 @@ async def test_convergence_contract_stalled_generic_followups_report_actionable_
     open_gaps = ledger.open_gaps()
     assert open_gaps, "stalled generic loop must leave at least one open required gap"
     assert any(section in blocker for section in open_gaps)
+
+
+@pytest.mark.asyncio
+async def test_pipeline_normalizes_persisted_seed_artifact_on_resume(tmp_path) -> None:
+    async def start(goal: str, cwd: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume with seed_artifact should not interview")
+
+    async def answer(session_id: str, text: str) -> InterviewTurn:  # noqa: ARG001
+        raise AssertionError("resume with seed_artifact should not answer")
+
+    async def generate_seed(session_id: str) -> Seed:  # noqa: ARG001
+        raise AssertionError("resume with seed_artifact should not generate")
+
+    seed = _seed(
+        ac=(
+            "Final report includes auto session id, seed id, seed path, and test result.",
+            "CLI exits 2 on invalid flags.",
+        )
+    )
+    state = AutoPipelineState(goal="Build a CLI", cwd=str(tmp_path))
+    state.transition(AutoPhase.INTERVIEW, "interview")
+    state.transition(AutoPhase.SEED_GENERATION, "seed generated")
+    state.transition(AutoPhase.REVIEW, "resume review")
+    state.seed_artifact = seed.to_dict()
+    state.seed_id = seed.metadata.seed_id
+    ledger = SeedDraftLedger.from_goal(state.goal)
+    _fill_ready(ledger)
+    state.ledger = ledger.to_dict()
+    driver = AutoInterviewDriver(FunctionInterviewBackend(start, answer), store=AutoStore(tmp_path))
+    pipeline = AutoPipeline(driver, generate_seed, store=AutoStore(tmp_path), skip_run=True)
+
+    result = await pipeline.run(state)
+
+    assert result.status == "complete"
+    resumed_seed = Seed.from_dict(state.seed_artifact)
+    criteria_text = "\n".join(resumed_seed.acceptance_criteria)
+    assert "Final report includes auto session id" not in criteria_text
+    assert "CLI exits 2 on invalid flags" in criteria_text

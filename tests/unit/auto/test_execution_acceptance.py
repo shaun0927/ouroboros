@@ -88,3 +88,20 @@ def test_normalize_execution_acceptance_preserves_expected_ooo_auto_output() -> 
     normalized = normalize_execution_acceptance(seed)
 
     assert normalized.acceptance_criteria == ("The command prints exactly `hello from ooo auto`.",)
+
+
+def test_normalize_execution_acceptance_preserves_product_final_report_and_fallback() -> None:
+    seed = _seed(
+        "Implement a manual fallback mode for offline users.",
+        "The final report endpoint includes the session id field.",
+        "Previous blocker history is visible in the admin UI.",
+        "Manual fallback is not used.",
+    )
+
+    normalized = normalize_execution_acceptance(seed)
+
+    assert normalized.acceptance_criteria == (
+        "Implement a manual fallback mode for offline users.",
+        "The final report endpoint includes the session id field.",
+        "Previous blocker history is visible in the admin UI.",
+    )

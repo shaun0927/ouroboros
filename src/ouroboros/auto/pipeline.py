@@ -550,6 +550,7 @@ class AutoPipeline:
                     )
                     self._save(state)
                     return self._result(state, ledger, blocker=state.last_error)
+                seed = self._normalize_execution_seed(state, seed)
                 state.transition(AutoPhase.REVIEW, "resuming review from persisted Seed")
                 self._save(state)
             else:
@@ -630,6 +631,7 @@ class AutoPipeline:
                 )
                 self._save(state)
                 return self._result(state, ledger, blocker=state.last_error)
+            seed = self._normalize_execution_seed(state, seed)
         elif self.seed_loader is not None and state.seed_path:
             seed = self._load_seed(state, state.seed_path)
             if seed is None:
@@ -2164,7 +2166,7 @@ class AutoPipeline:
             return await self._poll_ralph_job(state, ledger, seed, review=review)
 
         if not state.ralph_job_id and state.ralph_lineage_id and self.ralph_starter is not None:
-            seed = Seed.from_dict(state.seed_artifact)
+            seed = self._normalize_execution_seed(state, Seed.from_dict(state.seed_artifact))
             return await self._handoff_to_ralph(
                 state,
                 ledger,
@@ -2449,6 +2451,15 @@ class AutoPipeline:
         self._save(state)
         return True
 
+    def _normalize_execution_seed(
+        self, state: AutoPipelineState, seed: Seed, *, persist: bool = True
+    ) -> Seed:
+        normalized = normalize_execution_acceptance(seed)
+        if normalized is not seed and persist:
+            state.seed_artifact = normalized.to_dict()
+            self._save(state)
+        return normalized
+
     def _load_seed(self, state: AutoPipelineState, seed_path: str) -> Seed | None:
         if self.seed_loader is None:
             state.mark_failed("seed loader is not configured", tool_name="seed_loader")
@@ -2476,6 +2487,7 @@ class AutoPipeline:
         # resumed sessions. Existing non-default values are preserved.
         if state.seed_origin is SeedOrigin.NONE:
             state.seed_origin = SeedOrigin.AUTO_PIPELINE
+        seed = self._normalize_execution_seed(state, seed, persist=False)
         state.seed_id = seed.metadata.seed_id
         state.seed_artifact = seed.to_dict()
         return seed
