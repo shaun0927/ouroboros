@@ -28,6 +28,7 @@ from ouroboros.orchestrator.parallel_executor import (
     ParallelExecutionResult,
     StageExecutionOutcome,
     _build_governed_parent_summary,
+    _effective_evidence_schema_for_ac,
     _message_contains_test_success,
     _runtime_messages_support_command_claim,
     render_parallel_completion_message,
@@ -113,6 +114,38 @@ def test_message_contains_test_success_handles_zero_failure_summaries(
     """Verifier accepts explicit zero-failure summaries without allowing failures."""
     message = AgentMessage(type="result", content=content, data={})
     assert _message_contains_test_success(message) is expected
+
+
+@pytest.mark.parametrize(
+    "ac_content",
+    (
+        "Run python -m unittest test_todo.py successfully.",
+        "Verify the unit tests pass.",
+        "Ensure test_todo.py passes.",
+        "Validate the test suite.",
+    ),
+)
+def test_validation_only_ac_drops_files_touched_requirement(ac_content: str) -> None:
+    """Validation-only ACs prove command/test evidence without requiring file mutation."""
+    schema = _effective_evidence_schema_for_ac(load_profile("code"), ac_content)
+    assert schema.required == ("commands_run", "tests_passed")
+
+
+@pytest.mark.parametrize(
+    "ac_content",
+    (
+        "Create test_todo.py with unittest coverage.",
+        "Add tests for invalid index handling.",
+        "Update test_todo.py to cover the done command.",
+        "Implement TodoList.add and run tests.",
+    ),
+)
+def test_test_writing_and_implementation_acs_keep_files_touched_required(
+    ac_content: str,
+) -> None:
+    """ACs that mutate code/tests must still prove files_touched."""
+    schema = _effective_evidence_schema_for_ac(load_profile("code"), ac_content)
+    assert schema.required == ("files_touched", "commands_run", "tests_passed")
 
 
 def test_build_governed_parent_summary_preserves_embedded_wrapper_headings() -> None:
@@ -2605,6 +2638,209 @@ class TestParallelACExecutor:
         assert evidence_event.data["typed_evidence_valid"] is True
         assert evidence_event.data["verifier_ran"] is True
         assert evidence_event.data["verifier_passed"] is True
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_validation_only_ac_accepts_no_files_touched(
+        self,
+    ) -> None:
+        """Validation-only ACs can pass with command and test evidence only."""
+        event_store, appended_events = _make_replaying_event_store()
+        runtime = _FinalMessageRuntime(
+            "Done.\n"
+            "```json\n"
+            '{"commands_run":["python -m unittest test_todo.py"],'
+            '"tests_passed":["python -m unittest test_todo.py"]}\n'
+            "```",
+            native_session_id="opencode-session-validation-only",
+            support_messages=(
+                AgentMessage(
+                    type="tool",
+                    content="Bash: python -m unittest test_todo.py",
+                    tool_name="Bash",
+                    data={"tool_input": {"command": "python -m unittest test_todo.py"}},
+                ),
+                AgentMessage(
+                    type="result",
+                    content="Ran 6 tests in 0.002s\n\nOK",
+                    data={"subtype": "success", "exit_code": 0},
+                ),
+            ),
+        )
+        executor = ParallelACExecutor(
+            adapter=runtime,
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Run python -m unittest test_todo.py successfully.",
+            session_id="orch_123",
+            tools=["Read", "Bash"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is True
+        assert result.error is None
+        assert runtime.last_prompt is not None
+        assert "validation-only current AC" in runtime.last_prompt
+        assert "Do not include files_touched unless you actually edited" in runtime.last_prompt
+        assert "Read-only inspection or running tests does not count as files_touched" in (
+            runtime.last_prompt
+        )
+        assert "commands_run, tests_passed" in runtime.last_prompt
+        assert "files_touched, commands_run, tests_passed" not in runtime.last_prompt
+        assert result.typed_evidence is not None
+        assert result.typed_evidence.data == {
+            "commands_run": ["python -m unittest test_todo.py"],
+            "tests_passed": ["python -m unittest test_todo.py"],
+        }
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["required_fields"] == ["commands_run", "tests_passed"]
+        assert evidence_event.data["verifier_passed"] is True
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_validation_only_ac_ignores_files_touched_overclaim(
+        self,
+    ) -> None:
+        """Validation-only ACs record but ignore extra files_touched overclaims."""
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                "Done.\n"
+                "```json\n"
+                '{"files_touched":["test_todo.py"],'
+                '"commands_run":["python -m unittest test_todo.py"],'
+                '"tests_passed":["python -m unittest test_todo.py"]}\n'
+                "```",
+                native_session_id="opencode-session-validation-only-overclaim",
+                support_messages=(
+                    AgentMessage(
+                        type="tool",
+                        content="Bash: sed -n '1,240p' test_todo.py",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": "sed -n '1,240p' test_todo.py"}},
+                    ),
+                    AgentMessage(
+                        type="tool",
+                        content="Bash: python -m unittest test_todo.py",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": "python -m unittest test_todo.py"}},
+                    ),
+                    AgentMessage(
+                        type="result",
+                        content="Ran 6 tests in 0.002s\n\nOK",
+                        data={"subtype": "success", "exit_code": 0},
+                    ),
+                ),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Run python -m unittest test_todo.py successfully.",
+            session_id="orch_123",
+            tools=["Read", "Bash"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is True
+        assert result.error is None
+        assert result.typed_evidence is not None
+        assert result.typed_evidence.data == {
+            "commands_run": ["python -m unittest test_todo.py"],
+            "tests_passed": ["python -m unittest test_todo.py"],
+        }
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["required_fields"] == ["commands_run", "tests_passed"]
+        assert evidence_event.data["ignored_out_of_scope_evidence_fields"] == ["files_touched"]
+        assert evidence_event.data["verifier_passed"] is True
+
+    @pytest.mark.asyncio
+    async def test_fat_harness_test_writing_ac_still_requires_files_touched(
+        self,
+    ) -> None:
+        """Test-writing ACs must still prove file mutation."""
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                "Done.\n"
+                "```json\n"
+                '{"commands_run":["python -m unittest test_todo.py"],'
+                '"tests_passed":["python -m unittest test_todo.py"]}\n'
+                "```",
+                native_session_id="opencode-session-test-writing-missing-file",
+                support_messages=(
+                    AgentMessage(
+                        type="tool",
+                        content="Bash: python -m unittest test_todo.py",
+                        tool_name="Bash",
+                        data={"tool_input": {"command": "python -m unittest test_todo.py"}},
+                    ),
+                    AgentMessage(
+                        type="result",
+                        content="Ran 6 tests in 0.002s\n\nOK",
+                        data={"subtype": "success", "exit_code": 0},
+                    ),
+                ),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Create test_todo.py with unittest coverage.",
+            session_id="orch_123",
+            tools=["Read", "Bash"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship the feature",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "missing fields: files_touched" in result.error
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["required_fields"] == [
+            "files_touched",
+            "commands_run",
+            "tests_passed",
+        ]
+        assert "files_touched" in evidence_event.data["missing_fields"]
 
     @pytest.mark.asyncio
     async def test_fat_harness_mode_rejects_unbacked_typed_evidence(self) -> None:
