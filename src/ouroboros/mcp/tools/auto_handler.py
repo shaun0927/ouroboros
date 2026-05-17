@@ -9,6 +9,7 @@ import inspect
 import json
 import os
 from pathlib import Path
+import re
 from typing import Any
 from uuid import uuid4
 
@@ -25,7 +26,13 @@ from ouroboros.auto.adapters import (
 )
 from ouroboros.auto.answerer import AutoAnswerContext
 from ouroboros.auto.interview_driver import AutoInterviewDriver
-from ouroboros.auto.ledger import REQUIRED_SECTIONS
+from ouroboros.auto.ledger import (
+    REQUIRED_SECTIONS,
+    LedgerEntry,
+    LedgerSource,
+    LedgerStatus,
+    SeedDraftLedger,
+)
 from ouroboros.auto.pipeline import AutoPipeline, AutoPipelineResult
 from ouroboros.auto.repo_context import repo_auto_answer_context
 from ouroboros.auto.resume_render import render_resume_lines
@@ -325,8 +332,14 @@ class AutoHandler:
             max_interview_rounds = _positive_int_arg(arguments, "max_interview_rounds", 12)
             max_repair_rounds = _positive_int_arg(arguments, "max_repair_rounds", 5)
             skip_run = requested_skip_run
-            state = AutoPipelineState(goal=goal.strip(), cwd=cwd)
-            state.user_preferences = dict(supplied_user_preferences)
+            goal_text = goal.strip()
+            state = AutoPipelineState(goal=goal_text, cwd=cwd)
+            state.user_preferences = _merge_goal_user_preferences(
+                goal_text, supplied_user_preferences
+            )
+            state.ledger = _seed_initial_ledger_from_user_preferences(
+                goal_text, state.user_preferences
+            ).to_dict()
             state.max_interview_rounds = max_interview_rounds
             state.max_repair_rounds = max_repair_rounds
             state.complete_product = complete_product
@@ -722,8 +735,13 @@ class StartAutoHandler:
         state.max_repair_rounds = _positive_int_arg(arguments, "max_repair_rounds", 5)
         state.skip_run = bool(arguments.get("skip_run", False))
         state.complete_product = bool(arguments.get("complete_product", False))
+        supplied_user_preferences: dict[str, str] = {}
         if "user_preferences" in arguments and arguments.get("user_preferences") is not None:
-            state.user_preferences = _parse_user_preferences(arguments.get("user_preferences"))
+            supplied_user_preferences = _parse_user_preferences(arguments.get("user_preferences"))
+        state.user_preferences = _merge_goal_user_preferences(goal, supplied_user_preferences)
+        state.ledger = _seed_initial_ledger_from_user_preferences(
+            goal, state.user_preferences
+        ).to_dict()
         if pipeline_timeout_seconds is not None:
             state.pipeline_timeout_seconds = pipeline_timeout_seconds
         runtime_backend = resolve_agent_runtime_backend(self.agent_runtime_backend)
@@ -1289,6 +1307,173 @@ def _parse_user_preferences(value: object) -> dict[str, str]:
             f"user_preferences['{raw_key}'] must be a non-empty string or list of strings/numbers"
         )
     return cleaned
+
+
+def _merge_goal_user_preferences(goal: str, supplied: dict[str, str]) -> dict[str, str]:
+    """Merge explicit MCP preferences over preferences derived from the goal text."""
+    merged = _derive_goal_user_preferences(goal)
+    merged.update(supplied)
+    return merged
+
+
+def _seed_initial_ledger_from_user_preferences(
+    goal: str, user_preferences: dict[str, str]
+) -> SeedDraftLedger:
+    """Create an initial ledger seeded with explicit goal-prompt preferences."""
+    ledger = SeedDraftLedger.from_goal(goal)
+    for section in REQUIRED_SECTIONS:
+        if section == "goal":
+            continue
+        value = user_preferences.get(section)
+        if not value:
+            continue
+        ledger.add_entry(
+            section,
+            LedgerEntry(
+                key=f"{section}.goal_prompt",
+                value=value,
+                source=LedgerSource.USER_PREFERENCE,
+                confidence=0.86,
+                status=LedgerStatus.CONFIRMED,
+                rationale=(
+                    "Derived from explicit structured text in the initial ooo auto goal prompt."
+                ),
+            ),
+        )
+    return ledger
+
+
+def _derive_goal_user_preferences(goal: str) -> dict[str, str]:
+    """Extract explicit ledger preferences from a structured multiline auto goal.
+
+    This is intentionally conservative: it recognizes operator-authored section
+    labels and concrete command/file constraints, then lets the normal
+    interview/repair pipeline validate and refine the resulting ledger. It does
+    not invent product behavior beyond common local-repository observation
+    framing that is explicitly present in the prompt.
+    """
+    sections = _extract_goal_sections(goal)
+    preferences: dict[str, str] = {}
+
+    runtime = _section_text(sections, "runtime context", "runtime_context")
+    if runtime:
+        preferences["runtime_context"] = runtime
+
+    non_goals = _section_text(sections, "non-goals", "non goals", "non_goals")
+    if non_goals:
+        preferences["non_goals"] = non_goals
+
+    success = _section_text(sections, "success criteria", "acceptance criteria")
+    if success:
+        preferences["acceptance_criteria"] = success
+
+    implementation = _section_text(sections, "implementation", "task")
+    if implementation:
+        preferences["outputs"] = implementation
+        preferences["inputs"] = (
+            "Inputs are the local repository state, the requested implementation contract, "
+            "and the verification commands described in the goal prompt."
+        )
+
+    constraint_lines = _matching_lines(
+        goal,
+        (
+            "do not",
+            "keep ",
+            "local file edits are allowed",
+            "running targeted tests is allowed",
+            "network access is not required",
+            "no credentials are required",
+        ),
+    )
+    if constraint_lines:
+        preferences["constraints"] = "\n".join(constraint_lines)
+
+    verification_lines = _matching_lines(
+        goal,
+        (
+            "uv run pytest",
+            "targeted test",
+            "test command",
+            "test result",
+            "pytest test",
+        ),
+    )
+    if verification_lines:
+        preferences["verification_plan"] = "\n".join(verification_lines)
+
+    failure_lines = _matching_lines(
+        goal,
+        (
+            "if ",
+            "blocked",
+            "unavailable",
+            "interpreted as normal text",
+            "previous ",
+            "manual fallback",
+        ),
+    )
+    if failure_lines:
+        preferences["failure_modes"] = "\n".join(failure_lines)
+
+    if _looks_like_local_operator_goal(goal):
+        preferences["actors"] = (
+            "A single local developer/operator using Codex and Ouroboros in the local repository."
+        )
+
+    return preferences
+
+
+def _extract_goal_sections(goal: str) -> dict[str, list[str]]:
+    sections: dict[str, list[str]] = {}
+    current: str | None = None
+    for raw_line in goal.splitlines():
+        line = raw_line.rstrip()
+        header = _section_header(line)
+        if header is not None:
+            current = header
+            sections.setdefault(current, [])
+            continue
+        if current is not None and line.strip():
+            sections[current].append(_clean_prompt_line(line))
+    return sections
+
+
+def _section_header(line: str) -> str | None:
+    match = re.match(r"^\s*([A-Za-z][A-Za-z0-9 _/-]{1,60}):\s*$", line)
+    if match is None:
+        return None
+    return " ".join(match.group(1).replace("_", " ").casefold().split())
+
+
+def _section_text(sections: dict[str, list[str]], *names: str) -> str:
+    values: list[str] = []
+    for name in names:
+        values.extend(sections.get(" ".join(name.replace("_", " ").casefold().split()), ()))
+    return "\n".join(dict.fromkeys(value for value in values if value.strip()))
+
+
+def _matching_lines(text: str, needles: tuple[str, ...]) -> list[str]:
+    matches: list[str] = []
+    for line in text.splitlines():
+        cleaned = _clean_prompt_line(line)
+        lowered = cleaned.casefold()
+        if cleaned and any(needle in lowered for needle in needles):
+            matches.append(cleaned)
+    return list(dict.fromkeys(matches))
+
+
+def _clean_prompt_line(line: str) -> str:
+    return re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", line).strip()
+
+
+def _looks_like_local_operator_goal(goal: str) -> bool:
+    lowered = goal.casefold()
+    return (
+        "local development repository" in lowered
+        or "local repository" in lowered
+        or "local file edits are allowed" in lowered
+    )
 
 
 def _build_context_provider(user_preferences: dict[str, str]):

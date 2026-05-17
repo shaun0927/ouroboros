@@ -18,13 +18,18 @@ from unittest.mock import MagicMock, patch
 
 from ouroboros.auto.adapters import HandlerInterviewBackend
 from ouroboros.auto.interview_driver import AutoInterviewDriver
+from ouroboros.auto.ledger import SeedDraftLedger
 from ouroboros.auto.pipeline import AutoPipelineResult
 from ouroboros.auto.state import AutoStore
 from ouroboros.bigbang.interview import InterviewRound, InterviewState, InterviewStatus
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError
 from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
-from ouroboros.mcp.tools.auto_handler import AutoHandler
+from ouroboros.mcp.tools.auto_handler import (
+    AutoHandler,
+    _derive_goal_user_preferences,
+    _seed_initial_ledger_from_user_preferences,
+)
 from ouroboros.mcp.types import ContentType
 from ouroboros.providers.base import CompletionResponse, Message, UsageInfo
 from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
@@ -54,6 +59,37 @@ _TOOL_CALL_CAPABLE_LEAKAGE_PATHS = frozenset(
     }
 )
 
+_OBSERVATION_GOAL = """
+Goal:
+Verify current ooo auto can create hello_auto.py and tests/test_hello_auto.py.
+
+Implementation:
+- Create `hello_auto.py` at the repository root.
+- Add a minimal pytest test at `tests/test_hello_auto.py`.
+
+Runtime context:
+- This is a local development repository.
+- Local file edits are allowed.
+- Running targeted tests is allowed.
+- Network access is not required.
+- No credentials are required.
+
+Non-goals:
+- Do not refactor existing code.
+- Do not add dependencies.
+- Do not edit unrelated files.
+
+Success criteria:
+- `ooo auto` is handled by Ouroboros auto/MCP, not plain text.
+- `hello_auto.py` exists.
+- `tests/test_hello_auto.py` exists.
+- The targeted test command `uv run pytest tests/test_hello_auto.py` passes.
+- Final report includes auto session id, seed id, files changed, exact test command, and test result.
+
+Important dispatch rule:
+If `ouroboros_auto` is unavailable or interpreted as normal text, stop and report failure.
+"""
+
 
 def _assert_isolated_allowed_tools(factory_kwargs: dict[str, Any]) -> None:
     """Assert the auto sub-interviewer cannot opt into tool-call surfaces."""
@@ -65,6 +101,60 @@ def _assert_isolated_allowed_tools(factory_kwargs: dict[str, Any]) -> None:
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[4]
+
+
+def test_structured_auto_goal_seeds_required_ledger_sections() -> None:
+    """Observation-style prompts should seed known ledger sections before interview."""
+    preferences = _derive_goal_user_preferences(_OBSERVATION_GOAL)
+    ledger = _seed_initial_ledger_from_user_preferences(_OBSERVATION_GOAL, preferences)
+
+    assert {
+        "actors",
+        "inputs",
+        "outputs",
+        "constraints",
+        "non_goals",
+        "acceptance_criteria",
+        "verification_plan",
+        "failure_modes",
+        "runtime_context",
+    } <= set(preferences)
+    assert ledger.open_gaps() == []
+    summary = ledger.summary()
+    assert "runtime_context" in summary["evidence_backed_sections"]
+    assert "constraints" in summary["evidence_backed_sections"]
+    assert "non_goals" in summary["evidence_backed_sections"]
+
+
+def test_auto_handler_fresh_session_persists_goal_derived_ledger_preferences(
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def _capture_state(self, state):  # type: ignore[no-untyped-def]
+        captured["state"] = state
+        return AutoPipelineResult(
+            status="complete",
+            auto_session_id=state.auto_session_id,
+            phase="complete",
+        )
+
+    with patch(
+        "ouroboros.mcp.tools.auto_handler.AutoPipeline.run",
+        new=_capture_state,
+    ):
+        result = asyncio.run(
+            AutoHandler(store=AutoStore(tmp_path)).handle(
+                {"goal": _OBSERVATION_GOAL, "cwd": str(tmp_path)}
+            )
+        )
+
+    assert result.is_ok, result.error
+    state = captured["state"]
+    assert "runtime_context" in state.user_preferences
+    assert "non_goals" in state.user_preferences
+    ledger = SeedDraftLedger.from_dict(state.ledger)
+    assert ledger.open_gaps() == []
 
 
 def _call_names(node: ast.AST) -> set[str]:
