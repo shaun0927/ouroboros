@@ -369,8 +369,26 @@ def _codex_mcp_entry_from_toml(data: dict[str, object]) -> dict[str, object] | N
     return entry if isinstance(entry, dict) else None
 
 
+def _is_source_tree_ouroboros_build() -> bool:
+    """Return whether this module is executing from an Ouroboros source tree."""
+    current_file = Path(__file__).resolve()
+    for parent in current_file.parents:
+        pyproject = parent / "pyproject.toml"
+        if not pyproject.exists():
+            continue
+        try:
+            pyproject_text = pyproject.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if 'name = "ouroboros-ai"' in pyproject_text and (parent / "src" / "ouroboros").is_dir():
+            return True
+    return False
+
+
 def _is_dev_ouroboros_build() -> bool:
     """Return whether setup is running from a dev/editable Ouroboros build."""
+    if _is_source_tree_ouroboros_build():
+        return True
     try:
         version = importlib_metadata.version("ouroboros-ai")
     except importlib_metadata.PackageNotFoundError:
@@ -404,7 +422,25 @@ def _render_codex_mcp_section() -> str:
     return _CODEX_MCP_SECTION_TEMPLATE.format(command_lines=command_lines)
 
 
-def _is_setup_managed_codex_mcp_entry(entry: dict[str, object]) -> bool:
+def _has_managed_codex_mcp_comment(raw: str) -> bool:
+    """Return whether the Ouroboros MCP table carries setup's managed comment."""
+    lines = raw.splitlines()
+    expected = list(_CODEX_MCP_COMMENT_LINES)
+    for index, line in enumerate(lines):
+        if line.strip() != "[mcp_servers.ouroboros]":
+            continue
+        comment_end = index
+        while comment_end > 0 and not lines[comment_end - 1].strip():
+            comment_end -= 1
+        comment_start = comment_end - len(expected)
+        if comment_start >= 0 and lines[comment_start:comment_end] == expected:
+            return True
+    return False
+
+
+def _is_setup_managed_codex_mcp_entry(
+    entry: dict[str, object], *, has_managed_comment: bool = False
+) -> bool:
     """Return whether setup may safely replace this Codex MCP entry."""
     if "url" in entry:
         return False
@@ -414,12 +450,15 @@ def _is_setup_managed_codex_mcp_entry(entry: dict[str, object]) -> bool:
     if not isinstance(command, str) or not isinstance(args, list):
         return False
 
-    # Current setup-managed config and older setup-managed uvx configs both end
-    # by launching `ouroboros mcp serve`. Dev/worktree setup-managed configs may
-    # also pin the invoking Python module or an older direct console script path;
-    # both remain setup-owned so rerunning setup can refresh stale venv paths.
+    # Current and legacy setup-managed uvx configs both end by launching
+    # `ouroboros mcp serve`; keep accepting those even before setup added the
+    # managed comment block. Non-uvx dev/worktree shapes are only setup-owned
+    # when that managed comment is present, so user-pinned interpreters or
+    # wrapper scripts with the same args remain preserved in auto mode.
     if command == "uvx":
         return len(args) >= 3 and args[-3:] == ["ouroboros", "mcp", "serve"]
+    if not has_managed_comment:
+        return False
     if Path(command).name == "ouroboros":
         return args == _CODEX_DIRECT_MCP_ARGS
     return args == _CODEX_MODULE_MCP_ARGS
@@ -590,7 +629,14 @@ def _register_codex_mcp_server(*, mode: CodexMcpMode = "auto") -> None:
             return
 
         entry = _codex_mcp_entry_from_toml(parsed)
-        if mode == "auto" and entry is not None and not _is_setup_managed_codex_mcp_entry(entry):
+        has_managed_comment = _has_managed_codex_mcp_comment(raw)
+        if (
+            mode == "auto"
+            and entry is not None
+            and not _is_setup_managed_codex_mcp_entry(
+                entry, has_managed_comment=has_managed_comment
+            )
+        ):
             print_info(
                 "Preserved existing user-managed Ouroboros MCP config in "
                 f"{codex_config}. Use --mcp-mode stdio to replace it."
