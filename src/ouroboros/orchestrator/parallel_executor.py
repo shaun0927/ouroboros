@@ -267,6 +267,22 @@ def _out_of_scope_evidence_fields_for_ac(
     )
 
 
+def _scoped_evidence_record_for_ac(
+    profile: ExecutionProfile,
+    ac_content: str,
+    record: EvidenceRecord | None,
+) -> EvidenceRecord | None:
+    """Return only evidence fields inside the AC-specific schema."""
+    if record is None:
+        return None
+    effective_schema = _effective_evidence_schema_for_ac(profile, ac_content)
+    allowed_fields = set(effective_schema.required)
+    return EvidenceRecord(
+        data={field: value for field, value in record.data.items() if field in allowed_fields},
+        source=record.source,
+    )
+
+
 def _profile_with_evidence_schema(
     profile: ExecutionProfile,
     schema: EvidenceSchema,
@@ -4698,6 +4714,13 @@ Files present:
                 ),
             )
             clear_cached_runtime_handle = True
+            result_typed_evidence = typed_evidence
+            if success and self._execution_profile is not None:
+                result_typed_evidence = _scoped_evidence_record_for_ac(
+                    self._execution_profile,
+                    ac_content,
+                    typed_evidence,
+                )
 
             log.info(
                 "parallel_executor.ac.completed",
@@ -4719,7 +4742,7 @@ Files present:
                 retry_attempt=retry_attempt,
                 depth=depth,
                 runtime_handle=runtime_handle,
-                typed_evidence=typed_evidence,
+                typed_evidence=result_typed_evidence,
                 typed_evidence_validation=typed_validation,
                 typed_evidence_error=typed_error,
                 atomic_verifier_verdict=verifier_verdict,

@@ -1890,6 +1890,11 @@ class TestParallelACExecutor:
 
         assert result.success is True
         assert result.error is None
+        assert result.typed_evidence is not None
+        assert result.typed_evidence.data == {
+            "files_touched": ["README.md"],
+            "commands_run": ["grep -n slugify README.md"],
+        }
         evidence_event = next(
             event
             for event in appended_events
