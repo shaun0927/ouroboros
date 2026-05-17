@@ -4,13 +4,6 @@ from __future__ import annotations
 
 from ouroboros.core.seed import Seed
 
-_AUTO_REPORTING_ID_FIELDS = (
-    "auto session id",
-    "seed id",
-    "seed path",
-    "run session id",
-)
-
 _AUTO_DISPATCH_MARKERS = (
     "`ooo auto` is dispatched",
     "ooo auto is dispatched",
@@ -19,6 +12,11 @@ _AUTO_DISPATCH_MARKERS = (
     "dispatch through mcp",
     "dispatched to the mcp",
     "mcp dispatch",
+)
+
+_FINAL_REPORT_WRAPPER_PREFIXES = (
+    "final report includes auto session id",
+    "the final report includes auto session id",
 )
 
 
@@ -47,7 +45,7 @@ def is_auto_reporting_acceptance_criterion(criterion: str) -> bool:
     The classifier is intentionally narrow: it recognizes the observation
     wrapper's own reporting/dispatch obligations, while preserving product
     requirements that merely mention concepts such as manual fallback, final
-    reports, or IDs.
+    reports, IDs, blocker history, or interview fields.
     """
     lowered = " ".join(criterion.casefold().split())
     if any(marker in lowered for marker in _AUTO_DISPATCH_MARKERS):
@@ -56,14 +54,7 @@ def is_auto_reporting_acceptance_criterion(criterion: str) -> bool:
         "not used" in lowered or "was not used" in lowered or "is not used" in lowered
     ):
         return True
-    if "final report" in lowered:
-        matched_fields = sum(field in lowered for field in _AUTO_REPORTING_ID_FIELDS)
-        return "auto session id" in lowered or matched_fields >= 2
-    if "seed grade" in lowered and ("report" in lowered or "includes" in lowered):
-        return True
-    if "previous blocker" in lowered or "blocker recurrence" in lowered:
-        return "report" in lowered or "not recur" in lowered or "does not recur" in lowered
-    if "interview closure" in lowered or "last_question" in lowered:
+    if lowered.startswith(_FINAL_REPORT_WRAPPER_PREFIXES):
         return True
     return "ouroboros_auto" in lowered and (
         "unavailable" in lowered or "interpreted as normal text" in lowered

@@ -94,7 +94,9 @@ def test_normalize_execution_acceptance_preserves_product_final_report_and_fallb
     seed = _seed(
         "Implement a manual fallback mode for offline users.",
         "The final report endpoint includes the session id field.",
+        "The final report endpoint includes seed id and seed path.",
         "Previous blocker history is visible in the admin UI.",
+        "Persist last_question for resumed interviews.",
         "Manual fallback is not used.",
     )
 
@@ -103,5 +105,7 @@ def test_normalize_execution_acceptance_preserves_product_final_report_and_fallb
     assert normalized.acceptance_criteria == (
         "Implement a manual fallback mode for offline users.",
         "The final report endpoint includes the session id field.",
+        "The final report endpoint includes seed id and seed path.",
         "Previous blocker history is visible in the admin UI.",
+        "Persist last_question for resumed interviews.",
     )
