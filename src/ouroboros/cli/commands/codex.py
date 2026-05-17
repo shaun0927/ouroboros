@@ -312,24 +312,24 @@ async def _list_stdio_mcp_tool_names_with_framing(
         else None
     )
     try:
-        await _send_stdio_mcp_message(
-            proc,
-            {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": _MCP_PROTOCOL_VERSION,
-                    "capabilities": {},
-                    "clientInfo": {
-                        "name": "ouroboros-codex-doctor",
-                        "version": "0.0.0",
+        try:
+            await _send_stdio_mcp_message(
+                proc,
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": _MCP_PROTOCOL_VERSION,
+                        "capabilities": {},
+                        "clientInfo": {
+                            "name": "ouroboros-codex-doctor",
+                            "version": "0.0.0",
+                        },
                     },
                 },
-            },
-            framing=framing,
-        )
-        try:
+                framing=framing,
+            )
             await _read_stdio_mcp_response(
                 proc,
                 request_id=1,
@@ -338,6 +338,7 @@ async def _list_stdio_mcp_tool_names_with_framing(
                 framing=framing,
             )
         except (
+            OSError,
             json.JSONDecodeError,
             _StdioMcpFramingMismatch,
             RuntimeError,
@@ -388,7 +389,7 @@ def _should_retry_stdio_mcp_framing(exc: BaseException) -> bool:
     """Return True when JSONL failed before a valid initialize response existed."""
     if isinstance(exc, TimeoutError):
         return True
-    if isinstance(exc, (json.JSONDecodeError, _StdioMcpFramingMismatch)):
+    if isinstance(exc, (OSError, json.JSONDecodeError, _StdioMcpFramingMismatch)):
         return True
     return isinstance(exc, RuntimeError) and "exited before response" in str(exc)
 

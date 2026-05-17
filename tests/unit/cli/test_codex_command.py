@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from typer.testing import CliRunner
 
+from ouroboros.cli.commands import codex as codex_command
 from ouroboros.cli.commands.codex import (
     _MCP_PROTOCOL_VERSION,
     _check_auto_dispatch_surface,
@@ -393,6 +394,82 @@ class TestCodexDoctor:
 
         assert tool_names >= _REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST
 
+    def test_list_stdio_mcp_tool_names_retries_when_jsonl_initialize_send_fails(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        server_path = tmp_path / "fake_header_mcp_server.py"
+        server_path.write_text(
+            textwrap.dedent(
+                r"""
+                import json
+                import sys
+
+                def read_message():
+                    headers = {}
+                    while True:
+                        line = sys.stdin.buffer.readline()
+                        if not line:
+                            raise SystemExit(0)
+                        stripped = line.strip()
+                        if not stripped:
+                            break
+                        name, value = stripped.decode("ascii").split(":", 1)
+                        headers[name.lower()] = value.strip()
+                    return json.loads(sys.stdin.buffer.read(int(headers["content-length"])))
+
+                def write_message(message):
+                    body = json.dumps(message).encode("utf-8")
+                    sys.stdout.buffer.write(
+                        f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body
+                    )
+                    sys.stdout.buffer.flush()
+
+                initialize = read_message()
+                write_message({
+                    "jsonrpc": "2.0",
+                    "id": initialize["id"],
+                    "result": {
+                        "protocolVersion": initialize["params"]["protocolVersion"],
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "fake", "version": "1.0.0"},
+                    },
+                })
+                read_message()
+                tools_list = read_message()
+                write_message({
+                    "jsonrpc": "2.0",
+                    "id": tools_list["id"],
+                    "result": {
+                        "tools": [
+                            {"name": "ouroboros_auto", "inputSchema": {"type": "object"}},
+                            {"name": "ouroboros_start_auto", "inputSchema": {"type": "object"}},
+                            {"name": "ouroboros_interview", "inputSchema": {"type": "object"}},
+                            {"name": "ouroboros_generate_seed", "inputSchema": {"type": "object"}},
+                        ]
+                    },
+                })
+                """
+            ),
+            encoding="utf-8",
+        )
+        original_send = codex_command._send_stdio_mcp_message
+
+        async def fail_jsonl_initialize_send(proc, message, *, framing):
+            if framing == "jsonl" and message.get("method") == "initialize":
+                raise BrokenPipeError("pipe closed during JSONL initialize write")
+            await original_send(proc, message, framing=framing)
+
+        with patch(
+            "ouroboros.cli.commands.codex._send_stdio_mcp_message",
+            side_effect=fail_jsonl_initialize_send,
+        ):
+            tool_names = asyncio.run(
+                _list_stdio_mcp_tool_names(sys.executable, (str(server_path),), {})
+            )
+
+        assert tool_names >= _REQUIRED_CODEX_AUTO_TOOLS_FOR_TEST
+
     def test_list_stdio_mcp_tool_names_surfaces_json_rpc_errors_without_framing_retry(
         self,
         tmp_path: Path,
@@ -421,6 +498,7 @@ class TestCodexDoctor:
 
     def test_stdio_mcp_framing_retry_policy_distinguishes_probe_failures(self) -> None:
         assert _should_retry_stdio_mcp_framing(TimeoutError("timed out waiting"))
+        assert _should_retry_stdio_mcp_framing(BrokenPipeError("pipe closed"))
         assert _should_retry_stdio_mcp_framing(
             RuntimeError("MCP stdio process exited before response")
         )
