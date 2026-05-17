@@ -138,6 +138,12 @@ def test_validation_only_ac_drops_files_touched_requirement(ac_content: str) -> 
         "Add tests for invalid index handling.",
         "Update test_todo.py to cover the done command.",
         "Implement TodoList.add and run tests.",
+        "Modify parser.py and ensure tests pass.",
+        "Refactor the validator and verify unit tests pass.",
+        "Change the runtime workflow and run pytest.",
+        "Ensure tests cover invalid inputs.",
+        "Check tests into the repo for the new parser.",
+        "Check in tests for the new parser.",
     ),
 )
 def test_test_writing_and_implementation_acs_keep_files_touched_required(
@@ -2778,6 +2784,9 @@ class TestParallelACExecutor:
         )
         assert evidence_event.data["required_fields"] == ["commands_run", "tests_passed"]
         assert evidence_event.data["ignored_out_of_scope_evidence_fields"] == ["files_touched"]
+        assert evidence_event.data["ignored_out_of_scope_evidence"] == {
+            "files_touched": ["test_todo.py"]
+        }
         assert evidence_event.data["verifier_passed"] is True
 
     @pytest.mark.asyncio

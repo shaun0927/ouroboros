@@ -178,8 +178,19 @@ _TEST_WORK_RE = re.compile(
     re.IGNORECASE,
 )
 _TEST_MUTATION_WORK_RE = re.compile(
+    r"("
     r"\b(?:add|write|create|implement|fix|update|extend|expand)\b.{0,60}\b"
-    r"(?:tests?|unit\s+tests?|integration\s+tests?|coverage|test_[\w.-]+\.py)\b",
+    r"(?:tests?|unit\s+tests?|integration\s+tests?|coverage|test_[\w.-]+\.py)\b"
+    r"|"
+    r"\b(?:tests?|unit\s+tests?|integration\s+tests?|test_[\w.-]+\.py)\b.{0,60}\b"
+    r"(?:cover|coverage)\b"
+    r"|"
+    r"\bcheck(?:ed)?\s+(?:tests?|unit\s+tests?|integration\s+tests?|test_[\w.-]+\.py)"
+    r"\s+into\b"
+    r"|"
+    r"\bcheck\s+in\b.{0,60}\b"
+    r"(?:tests?|unit\s+tests?|integration\s+tests?|test_[\w.-]+\.py)\b"
+    r")",
     re.IGNORECASE,
 )
 _VALIDATION_ONLY_ACTION_RE = re.compile(
@@ -265,6 +276,8 @@ def _is_validation_only_ac(ac_content: str) -> bool:
         return False
     if _TEST_MUTATION_WORK_RE.search(normalized):
         return False
+    if _CODE_MUTATION_ACTION_RE.search(normalized) and _CODE_WORK_SIGNAL_RE.search(normalized):
+        return False
     if _CODE_IMPLEMENTATION_ACTION_RE.search(normalized):
         return False
     if _has_mixed_code_and_documentation_work(normalized):
@@ -310,6 +323,18 @@ def _out_of_scope_evidence_fields_for_ac(
         for field in profile.evidence_schema.required
         if field not in required_fields and _flatten_evidence_values(record.get(field))
     )
+
+
+def _out_of_scope_evidence_values_for_ac(
+    profile: ExecutionProfile,
+    ac_content: str,
+    record: EvidenceRecord | None,
+) -> dict[str, Any]:
+    """Return out-of-scope evidence values retained for audit metadata only."""
+    if record is None:
+        return {}
+    fields = _out_of_scope_evidence_fields_for_ac(profile, ac_content, record)
+    return {field: record.data[field] for field in fields if field in record.data}
 
 
 def _scoped_evidence_record_for_ac(
@@ -5118,6 +5143,11 @@ Files present:
                     ac_content,
                     typed_evidence,
                 )
+            )
+            data["ignored_out_of_scope_evidence"] = _out_of_scope_evidence_values_for_ac(
+                self._execution_profile,
+                ac_content,
+                typed_evidence,
             )
         if typed_validation is not None:
             data["missing_fields"] = list(typed_validation.missing_fields)
