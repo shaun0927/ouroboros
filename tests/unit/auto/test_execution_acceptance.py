@@ -54,7 +54,6 @@ def test_normalize_execution_acceptance_drops_auto_report_criteria() -> None:
     )
 
 
-
 def test_normalize_execution_acceptance_drops_observation_report_metadata() -> None:
     seed = _seed(
         "`hello_auto.py` exists.",
@@ -78,6 +77,7 @@ def test_normalize_execution_acceptance_drops_observation_report_metadata() -> N
         "`tests/test_hello_auto.py` exists.",
         "The targeted test command `uv run pytest tests/test_hello_auto.py` passes.",
     )
+
 
 def test_normalize_execution_acceptance_keeps_original_when_filter_would_empty() -> None:
     seed = _seed("Final report includes auto session id and seed id.")

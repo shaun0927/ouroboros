@@ -280,7 +280,6 @@ def test_structured_auto_goal_filters_report_only_success_criteria() -> None:
     assert "uv run pytest tests/test_hello_auto.py" in preferences["acceptance_criteria"]
 
 
-
 def test_structured_auto_goal_filters_observation_status_reporting_criteria() -> None:
     goal = """
 Goal:
@@ -308,6 +307,7 @@ If `ouroboros_auto` is unavailable or interpreted as normal text, stop and repor
     )
     assert "Previous last_question" in preferences["failure_modes"]
     assert "Manual fallback used: no." in preferences["failure_modes"]
+
 
 def test_structured_auto_goal_preserves_non_allowlisted_execution_criteria() -> None:
     goal = """
