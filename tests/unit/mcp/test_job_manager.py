@@ -365,6 +365,81 @@ class TestJobManager:
             await _cancel_manager_tasks(manager)
             await store.close()
 
+    async def test_progress_accounting_failure_keeps_runner_tracked_during_cancel_cleanup(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+
+        try:
+            cleanup_started = asyncio.Event()
+            cleanup_release = asyncio.Event()
+
+            async def _runner() -> MCPToolResult:
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    cleanup_started.set()
+                    await cleanup_release.wait()
+                    raise
+                raise AssertionError("runner should only exit through cancellation")
+
+            started = await manager.start_job(
+                job_type="execute_seed",
+                initial_message="queued",
+                runner=_runner(),
+                links=JobLinks(session_id="orch_cleanup", execution_id="exec_cleanup"),
+            )
+            await store.append(
+                BaseEvent(
+                    type="workflow.progress.updated",
+                    aggregate_type="execution",
+                    aggregate_id="exec_cleanup",
+                    data={
+                        "session_id": "orch_cleanup",
+                        "completed_count": 0,
+                        "total_count": 1,
+                        "current_phase": "Deliver",
+                    },
+                )
+            )
+            await store.append(
+                BaseEvent(
+                    type="execution.session.completed",
+                    aggregate_type="execution",
+                    aggregate_id="exec_cleanup_ac_1",
+                    data={
+                        "execution_id": "exec_cleanup",
+                        "session_id": "child_1",
+                        "session_scope_id": "exec_cleanup_ac_1",
+                        "success": True,
+                    },
+                )
+            )
+            await store.append(
+                BaseEvent(
+                    type="execution.terminal",
+                    aggregate_type="execution",
+                    aggregate_id="exec_cleanup",
+                    data={"session_id": "orch_cleanup", "status": "failed"},
+                )
+            )
+
+            await asyncio.wait_for(cleanup_started.wait(), timeout=2.0)
+
+            assert started.job_id in manager._runner_tasks
+
+            cleanup_release.set()
+            snapshot = await _wait_for_job_status(
+                manager, started.job_id, JobStatus.FAILED, timeout=2.0
+            )
+
+            assert snapshot.result_meta["failed_from_progress_accounting_stall"] is True
+        finally:
+            cleanup_release.set()
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
     async def test_snapshot_recovers_progress_accounting_failed_terminal_after_restart(
         self, tmp_path
     ) -> None:
