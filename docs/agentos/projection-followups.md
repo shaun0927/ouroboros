@@ -4,6 +4,12 @@ This document records the remaining #946 follow-up lanes after the v1 projection
 records, EventStore builder, MCP query surface, identity hardening, boundary doc,
 and RunSnapshot read model have landed.
 
+It is a non-authoritative queue companion to #961 and
+`docs/agentos/projection-v1-scope.md`: if this note disagrees with either, #961
+and the canonical #946 issue/thread win. Keep future edits here bounded to
+sequencing already accepted by those sources; do not use it to create a new
+AgentOS surface or a second roadmap SSOT.
+
 ## Current baseline
 
 The #946 baseline is a read-only projection stack over persisted events:
