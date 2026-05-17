@@ -1507,13 +1507,9 @@ def _evidence_values_from_result(result: ACExecutionResult) -> tuple[set[str], s
     for message in result.messages:
         if not message.tool_name:
             continue
-        tool_input = message.data.get("tool_input", {})
-        if not isinstance(tool_input, dict):
-            continue
 
         if message.tool_name == "Bash":
-            command = tool_input.get("command")
-            if isinstance(command, str):
+            for command in _runtime_message_command_values(message):
                 _add_command_evidence(run_commands, command)
             continue
 

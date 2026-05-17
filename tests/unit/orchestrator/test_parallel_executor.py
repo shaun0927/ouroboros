@@ -277,6 +277,46 @@ def test_complete_sibling_acs_accepts_shell_wrapped_successful_test_command() ->
     ]
 
 
+def test_complete_sibling_acs_reuses_structured_command_aliases() -> None:
+    success_with_goose_command_shape = ACExecutionResult(
+        ac_index=0,
+        ac_content="Run the requested test command.",
+        success=True,
+        messages=(
+            AgentMessage(
+                type="tool_use",
+                content="run pytest",
+                tool_name="Bash",
+                data={"tool_input": {"cmd": ["uv", "run", "pytest", "tests/test_hello_auto.py"]}},
+            ),
+        ),
+    )
+    failed_run_command = ACExecutionResult(
+        ac_index=1,
+        ac_content="Run the exact command `uv run pytest tests/test_hello_auto.py`.",
+        success=False,
+        error="worker did not update this AC separately",
+        outcome=ACExecutionOutcome.FAILED,
+    )
+
+    completed_count, level_success, level_failed, results = _complete_sibling_acs_from_evidence(
+        level_results=[success_with_goose_command_shape, failed_run_command],
+        ac_statuses={0: "completed", 1: "failed"},
+        failed_indices={1},
+        completed_count=1,
+        level_success=1,
+        level_failed=1,
+    )
+
+    assert completed_count == 2
+    assert level_success == 2
+    assert level_failed == 0
+    assert [result.outcome for result in results] == [
+        ACExecutionOutcome.SUCCEEDED,
+        ACExecutionOutcome.SATISFIED_EXTERNALLY,
+    ]
+
+
 def test_complete_sibling_acs_does_not_rewrite_blocked_results() -> None:
     success = ACExecutionResult(
         ac_index=0,
