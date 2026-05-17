@@ -94,7 +94,7 @@ class JobManager:
         self._tasks: dict[str, asyncio.Task[Any]] = {}
         self._runner_tasks: dict[str, asyncio.Task[Any]] = {}
         self._monitors: dict[str, asyncio.Task[None]] = {}
-        self._workflow_completed_results: dict[str, str] = {}
+        self._execution_completed_results: dict[str, str] = {}
         self._initialized = False
         self._known_job_ids: set[str] = set()
         self._reserved_job_ids: set[str] = set()
@@ -202,10 +202,10 @@ class JobManager:
                     await runner
                 except asyncio.CancelledError:
                     pass
-            workflow_result = self._workflow_completed_results.get(job_id)
+            workflow_result = self._execution_completed_results.get(job_id)
             snapshot = await self.get_snapshot(job_id)
             if workflow_result is not None and snapshot.status != JobStatus.CANCEL_REQUESTED:
-                await self._append_workflow_completed_event(job_id, workflow_result)
+                await self._append_execution_completed_event(job_id, workflow_result)
                 return
             await self._append_event(
                 "mcp.job.cancelled",
@@ -228,9 +228,9 @@ class JobManager:
             )
         else:
             snapshot = await self.get_snapshot(job_id)
-            workflow_result = self._workflow_completed_results.get(job_id)
+            workflow_result = self._execution_completed_results.get(job_id)
             if workflow_result is not None and snapshot.status != JobStatus.CANCEL_REQUESTED:
-                await self._append_workflow_completed_event(job_id, workflow_result)
+                await self._append_execution_completed_event(job_id, workflow_result)
                 return
             terminal_type = "mcp.job.completed"
             terminal_status = JobStatus.COMPLETED
@@ -269,7 +269,7 @@ class JobManager:
         finally:
             self._tasks.pop(job_id, None)
             self._runner_tasks.pop(job_id, None)
-            self._workflow_completed_results.pop(job_id, None)
+            self._execution_completed_results.pop(job_id, None)
             monitor = self._monitors.pop(job_id, None)
             if monitor is not None:
                 monitor.cancel()
@@ -291,9 +291,9 @@ class JobManager:
                 return
 
             if snapshot.status != JobStatus.CANCEL_REQUESTED:
-                completed_result = await self._derive_completed_workflow_result(snapshot)
+                completed_result = await self._derive_completed_execution_result(snapshot)
                 if completed_result is not None:
-                    self._workflow_completed_results[job_id] = completed_result
+                    self._execution_completed_results[job_id] = completed_result
                     runner = self._runner_tasks.get(job_id)
                     if runner is not None and not runner.done():
                         runner.cancel()
@@ -311,8 +311,8 @@ class JobManager:
             else:
                 interval = min(interval * 1.5, 5.0)  # Backoff up to 5s
 
-    async def _append_workflow_completed_event(self, job_id: str, result_text: str) -> None:
-        """Persist runner-owned completion derived from workflow progress evidence."""
+    async def _append_execution_completed_event(self, job_id: str, result_text: str) -> None:
+        """Persist runner-owned completion derived from terminal execution evidence."""
         await self._append_event(
             "mcp.job.completed",
             job_id,
@@ -320,36 +320,46 @@ class JobManager:
                 "status": JobStatus.COMPLETED.value,
                 "message": "Job complete",
                 "result_text": result_text,
-                "result_meta": {"completed_from_workflow_progress": True},
+                "result_meta": {"completed_from_execution_terminal": True},
                 "is_error": False,
             },
         )
 
-    async def _derive_completed_workflow_result(self, snapshot: JobSnapshot) -> str | None:
-        """Return a terminal result when linked workflow progress proves completion.
+    async def _derive_completed_execution_result(self, snapshot: JobSnapshot) -> str | None:
+        """Return a terminal result when linked execution state proves completion.
 
         Background execution runners normally append the terminal job event when
-        the runtime exits. Some runtimes can satisfy every acceptance criterion
-        yet keep the process open; in that case the execution stream's workflow
-        progress is the authoritative completion evidence for the job surface.
+        the MCP handler returns. If the execution stream has already emitted its
+        source-of-truth ``execution.terminal`` completion but the handler remains
+        open, the job can finish from that terminal execution evidence.
+        ``workflow.progress.updated`` remains observational and is used only to
+        enrich the result text.
         """
         if not snapshot.links.execution_id:
             return None
+        terminal_events = await self._event_store.query_events(
+            aggregate_id=snapshot.links.execution_id,
+            event_type="execution.terminal",
+            limit=1,
+        )
+        if not terminal_events:
+            return None
+        terminal_data = terminal_events[0].data
+        if terminal_data.get("status") != "completed":
+            return None
+
         workflow_events = await self._event_store.query_events(
             aggregate_id=snapshot.links.execution_id,
             event_type="workflow.progress.updated",
             limit=1,
         )
-        if not workflow_events:
-            return None
-        data = workflow_events[0].data
-        completed = data.get("completed_count")
-        total = data.get("total_count")
-        if not (isinstance(completed, int) and isinstance(total, int)):
-            return None
-        if total <= 0 or completed < total:
-            return None
-        return f"Workflow complete: {completed}/{total} ACs completed"
+        if workflow_events:
+            data = workflow_events[0].data
+            completed = data.get("completed_count")
+            total = data.get("total_count")
+            if isinstance(completed, int) and isinstance(total, int) and total > 0:
+                return f"Execution complete: {completed}/{total} ACs completed"
+        return "Execution complete"
 
     async def _derive_status_message(self, snapshot: JobSnapshot) -> str | None:
         """Summarize linked execution or lineage progress."""

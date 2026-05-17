@@ -132,7 +132,9 @@ class TestJobManager:
         finally:
             await store.close()
 
-    async def test_monitor_completes_job_when_workflow_progress_is_complete(self, tmp_path) -> None:
+    async def test_monitor_completes_job_when_execution_terminal_is_complete(
+        self, tmp_path
+    ) -> None:
         store = _build_store(tmp_path)
         manager = JobManager(store)
 
@@ -164,13 +166,21 @@ class TestJobManager:
                     },
                 )
             )
+            await store.append(
+                BaseEvent(
+                    type="execution.terminal",
+                    aggregate_type="execution",
+                    aggregate_id="exec_complete",
+                    data={"session_id": "orch_complete", "status": "completed"},
+                )
+            )
 
             snapshot = await _wait_for_job_status(
                 manager, started.job_id, JobStatus.COMPLETED, timeout=2.0
             )
 
-            assert snapshot.result_text == "Workflow complete: 2/2 ACs completed"
-            assert snapshot.result_meta["completed_from_workflow_progress"] is True
+            assert snapshot.result_text == "Execution complete: 2/2 ACs completed"
+            assert snapshot.result_meta["completed_from_execution_terminal"] is True
             events, _ = await store.get_events_after("job", started.job_id, last_row_id=0)
             terminal_events = [
                 event
@@ -189,7 +199,7 @@ class TestJobManager:
             await _cancel_manager_tasks(manager)
             await store.close()
 
-    async def test_cancel_requested_wins_over_complete_workflow_progress(self, tmp_path) -> None:
+    async def test_cancel_requested_wins_over_complete_execution_terminal(self, tmp_path) -> None:
         store = _build_store(tmp_path)
         manager = JobManager(store)
 
@@ -211,14 +221,10 @@ class TestJobManager:
             )
             await store.append(
                 BaseEvent(
-                    type="workflow.progress.updated",
+                    type="execution.terminal",
                     aggregate_type="execution",
                     aggregate_id="exec_cancel",
-                    data={
-                        "completed_count": 2,
-                        "total_count": 2,
-                        "current_phase": "Deliver",
-                    },
+                    data={"session_id": "orch_cancel", "status": "completed"},
                 )
             )
 
@@ -229,13 +235,13 @@ class TestJobManager:
             snapshot = await manager.get_snapshot(started.job_id)
 
             assert snapshot.status in {JobStatus.CANCEL_REQUESTED, JobStatus.CANCELLED}
-            assert snapshot.result_meta.get("completed_from_workflow_progress") is not True
+            assert snapshot.result_meta.get("completed_from_execution_terminal") is not True
         finally:
             stop.set()
             await _cancel_manager_tasks(manager)
             await store.close()
 
-    async def test_workflow_completion_waits_for_runner_cancellation_before_terminal_event(
+    async def test_execution_completion_waits_for_runner_cancellation_before_job_terminal_event(
         self, tmp_path
     ) -> None:
         store = _build_store(tmp_path)
@@ -268,6 +274,14 @@ class TestJobManager:
                     data={"completed_count": 1, "total_count": 1},
                 )
             )
+            await store.append(
+                BaseEvent(
+                    type="execution.terminal",
+                    aggregate_type="execution",
+                    aggregate_id="exec_wait",
+                    data={"session_id": "orch_wait", "status": "completed"},
+                )
+            )
 
             await asyncio.wait_for(cancel_seen.wait(), timeout=2)
             snapshot = await manager.get_snapshot(started.job_id)
@@ -278,7 +292,7 @@ class TestJobManager:
                 manager, started.job_id, JobStatus.COMPLETED, timeout=2.0
             )
 
-            assert snapshot.result_text == "Workflow complete: 1/1 ACs completed"
+            assert snapshot.result_text == "Execution complete: 1/1 ACs completed"
             events, _ = await store.get_events_after("job", started.job_id, last_row_id=0)
             assert [
                 event.type
@@ -290,7 +304,7 @@ class TestJobManager:
             await _cancel_manager_tasks(manager)
             await store.close()
 
-    async def test_cancel_requested_wins_after_workflow_completion_is_staged(
+    async def test_cancel_requested_wins_after_execution_completion_is_staged(
         self, tmp_path
     ) -> None:
         store = _build_store(tmp_path)
@@ -317,10 +331,10 @@ class TestJobManager:
             )
             await store.append(
                 BaseEvent(
-                    type="workflow.progress.updated",
+                    type="execution.terminal",
                     aggregate_type="execution",
                     aggregate_id="exec_staged_cancel",
-                    data={"completed_count": 1, "total_count": 1},
+                    data={"session_id": "orch_staged_cancel", "status": "completed"},
                 )
             )
 
@@ -334,7 +348,7 @@ class TestJobManager:
                 manager, started.job_id, JobStatus.CANCELLED, timeout=2.0
             )
 
-            assert snapshot.result_meta.get("completed_from_workflow_progress") is not True
+            assert snapshot.result_meta.get("completed_from_execution_terminal") is not True
             events, _ = await store.get_events_after("job", started.job_id, last_row_id=0)
             terminal_events = [
                 event.type
@@ -350,6 +364,44 @@ class TestJobManager:
             assert terminal_events == ["mcp.job.cancelled"]
         finally:
             release.set()
+            await _cancel_manager_tasks(manager)
+            await store.close()
+
+    async def test_complete_workflow_progress_without_terminal_event_does_not_complete_job(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+
+        try:
+            stop = asyncio.Event()
+
+            async def _runner() -> MCPToolResult:
+                await stop.wait()
+                return MCPToolResult()
+
+            started = await manager.start_job(
+                job_type="execute_seed",
+                initial_message="queued",
+                runner=_runner(),
+                links=JobLinks(session_id="orch_progress_only", execution_id="exec_progress_only"),
+            )
+            await store.append(
+                BaseEvent(
+                    type="workflow.progress.updated",
+                    aggregate_type="execution",
+                    aggregate_id="exec_progress_only",
+                    data={"completed_count": 1, "total_count": 1},
+                )
+            )
+
+            await asyncio.sleep(1.2)
+            snapshot = await manager.get_snapshot(started.job_id)
+
+            assert snapshot.is_terminal is False
+            assert snapshot.result_meta.get("completed_from_execution_terminal") is not True
+        finally:
+            stop.set()
             await _cancel_manager_tasks(manager)
             await store.close()
 
