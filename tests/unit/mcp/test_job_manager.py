@@ -365,6 +365,74 @@ class TestJobManager:
             await _cancel_manager_tasks(manager)
             await store.close()
 
+    async def test_snapshot_recovers_progress_accounting_failed_terminal_after_restart(
+        self, tmp_path
+    ) -> None:
+        store = _build_store(tmp_path)
+        writer = JobManager(store)
+
+        try:
+            await writer._append_event(
+                "mcp.job.created",
+                "job_recover_failed",
+                {
+                    "job_type": "execute_seed",
+                    "status": JobStatus.RUNNING.value,
+                    "message": "Running execute_seed",
+                    "links": {
+                        "session_id": "orch_recover_failed",
+                        "execution_id": "exec_recover_failed",
+                        "lineage_id": None,
+                    },
+                },
+            )
+            await store.append(
+                BaseEvent(
+                    type="workflow.progress.updated",
+                    aggregate_type="execution",
+                    aggregate_id="exec_recover_failed",
+                    data={
+                        "session_id": "orch_recover_failed",
+                        "completed_count": 0,
+                        "total_count": 1,
+                        "current_phase": "Deliver",
+                    },
+                )
+            )
+            await store.append(
+                BaseEvent(
+                    type="execution.session.completed",
+                    aggregate_type="execution",
+                    aggregate_id="exec_recover_failed_ac_1",
+                    data={
+                        "execution_id": "exec_recover_failed",
+                        "session_id": "child_1",
+                        "session_scope_id": "exec_recover_failed_ac_1",
+                        "success": True,
+                    },
+                )
+            )
+            await store.append(
+                BaseEvent(
+                    type="execution.terminal",
+                    aggregate_type="execution",
+                    aggregate_id="exec_recover_failed",
+                    data={"session_id": "orch_recover_failed", "status": "failed"},
+                )
+            )
+
+            restarted = JobManager(store)
+
+            snapshot = await restarted.get_snapshot("job_recover_failed")
+
+            assert snapshot.status is JobStatus.FAILED
+            assert snapshot.result_meta["failed_from_progress_accounting_stall"] is True
+            assert "workflow progress accounting stalled" in (snapshot.error or "")
+            events, _ = await store.get_events_after("job", "job_recover_failed", last_row_id=0)
+            assert [event.type for event in events] == ["mcp.job.created", "mcp.job.failed"]
+        finally:
+            await store.close()
+
     async def test_progress_accounting_blocker_waits_for_active_ac_sessions_after_terminal(
         self, tmp_path
     ) -> None:
