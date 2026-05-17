@@ -250,6 +250,23 @@ def _effective_evidence_schema_for_ac(
     return EvidenceSchema(required=required, rejected_if=rejected_if)
 
 
+def _out_of_scope_evidence_fields_for_ac(
+    profile: ExecutionProfile,
+    ac_content: str,
+    record: EvidenceRecord | None,
+) -> tuple[str, ...]:
+    """Return non-empty evidence fields excluded by the AC-specific schema."""
+    if record is None:
+        return ()
+    effective_schema = _effective_evidence_schema_for_ac(profile, ac_content)
+    required_fields = set(effective_schema.required)
+    return tuple(
+        field
+        for field in profile.evidence_schema.required
+        if field not in required_fields and _flatten_evidence_values(record.get(field))
+    )
+
+
 def _profile_with_evidence_schema(
     profile: ExecutionProfile,
     schema: EvidenceSchema,
@@ -4922,11 +4939,6 @@ Files present:
         effective_schema = _effective_evidence_schema_for_ac(self._execution_profile, ac_content)
         required_fields = set(effective_schema.required)
         fields_to_verify = list(effective_schema.required)
-        for field_name in self._execution_profile.evidence_schema.required:
-            if field_name not in required_fields and _flatten_evidence_values(
-                typed_evidence.get(field_name)
-            ):
-                fields_to_verify.append(field_name)
 
         for field_name in fields_to_verify:
             values = tuple(_flatten_evidence_values(typed_evidence.get(field_name)))
@@ -5016,6 +5028,13 @@ Files present:
             data["verifier_failure_class"] = verifier_verdict.failure_class
         if typed_evidence is not None:
             data["typed_evidence_fields"] = sorted(typed_evidence.data)
+            data["ignored_out_of_scope_evidence_fields"] = list(
+                _out_of_scope_evidence_fields_for_ac(
+                    self._execution_profile,
+                    ac_content,
+                    typed_evidence,
+                )
+            )
         if typed_validation is not None:
             data["missing_fields"] = list(typed_validation.missing_fields)
             data["rejected_by"] = list(typed_validation.rejected_by)

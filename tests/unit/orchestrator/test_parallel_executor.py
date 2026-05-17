@@ -1830,8 +1830,10 @@ class TestParallelACExecutor:
         assert evidence_event.data["verifier_passed"] is True
 
     @pytest.mark.asyncio
-    async def test_fat_harness_docs_only_ac_rejects_prior_test_id_bleed(self, tmp_path) -> None:
-        """Docs-only ACs may omit tests, but non-empty stale tests_passed is still checked."""
+    async def test_fat_harness_docs_only_ac_ignores_out_of_scope_test_id_bleed(
+        self, tmp_path
+    ) -> None:
+        """Docs-only ACs ignore extra tests_passed instead of failing required docs evidence."""
         readme = tmp_path / "README.md"
         readme.write_text("# String utils\n", encoding="utf-8")
 
@@ -1886,16 +1888,16 @@ class TestParallelACExecutor:
             start_time=datetime.now(UTC),
         )
 
-        assert result.success is False
-        assert result.error is not None
-        assert "tests_passed: test_slugify.py::test_slugify" in result.error
+        assert result.success is True
+        assert result.error is None
         evidence_event = next(
             event
             for event in appended_events
             if event.type == "execution.ac.typed_evidence.observed"
         )
         assert evidence_event.data["required_fields"] == ["files_touched", "commands_run"]
-        assert evidence_event.data["verifier_failure_class"] == "FABRICATION_SUSPECTED"
+        assert evidence_event.data["ignored_out_of_scope_evidence_fields"] == ["tests_passed"]
+        assert evidence_event.data["verifier_passed"] is True
 
     @pytest.mark.asyncio
     async def test_fat_harness_docs_only_ac_passes_consistent_profile_to_injected_verifier(
