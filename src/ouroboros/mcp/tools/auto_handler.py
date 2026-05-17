@@ -1520,7 +1520,9 @@ def _derive_goal_user_preferences(goal: str) -> dict[str, str]:
 
     success = _section_text(sections, "success criteria", "acceptance criteria")
     if success:
-        preferences["acceptance_criteria"] = success
+        execution_success = _execution_success_criteria(success)
+        if execution_success:
+            preferences["acceptance_criteria"] = execution_success
 
     outputs = _section_text(sections, "outputs", "deliverables")
     if outputs:
@@ -1597,6 +1599,56 @@ def _section_text(sections: dict[str, list[str]], *names: str) -> str:
     for name in names:
         values.extend(sections.get(" ".join(name.replace("_", " ").casefold().split()), ()))
     return "\n".join(dict.fromkeys(value for value in values if value.strip()))
+
+
+def _execution_success_criteria(text: str) -> str:
+    lines = [
+        line
+        for line in (_clean_prompt_line(raw) for raw in text.splitlines())
+        if line
+        and _looks_like_execution_criterion(line)
+        and not _looks_like_auto_report_criterion(line)
+    ]
+    return "\n".join(dict.fromkeys(lines))
+
+
+def _looks_like_execution_criterion(line: str) -> bool:
+    lowered = line.casefold()
+    return any(
+        needle in lowered
+        for needle in (
+            ".py",
+            "changed files",
+            "create",
+            "exists",
+            "hello_auto",
+            "pytest",
+            "return",
+            "test",
+            "uv run",
+        )
+    )
+
+
+def _looks_like_auto_report_criterion(line: str) -> bool:
+    lowered = line.casefold()
+    return any(
+        needle in lowered
+        for needle in (
+            "auto session id",
+            "blocker",
+            "dispatch",
+            "final report",
+            "interview closure",
+            "last_question",
+            "manual fallback",
+            "ooo auto",
+            "ouroboros_auto",
+            "seed grade",
+            "seed id",
+            "seed path",
+        )
+    )
 
 
 def _matching_lines(text: str, needles: tuple[str, ...]) -> list[str]:

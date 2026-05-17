@@ -226,6 +226,8 @@ def test_structured_auto_goal_seeds_required_ledger_sections() -> None:
     assert "runtime_context" in summary["evidence_backed_sections"]
     assert "constraints" in summary["evidence_backed_sections"]
     assert "non_goals" in summary["evidence_backed_sections"]
+    assert "Final report" not in preferences["acceptance_criteria"]
+    assert "`hello_auto.py` exists" in preferences["acceptance_criteria"]
 
 
 def test_structured_auto_goal_does_not_preconfirm_risky_preference() -> None:
@@ -246,7 +248,6 @@ Success criteria:
     preferences = _derive_goal_user_preferences(risky_goal)
 
     assert "outputs" in preferences
-    assert "acceptance_criteria" in preferences
     ledger = _seed_initial_ledger_from_user_preferences(risky_goal, preferences)
 
     assert "outputs" not in ledger.summary()["evidence_backed_sections"]
@@ -267,6 +268,15 @@ Implementation:
 
     assert "outputs" not in preferences
     assert "inputs" not in preferences
+
+
+def test_structured_auto_goal_filters_report_only_success_criteria() -> None:
+    preferences = _derive_goal_user_preferences(_OBSERVATION_GOAL)
+
+    assert "acceptance_criteria" in preferences
+    assert "manual fallback" not in preferences["acceptance_criteria"].casefold()
+    assert "seed id" not in preferences["acceptance_criteria"].casefold()
+    assert "uv run pytest tests/test_hello_auto.py" in preferences["acceptance_criteria"]
 
 
 def test_resume_preference_override_reseeds_stale_preconfirmed_ledger() -> None:

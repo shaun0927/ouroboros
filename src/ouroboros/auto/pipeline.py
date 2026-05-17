@@ -15,6 +15,7 @@ from ouroboros.auto.adapters import EvaluateResult, LateralResult
 from ouroboros.auto.answerer import AutoAnswerer
 from ouroboros.auto.blocker_attribution import record_authoring_backend
 from ouroboros.auto.domain_profile import DEFAULT_REGISTRY
+from ouroboros.auto.execution_acceptance import normalize_execution_acceptance
 from ouroboros.auto.grading import GradeGate, deterministic_floor
 from ouroboros.auto.handoff_contract import (
     IDEMPOTENCY_KEY_FIELD,
@@ -581,6 +582,7 @@ class AutoPipeline:
                                 ),
                             }
                         )
+                    seed = normalize_execution_acceptance(seed)
                     state.seed_id = seed.metadata.seed_id
                     state.seed_artifact = seed.to_dict()
                     state.seed_origin = SeedOrigin.AUTO_PIPELINE
@@ -745,6 +747,7 @@ class AutoPipeline:
                     asyncio.to_thread(repairer.converge, seed, **converge_kwargs),
                     timeout=bounded_repair_timeout,
                 )
+                seed = normalize_execution_acceptance(seed)
             except TimeoutError:
                 cancel_event.set()
                 if self._enforce_deadline(state):
