@@ -75,10 +75,12 @@ def normalize_observation_execution_criteria(
     passthrough: list[str] = []
     for criterion in criteria:
         stripped = criterion.strip()
-        if not stripped or is_auto_reporting_acceptance_criterion(stripped):
+        if not stripped:
             continue
         lowered = stripped.casefold()
-        if _is_observation_report_only_line(lowered):
+        if is_auto_reporting_acceptance_criterion(stripped) or _is_observation_report_only_line(
+            lowered
+        ):
             continue
         if "uv run pytest" in lowered and "tests/test_hello_auto.py" in lowered:
             keep_pytest = True
@@ -107,9 +109,15 @@ def normalize_observation_execution_criteria(
 
 
 def is_auto_reporting_acceptance_criterion(criterion: str) -> bool:
-    """Return true for known auto wrapper/report-only criteria."""
-    key = _criterion_key(criterion)
-    return key in _AUTO_WRAPPER_CRITERIA or _is_observation_report_only_line(key)
+    """Return true only for exact known auto wrapper/report-only criteria.
+
+    Broad observation-only report markers are intentionally handled behind the
+    hello_auto observation context gate in ``normalize_observation_execution_criteria``.
+    Keeping this standalone helper exact prevents unrelated product requirements
+    such as execution-job or progress-accounting features from being classified
+    as reporting metadata by a future caller that lacks the observation guard.
+    """
+    return _criterion_key(criterion) in _AUTO_WRAPPER_CRITERIA
 
 
 def has_auto_wrapper_context(text: str) -> bool:

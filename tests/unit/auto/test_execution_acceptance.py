@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from ouroboros.auto.execution_acceptance import normalize_execution_acceptance
+from ouroboros.auto.execution_acceptance import (
+    is_auto_reporting_acceptance_criterion,
+    normalize_execution_acceptance,
+)
 from ouroboros.core.seed import (
     EvaluationPrinciple,
     ExitCondition,
@@ -101,6 +104,16 @@ def test_normalize_execution_acceptance_canonicalizes_latest_observation_prompt(
         "`hello_auto.py` defines `hello_auto() -> str` returning exactly `hello from ooo auto`.",
         "`tests/test_hello_auto.py` imports `hello_auto` and asserts the exact return value.",
         "The exact command `uv run pytest tests/test_hello_auto.py` passes.",
+    )
+
+
+def test_reporting_classifier_keeps_broad_observation_markers_context_scoped() -> None:
+    assert is_auto_reporting_acceptance_criterion("Manual fallback is not used.")
+    assert not is_auto_reporting_acceptance_criterion(
+        "The execution job reaches a terminal status without manual cancellation."
+    )
+    assert not is_auto_reporting_acceptance_criterion(
+        "Whether progress accounting stalled at AC 0/N is reported."
     )
 
 
