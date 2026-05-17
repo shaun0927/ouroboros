@@ -448,6 +448,7 @@ class TestOrchestratorRunner:
         assert result.is_ok
         assert result.value.session_id == tracker.session_id
         assert result.value.progress["fat_harness_mode"] is False
+        assert result.value.messages_processed == 0
         create_session.assert_awaited_once_with(
             execution_id="exec_prepared",
             seed_id=sample_seed.metadata.seed_id,
@@ -469,10 +470,12 @@ class TestOrchestratorRunner:
         )
         create_session = AsyncMock(return_value=Result.ok(tracker))
         track_progress = AsyncMock(return_value=Result.err(ConfigError("store unavailable")))
+        mark_failed = AsyncMock(return_value=Result.ok(None))
 
         with (
             patch.object(runner._session_repo, "create_session", create_session),
             patch.object(runner._session_repo, "track_progress", track_progress),
+            patch.object(runner._session_repo, "mark_failed", mark_failed),
         ):
             result = await runner.prepare_session(
                 sample_seed,
@@ -482,7 +485,19 @@ class TestOrchestratorRunner:
 
         assert result.is_err
         assert "initial session contract" in result.error.message
-        track_progress.assert_awaited_once_with("orch_prepared", {"fat_harness_mode": False})
+        track_progress.assert_awaited_once_with(
+            "orch_prepared",
+            {"fat_harness_mode": False, "messages_processed": 0},
+        )
+        mark_failed.assert_awaited_once_with(
+            "orch_prepared",
+            "Failed to persist initial session contract",
+            {
+                "execution_id": "exec_prepared",
+                "fat_harness_mode": False,
+                "cause": "store unavailable",
+            },
+        )
 
     @pytest.mark.asyncio
     async def test_execute_seed_delegates_to_precreated_session(

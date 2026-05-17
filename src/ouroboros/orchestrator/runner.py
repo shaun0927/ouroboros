@@ -2046,7 +2046,10 @@ class OrchestratorRunner:
             )
 
         tracker = session_result.value
-        initial_progress: dict[str, Any] = {"fat_harness_mode": self._fat_harness_mode}
+        initial_progress: dict[str, Any] = {
+            "fat_harness_mode": self._fat_harness_mode,
+            "messages_processed": 0,
+        }
         if self._task_workspace is not None:
             initial_progress["workspace"] = self._task_workspace.to_progress_dict()
         progress_result = await self._session_repo.track_progress(
@@ -2054,17 +2057,30 @@ class OrchestratorRunner:
             initial_progress,
         )
         if progress_result.is_err:
+            fail_result = await self._session_repo.mark_failed(
+                tracker.session_id,
+                "Failed to persist initial session contract",
+                {
+                    "execution_id": tracker.execution_id,
+                    "fat_harness_mode": self._fat_harness_mode,
+                    "cause": str(progress_result.error),
+                },
+            )
             if self._task_workspace is not None:
                 release_lock(self._task_workspace.lock_path)
+
+            details: dict[str, Any] = {
+                "session_id": tracker.session_id,
+                "execution_id": tracker.execution_id,
+                "fat_harness_mode": self._fat_harness_mode,
+                "cause": str(progress_result.error),
+            }
+            if fail_result.is_err:
+                details["terminal_mark_error"] = str(fail_result.error)
             return Result.err(
                 OrchestratorError(
                     message="Failed to persist initial session contract",
-                    details={
-                        "session_id": tracker.session_id,
-                        "execution_id": tracker.execution_id,
-                        "fat_harness_mode": self._fat_harness_mode,
-                        "cause": str(progress_result.error),
-                    },
+                    details=details,
                 )
             )
 
