@@ -198,10 +198,16 @@ class ProjectionBuilder:
         started_at = self._first_event_at or self._idle_started_at
         ended_at = self._last_event_at
 
+        step_ids_by_slot_key = {
+            slot_key: _stable_step_id(source_key, *_slot_parts(slot_key))
+            for slot_key in self._steps
+        }
+        valid_step_ids = frozenset(step_ids_by_slot_key.values())
         artifacts = tuple(
             artifact
             for event in self._artifact_events
             if (artifact := _artifact_from_event(event, source_key=source_key)) is not None
+            and artifact.step_id in valid_step_ids
         )
         artifact_ids_by_step_id: dict[str, list[str]] = {}
         for artifact in artifacts:
@@ -210,14 +216,10 @@ class ProjectionBuilder:
         steps_for_stage = tuple(
             _rewrite_step_identity(
                 step,
-                step_id=_stable_step_id(source_key, *_slot_parts(slot_key)),
+                step_id=step_ids_by_slot_key[slot_key],
                 run_id=run_id,
                 stage_id=stage_id,
-                artifact_ids=tuple(
-                    artifact_ids_by_step_id.get(
-                        _stable_step_id(source_key, *_slot_parts(slot_key)), ()
-                    )
-                ),
+                artifact_ids=tuple(artifact_ids_by_step_id.get(step_ids_by_slot_key[slot_key], ())),
             )
             for slot_key, step in self._steps.items()
         )
@@ -230,7 +232,6 @@ class ProjectionBuilder:
                     event,
                     source_key=source_key,
                     run_id=run_id,
-                    artifacts=artifacts,
                 )
             )
             is not None
@@ -605,7 +606,6 @@ def _verdict_from_event(
     *,
     source_key: str,
     run_id: str,
-    artifacts: tuple[ArtifactRecord, ...],
 ) -> VerdictRecord | None:
     if not isinstance(event.data, dict):
         return None
@@ -618,11 +618,7 @@ def _verdict_from_event(
     ac_id = _optional_str(event.data.get("ac_id")) if scope == "ac" else None
     if scope == "ac" and ac_id is None:
         return None
-    artifact_ids = tuple(
-        artifact.artifact_id
-        for artifact in artifacts
-        if artifact.artifact_id in _string_tuple(event.data.get("evidence_artifact_ids"))
-    )
+    artifact_ids = _string_tuple(event.data.get("evidence_artifact_ids"))
     return VerdictRecord(
         verdict_id=_optional_str(event.data.get("verdict_id"))
         or _stable_verdict_id(source_key, event.id),

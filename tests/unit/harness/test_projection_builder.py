@@ -505,6 +505,44 @@ class TestArtifactAndVerdictProjection:
         assert verdict.evidence_artifact_ids == ("artifact_tests",)
         assert verdict.rationale == "all checks passed"
 
+    def test_artifact_event_without_projected_step_is_dropped(self) -> None:
+        t0 = datetime.now(UTC)
+        event = BaseEvent(
+            id="evt_orphan_artifact",
+            type="harness.artifact.recorded",
+            timestamp=t0,
+            aggregate_type="execution",
+            aggregate_id="exec_1",
+            data={"call_id": "missing_call", "artifact_id": "artifact_orphan"},
+        )
+
+        result = build_projection([event], seed_id="seed_abc")
+
+        assert result.steps == ()
+        assert result.artifacts == ()
+
+    def test_verdict_preserves_missing_artifact_references(self) -> None:
+        t0 = datetime.now(UTC)
+        event = BaseEvent(
+            id="evt_verdict",
+            type="harness.verdict.recorded",
+            timestamp=t0,
+            aggregate_type="execution",
+            aggregate_id="exec_1",
+            data={
+                "verdict_id": "verdict_run",
+                "scope": "run",
+                "outcome": "pass",
+                "evidence_artifact_ids": ["missing_artifact"],
+            },
+        )
+
+        result = build_projection([event], seed_id="seed_abc")
+
+        assert len(result.verdicts) == 1
+        assert result.artifacts == ()
+        assert result.verdicts[0].evidence_artifact_ids == ("missing_artifact",)
+
     def test_ac_verdict_requires_ac_id(self) -> None:
         event = BaseEvent(
             id="evt_bad_ac_verdict",
