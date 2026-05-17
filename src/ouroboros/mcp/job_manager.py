@@ -452,10 +452,25 @@ class JobManager:
                         )
                         continue
                     self._monitor_terminalized_jobs.add(job_id)
-                    runner = self._runner_tasks.pop(job_id, None)
+                    runner = self._runner_tasks.get(job_id)
                     if runner is not None and not runner.done():
                         runner.cancel()
-                        runner.add_done_callback(_consume_task_result)
+                        try:
+                            await asyncio.wait_for(
+                                asyncio.shield(runner),
+                                timeout=_COMPLETED_EXECUTION_CANCEL_GRACE_SECONDS,
+                            )
+                        except TimeoutError:
+                            self._runner_tasks.pop(job_id, None)
+                            runner.add_done_callback(_consume_task_result)
+                        except asyncio.CancelledError:
+                            return
+                        except Exception:
+                            self._runner_tasks.pop(job_id, None)
+                        else:
+                            self._runner_tasks.pop(job_id, None)
+                    elif runner is not None:
+                        self._runner_tasks.pop(job_id, None)
                     job_task = self._tasks.pop(job_id, None)
                     if job_task is not None and not job_task.done():
                         job_task.cancel()
