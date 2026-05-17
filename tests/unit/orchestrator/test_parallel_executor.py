@@ -148,6 +148,8 @@ def test_validation_only_ac_drops_files_touched_requirement(ac_content: str) -> 
         "Without modifying any files, ensure tests cover invalid inputs.",
         "Verify the existing test_todo.py coverage without modifying any files. Run python -m unittest test_todo.py successfully.",
         "Document CLI usage in README.md and update tests for invalid inputs.",
+        "Update README.md with usage and run python -m unittest test_todo.py.",
+        "Document CLI usage in README.md and verify the test suite.",
         "Refactor the validator and verify unit tests pass.",
         "Change the runtime workflow and run pytest.",
         "Ensure tests cover invalid inputs.",

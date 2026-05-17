@@ -274,6 +274,32 @@ def _has_mixed_test_and_documentation_work(ac_content: str) -> bool:
     return False
 
 
+def _has_mixed_validation_and_documentation_work(ac_content: str) -> bool:
+    """Return True when one AC appears to combine docs work and test execution."""
+    for connector in re.finditer(
+        r"\b(?:and|then|while|plus)\b|,",
+        ac_content,
+        re.IGNORECASE,
+    ):
+        before = ac_content[: connector.start()]
+        after = ac_content[connector.end() :]
+        before_has_docs = bool(_DOC_ONLY_TARGET_RE.search(before))
+        after_has_docs = bool(_DOC_ONLY_TARGET_RE.search(after))
+        before_has_validation = bool(
+            _VALIDATION_ONLY_ACTION_RE.search(before)
+            and _VALIDATION_ONLY_TEST_SIGNAL_RE.search(before)
+        )
+        after_has_validation = bool(
+            _VALIDATION_ONLY_ACTION_RE.search(after)
+            and _VALIDATION_ONLY_TEST_SIGNAL_RE.search(after)
+        )
+        if after_has_docs and not before_has_docs and before_has_validation:
+            return True
+        if before_has_docs and not after_has_docs and after_has_validation:
+            return True
+    return False
+
+
 def _is_documentation_only_ac(ac_content: str) -> bool:
     """Return True when an AC asks only for documentation/README work.
 
@@ -290,6 +316,8 @@ def _is_documentation_only_ac(ac_content: str) -> bool:
     documents_test_reference = (
         has_docs_target and has_docs_action and bool(_DOCS_TEST_REFERENCE_RE.search(normalized))
     )
+    if documents_test_reference and _has_mixed_validation_and_documentation_work(normalized):
+        return False
     if _TEST_MUTATION_WORK_RE.search(normalized) and (
         not documents_test_reference or _has_mixed_test_and_documentation_work(normalized)
     ):
