@@ -59,6 +59,28 @@ def _step(
     )
 
 
+def _human_input_snapshot(
+    request_id: str = "hitl_approve",
+    *,
+    state: HumanInputState = HumanInputState.PENDING,
+    request_event_id: str = "evt_hitl_requested",
+    session_id: str = "session_1",
+    run_id: str | None = "run_1",
+    resume_target: str = "plan:resume",
+) -> HumanInputSnapshot:
+    return HumanInputSnapshot(
+        request_id=request_id,
+        state=state,
+        request_event_id=request_event_id,
+        updated_event_id=request_event_id,
+        created_at=datetime(2026, 5, 15, tzinfo=UTC),
+        updated_at=datetime(2026, 5, 15, tzinfo=UTC),
+        session_id=session_id,
+        run_id=run_id,
+        resume_target=resume_target,
+    )
+
+
 def test_running_snapshot_with_pending_work_is_safe_to_resume() -> None:
     completed = _step("step_done", ended=True, ok=True, artifact_ids=("artifact_1",))
     pending = _step("step_pending", ended=False, ok=None)
@@ -116,17 +138,7 @@ def test_human_escalation_verdict_is_waiting_but_not_safe_resume() -> None:
 
 
 def test_pending_hitl_request_is_exposed_in_run_snapshot_metadata() -> None:
-    pending = HumanInputSnapshot(
-        request_id="hitl_approve",
-        state=HumanInputState.PENDING,
-        request_event_id="evt_hitl_requested",
-        updated_event_id="evt_hitl_requested",
-        created_at=datetime(2026, 5, 15, tzinfo=UTC),
-        updated_at=datetime(2026, 5, 15, tzinfo=UTC),
-        session_id="session_1",
-        run_id="run_1",
-        resume_target="plan:resume",
-    )
+    pending = _human_input_snapshot()
 
     snapshot = build_run_snapshot(
         run=_run(),
@@ -143,22 +155,45 @@ def test_pending_hitl_request_is_exposed_in_run_snapshot_metadata() -> None:
 
 
 def test_foreign_pending_hitl_request_is_ignored_for_run_snapshot() -> None:
-    pending = HumanInputSnapshot(
-        request_id="hitl_other",
-        state=HumanInputState.PENDING,
+    pending = _human_input_snapshot(
+        "hitl_other",
         request_event_id="evt_other_hitl",
-        updated_event_id="evt_other_hitl",
-        created_at=datetime(2026, 5, 15, tzinfo=UTC),
-        updated_at=datetime(2026, 5, 15, tzinfo=UTC),
         session_id="session_other",
         run_id="run_other",
-        resume_target="plan:resume",
     )
 
     snapshot = build_run_snapshot(
         run=_run(),
         stages=[_stage()],
         pending_human_inputs=[pending],
+    )
+
+    assert snapshot.status is RunSnapshotStatus.UNKNOWN
+    assert "pending_human_input_request_ids" not in snapshot.metadata
+    assert snapshot.source_event_ids == ()
+
+
+def test_terminal_hitl_request_is_ignored_for_run_snapshot() -> None:
+    answered = _human_input_snapshot(state=HumanInputState.ANSWERED)
+
+    snapshot = build_run_snapshot(
+        run=_run(),
+        stages=[_stage()],
+        pending_human_inputs=[answered],
+    )
+
+    assert snapshot.status is RunSnapshotStatus.UNKNOWN
+    assert "pending_human_input_request_ids" not in snapshot.metadata
+    assert snapshot.source_event_ids == ()
+
+
+def test_session_scoped_hitl_request_is_not_attached_to_run_snapshot() -> None:
+    session_scoped = _human_input_snapshot(run_id=None)
+
+    snapshot = build_run_snapshot(
+        run=_run(),
+        stages=[_stage()],
+        pending_human_inputs=[session_scoped],
     )
 
     assert snapshot.status is RunSnapshotStatus.UNKNOWN

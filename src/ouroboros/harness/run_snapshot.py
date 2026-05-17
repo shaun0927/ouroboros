@@ -11,7 +11,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from types import MappingProxyType
 
-from ouroboros.core.hitl_state import HumanInputSnapshot
+from ouroboros.core.hitl_state import HumanInputSnapshot, HumanInputState
 from ouroboros.harness.projection import (
     ArtifactRecord,
     RunRecord,
@@ -45,8 +45,9 @@ def build_run_snapshot(
     stage_tuple = tuple(stages)
     step_tuple = tuple(steps)
     artifact_tuple = tuple(artifacts)
-    pending_human_input_tuple = tuple(
-        request for request in pending_human_inputs if request.run_id in {None, run.run_id}
+    pending_human_input_tuple = _pending_human_inputs_for_run(
+        pending_human_inputs,
+        run_id=run.run_id,
     )
     _validate_projection_bundle(
         run=run,
@@ -149,6 +150,16 @@ def build_run_snapshot(
         source_event_ids=derived_source_event_ids,
         recorded_at=recorded_at or datetime.now(UTC),
         metadata=MappingProxyType(metadata),
+    )
+
+
+def _pending_human_inputs_for_run(
+    pending_human_inputs: Iterable[HumanInputSnapshot], *, run_id: str
+) -> tuple[HumanInputSnapshot, ...]:
+    return tuple(
+        request
+        for request in pending_human_inputs
+        if request.state is HumanInputState.PENDING and request.run_id == run_id
     )
 
 
