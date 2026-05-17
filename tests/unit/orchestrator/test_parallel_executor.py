@@ -396,6 +396,48 @@ def test_complete_sibling_acs_rejects_compound_runtime_command_alias() -> None:
     ]
 
 
+def test_complete_sibling_acs_rejects_compound_typed_command_alias() -> None:
+    success_with_compound_typed_command = ACExecutionResult(
+        ac_index=0,
+        ac_content="Run the requested test command.",
+        success=True,
+        typed_evidence=EvidenceRecord(
+            data={
+                "tests_passed": [
+                    (
+                        "/bin/zsh -lc 'uv run pytest tests/test_hello_auto.py "
+                        "&& python scripts/postprocess.py'"
+                    )
+                ]
+            }
+        ),
+    )
+    failed_pytest = ACExecutionResult(
+        ac_index=1,
+        ac_content="The exact command `uv run pytest tests/test_hello_auto.py` passes.",
+        success=False,
+        error="worker did not update this AC separately",
+        outcome=ACExecutionOutcome.FAILED,
+    )
+
+    completed_count, level_success, level_failed, results = _complete_sibling_acs_from_evidence(
+        level_results=[success_with_compound_typed_command, failed_pytest],
+        ac_statuses={0: "completed", 1: "failed"},
+        failed_indices={1},
+        completed_count=1,
+        level_success=1,
+        level_failed=1,
+    )
+
+    assert completed_count == 1
+    assert level_success == 1
+    assert level_failed == 1
+    assert [result.outcome for result in results] == [
+        ACExecutionOutcome.SUCCEEDED,
+        ACExecutionOutcome.FAILED,
+    ]
+
+
 def test_complete_sibling_acs_reuses_structured_command_aliases() -> None:
     success_with_goose_command_shape = ACExecutionResult(
         ac_index=0,

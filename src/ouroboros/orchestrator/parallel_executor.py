@@ -1479,14 +1479,6 @@ def _successful_runtime_test_commands(messages: tuple[AgentMessage, ...]) -> set
     return commands
 
 
-def _add_command_evidence(commands: set[str], command: str) -> None:
-    """Add exact command evidence plus existing wrapper/test aliases."""
-    normalized = _normalize_command(command)
-    if normalized:
-        commands.add(normalized)
-    commands.update(alias for alias in _normalized_command_claim_aliases(command) if alias)
-
-
 def _add_runtime_command_evidence(commands: set[str], command: str) -> None:
     """Add runtime command evidence without accepting compound shell aliases."""
     commands.update(_runtime_command_evidence_aliases(command))
@@ -1520,10 +1512,10 @@ def _evidence_values_from_result(result: ACExecutionResult) -> tuple[set[str], s
             if normalized:
                 files.add(normalized)
         for value in _flatten_evidence_values(result.typed_evidence.get("commands_run")):
-            _add_command_evidence(run_commands, str(value))
+            _add_runtime_command_evidence(run_commands, str(value))
         for value in _flatten_evidence_values(result.typed_evidence.get("tests_passed")):
-            _add_command_evidence(passed_commands, str(value))
-            _add_command_evidence(run_commands, str(value))
+            _add_runtime_command_evidence(passed_commands, str(value))
+            _add_runtime_command_evidence(run_commands, str(value))
 
     for message in result.messages:
         if not message.tool_name:
