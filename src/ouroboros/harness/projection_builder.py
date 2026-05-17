@@ -623,7 +623,7 @@ def _verdict_from_event(
         return None
     scope = _optional_str(event.data.get("scope")) or "run"
     if scope not in {"run", "ac"}:
-        scope = "run"
+        return None
     ac_id = _optional_str(event.data.get("ac_id")) if scope == "ac" else None
     if scope == "ac" and ac_id is None:
         return None

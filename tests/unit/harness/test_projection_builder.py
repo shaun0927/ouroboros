@@ -600,3 +600,17 @@ class TestArtifactAndVerdictProjection:
         result = build_projection([event], seed_id="seed_abc")
 
         assert result.verdicts == ()
+
+    def test_verdict_rejects_unknown_scope(self) -> None:
+        event = BaseEvent(
+            id="evt_bad_scope_verdict",
+            type="harness.verdict.recorded",
+            aggregate_type="execution",
+            aggregate_id="exec_1",
+            data={"scope": "workflow", "outcome": "pass"},
+        )
+
+        result = build_projection([event], seed_id="seed_abc")
+
+        assert result.run.verdict_id is None
+        assert result.verdicts == ()
