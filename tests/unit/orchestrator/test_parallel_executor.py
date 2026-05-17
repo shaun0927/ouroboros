@@ -3634,6 +3634,98 @@ class TestParallelACExecutor:
         assert evidence_event.data["verifier_passed"] is True
 
     @pytest.mark.asyncio
+    async def test_fat_harness_verifier_accepts_inner_unittest_claim_for_shell_wrapped_export_command(
+        self, tmp_path
+    ) -> None:
+        """Shell env setup preambles may precede the claimed inner unittest command."""
+        source_file = tmp_path / "string_utils.py"
+        test_file = tmp_path / "test_slugify.py"
+        source_file.write_text(
+            "def slugify(text):\n    return text.lower().replace(' ', '-')\n",
+            encoding="utf-8",
+        )
+        test_file.write_text(
+            "import unittest\n\n"
+            "from string_utils import slugify\n\n"
+            "class SlugifyTest(unittest.TestCase):\n"
+            "    def test_slugify_spaces(self):\n"
+            "        self.assertEqual(slugify('Hello World'), 'hello-world')\n\n"
+            "if __name__ == '__main__':\n"
+            "    unittest.main()\n",
+            encoding="utf-8",
+        )
+
+        inner_command = "python -m unittest test_slugify.py"
+        shell_command = (
+            f"/bin/zsh -lc 'export PYTHONPATH={tmp_path} && python -m unittest \"test_slugify.py\"'"
+        )
+        event_store, appended_events = _make_replaying_event_store()
+        executor = ParallelACExecutor(
+            adapter=_FinalMessageRuntime(
+                "```json\n"
+                "{\n"
+                '  "files_touched": ["string_utils.py", "test_slugify.py"],\n'
+                f'  "commands_run": ["{inner_command}"],\n'
+                f'  "tests_passed": ["{inner_command}: OK"]\n'
+                "}\n"
+                "```",
+                native_session_id="codex-session-shell-wrapped-export-unittest-inner-claim",
+                support_messages=(
+                    AgentMessage(
+                        type="assistant",
+                        content=f"Calling tool: Edit: {source_file}",
+                        tool_name="Edit",
+                        data={"tool_input": {"file_path": str(source_file)}},
+                    ),
+                    AgentMessage(
+                        type="assistant",
+                        content=f"Calling tool: Edit: {test_file}",
+                        tool_name="Edit",
+                        data={"tool_input": {"file_path": str(test_file)}},
+                    ),
+                    AgentMessage(
+                        type="assistant",
+                        content=f"Calling tool: Bash: {shell_command}",
+                        tool_name="Bash",
+                        data={
+                            "tool_input": {"command": shell_command},
+                            "output": "Ran 1 test in 0.000s\n\nOK",
+                            "exit_code": 0,
+                        },
+                    ),
+                ),
+                cwd=str(tmp_path),
+            ),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+            execution_profile=load_profile("code"),
+            fat_harness_mode=True,
+            task_cwd=str(tmp_path),
+        )
+
+        result = await executor._execute_atomic_ac(
+            ac_index=0,
+            ac_content="Create slugify and unittest coverage.",
+            session_id="orch_123",
+            tools=["Read", "Edit", "Bash"],
+            tool_catalog=(MCPToolDefinition(name="Read", description="Read a file."),),
+            system_prompt="system",
+            seed_goal="Ship string utilities",
+            depth=0,
+            start_time=datetime.now(UTC),
+        )
+
+        assert result.success is True
+        assert result.error is None
+        evidence_event = next(
+            event
+            for event in appended_events
+            if event.type == "execution.ac.typed_evidence.observed"
+        )
+        assert evidence_event.data["verifier_passed"] is True
+
+    @pytest.mark.asyncio
     async def test_fat_harness_verifier_rejects_shell_wrapped_unittest_summary_missing_from_runtime(
         self, tmp_path
     ) -> None:
