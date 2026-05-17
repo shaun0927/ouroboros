@@ -305,15 +305,30 @@ def _is_validation_only_ac(ac_content: str) -> bool:
         return False
     if _DOC_ONLY_TARGET_RE.search(normalized) and _DOC_ONLY_ACTION_RE.search(normalized):
         return False
+    stripped_no_mutation_terms = _NO_MUTATION_VALIDATION_RE.sub("", normalized)
     if (
-        (
-            _NO_MUTATION_VALIDATION_RE.search(normalized)
-            or _EXISTING_VALIDATION_RE.search(normalized)
-        )
+        _NO_MUTATION_VALIDATION_RE.search(normalized)
         and _VALIDATION_ONLY_ACTION_RE.search(normalized)
         and _VALIDATION_ONLY_TEST_SIGNAL_RE.search(normalized)
     ):
-        return True
+        positive_test_mutation = bool(
+            _TEST_MUTATION_WORK_RE.search(stripped_no_mutation_terms)
+            and re.search(
+                r"\b(?:add|write|create|implement|fix|update|extend|expand|check(?:ed)?\s+into|check\s+in)\b",
+                stripped_no_mutation_terms,
+                re.IGNORECASE,
+            )
+        )
+        positive_code_mutation = bool(
+            _CODE_MUTATION_ACTION_RE.search(stripped_no_mutation_terms)
+            and _CODE_WORK_SIGNAL_RE.search(stripped_no_mutation_terms)
+        )
+        return not (
+            positive_test_mutation
+            or positive_code_mutation
+            or _CODE_IMPLEMENTATION_ACTION_RE.search(stripped_no_mutation_terms)
+            or _has_mixed_code_and_documentation_work(stripped_no_mutation_terms)
+        )
     if _TEST_MUTATION_WORK_RE.search(normalized):
         return False
     if _CODE_MUTATION_ACTION_RE.search(normalized) and _CODE_WORK_SIGNAL_RE.search(normalized):
@@ -322,6 +337,12 @@ def _is_validation_only_ac(ac_content: str) -> bool:
         return False
     if _has_mixed_code_and_documentation_work(normalized):
         return False
+    if (
+        _EXISTING_VALIDATION_RE.search(normalized)
+        and _VALIDATION_ONLY_ACTION_RE.search(normalized)
+        and _VALIDATION_ONLY_TEST_SIGNAL_RE.search(normalized)
+    ):
+        return True
     return bool(_VALIDATION_ONLY_ACTION_RE.search(normalized)) and bool(
         _VALIDATION_ONLY_TEST_SIGNAL_RE.search(normalized)
     )
