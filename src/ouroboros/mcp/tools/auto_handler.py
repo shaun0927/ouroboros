@@ -1607,6 +1607,13 @@ def _extract_goal_sections(goal: str) -> dict[str, list[str]]:
 
 
 def _section_header(line: str) -> str | None:
+    stripped = line.strip()
+    # Observation prompts commonly use this report-only section after the
+    # executable success criteria. Treat it as a new section so report metadata
+    # (session IDs, fallback status, blocker recurrence) does not bleed into the
+    # execution-facing acceptance criteria ledger entry.
+    if stripped.casefold() == "after auto finishes, report:":
+        return "auto report"
     match = re.match(r"^\s*([A-Za-z][A-Za-z0-9 _/-]{1,60}):\s*$", line)
     if match is None:
         return None

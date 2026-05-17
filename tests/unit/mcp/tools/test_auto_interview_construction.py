@@ -370,6 +370,41 @@ If `ouroboros_auto` is unavailable or interpreted as normal text, stop and repor
     assert "Recursive auto invocation occurred: no." in preferences["failure_modes"]
 
 
+
+def test_structured_auto_goal_keeps_after_auto_report_section_out_of_acceptance() -> None:
+    goal = """
+Goal:
+Verify current ooo auto can create hello_auto.py and tests/test_hello_auto.py.
+
+Success criteria:
+- `hello_auto.py` exists.
+- `tests/test_hello_auto.py` exists.
+- The targeted test command `uv run pytest tests/test_hello_auto.py` passes.
+
+After auto finishes, report:
+- Whether MCP dispatch succeeded.
+- Whether manual fallback was used.
+- Auto session id.
+- Seed id and Seed path.
+- Execution job id.
+- Final execution job terminal status.
+- Whether previous blockers recurred.
+- Files changed.
+- Exact test command.
+- Test result.
+"""
+
+    preferences = _derive_goal_user_preferences(goal)
+
+    assert preferences["acceptance_criteria"] == (
+        "`hello_auto.py` exists.\n"
+        "`tests/test_hello_auto.py` exists.\n"
+        "The targeted test command `uv run pytest tests/test_hello_auto.py` passes."
+    )
+    assert "auto session id" not in preferences["acceptance_criteria"].casefold()
+    assert "execution job" not in preferences["acceptance_criteria"].casefold()
+    assert "test result" not in preferences["acceptance_criteria"].casefold()
+
 def test_structured_auto_goal_preserves_non_allowlisted_execution_criteria() -> None:
     goal = """
 Goal:
