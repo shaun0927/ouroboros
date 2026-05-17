@@ -12,6 +12,7 @@ from __future__ import annotations
 import ast
 import asyncio
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -24,11 +25,13 @@ from ouroboros.auto.state import AutoPipelineState, AutoStore
 from ouroboros.bigbang.interview import InterviewRound, InterviewState, InterviewStatus
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError
+from ouroboros.mcp.job_manager import JobLinks, JobSnapshot, JobStatus
 from ouroboros.mcp.tools.authoring_handlers import InterviewHandler
 from ouroboros.mcp.tools.auto_handler import (
     AutoHandler,
     _derive_goal_user_preferences,
     _merge_resume_user_preferences,
+    _reconcile_execution_job_snapshot,
     _reseed_preference_ledger,
     _seed_initial_ledger_from_user_preferences,
 )
@@ -113,6 +116,69 @@ def _assert_isolated_allowed_tools(factory_kwargs: dict[str, Any]) -> None:
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[4]
+
+
+def _job_snapshot(status: JobStatus, *, error: str | None = None) -> JobSnapshot:
+    now = datetime.now(UTC)
+    return JobSnapshot(
+        job_id="job_failed",
+        job_type="execute_seed",
+        status=status,
+        message=f"Job {status.value}",
+        created_at=now,
+        updated_at=now,
+        links=JobLinks(session_id="orch_1", execution_id="exec_1"),
+        error=error,
+    )
+
+
+def test_execution_job_failure_rewrites_complete_auto_result(monkeypatch) -> None:
+    class FakeJobManager:
+        async def get_snapshot(self, job_id: str) -> JobSnapshot:
+            assert job_id == "job_failed"
+            return _job_snapshot(JobStatus.FAILED, error="planner failed")
+
+    monkeypatch.setattr(
+        "ouroboros.mcp.tools.auto_handler.JobManager",
+        lambda: FakeJobManager(),
+    )
+    result = AutoPipelineResult(
+        status="complete",
+        auto_session_id="auto_1",
+        phase="complete",
+        job_id="job_failed",
+    )
+
+    reconciled = asyncio.run(_reconcile_execution_job_snapshot(result))
+
+    assert reconciled.status == "failed"
+    assert reconciled.execution_job_status == "failed"
+    assert reconciled.execution_job_error == "planner failed"
+    assert reconciled.blocker == "execution job failed: planner failed"
+
+
+def test_execution_job_cancelled_blocks_complete_auto_result(monkeypatch) -> None:
+    class FakeJobManager:
+        async def get_snapshot(self, job_id: str) -> JobSnapshot:
+            assert job_id == "job_failed"
+            return _job_snapshot(JobStatus.CANCELLED)
+
+    monkeypatch.setattr(
+        "ouroboros.mcp.tools.auto_handler.JobManager",
+        lambda: FakeJobManager(),
+    )
+    result = AutoPipelineResult(
+        status="complete",
+        auto_session_id="auto_1",
+        phase="complete",
+        job_id="job_failed",
+    )
+
+    reconciled = asyncio.run(_reconcile_execution_job_snapshot(result))
+
+    assert reconciled.status == "blocked"
+    assert reconciled.execution_job_status == "cancelled"
+    assert reconciled.blocker == "execution job cancelled: Job cancelled"
 
 
 def test_structured_auto_goal_seeds_required_ledger_sections() -> None:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 import difflib
 import inspect
@@ -54,7 +54,7 @@ from ouroboros.config import get_opencode_mode
 from ouroboros.core.file_lock import file_lock
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
-from ouroboros.mcp.job_manager import JobLinks, JobManager
+from ouroboros.mcp.job_manager import JobLinks, JobManager, JobStatus
 from ouroboros.mcp.tools.authoring_handlers import GenerateSeedHandler, InterviewHandler
 from ouroboros.mcp.tools.evaluation_handlers import LateralThinkHandler
 from ouroboros.mcp.tools.execution_handlers import ExecuteSeedHandler, StartExecuteSeedHandler
@@ -250,6 +250,7 @@ class AutoHandler:
             return Result.err(
                 MCPToolError(f"Auto pipeline failed: {exc}", tool_name="ouroboros_auto")
             )
+        result = await _reconcile_execution_job_snapshot(result)
         release_session_id = result.auto_session_id or auto_session_id
         if release_session_id and release_start_lease:
             _release_start_lease(store, release_session_id, token=start_lease_token)
@@ -1163,6 +1164,9 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
         "execution_id": result.execution_id,
         "job_id": result.job_id,
         "run_session_id": result.run_session_id,
+        "execution_job_status": result.execution_job_status,
+        "execution_job_error": result.execution_job_error,
+        "execution_job_message": result.execution_job_message,
     }
     # Only advertise a runnable resume_command when --resume actually has
     # something to do. NONE-capability sessions (COMPLETE, or unrecoverable
@@ -1228,6 +1232,34 @@ def _result_meta(result: AutoPipelineResult) -> dict[str, Any]:
     meta["evidence_backed_sections"] = list(result.evidence_backed_sections)
     meta["assumption_only_sections"] = list(result.assumption_only_sections)
     return meta
+
+
+async def _reconcile_execution_job_snapshot(result: AutoPipelineResult) -> AutoPipelineResult:
+    """Surface terminal execution job failures/cancellations on auto resume."""
+    if not result.job_id:
+        return result
+    try:
+        snapshot = await JobManager().get_snapshot(result.job_id)
+    except Exception:
+        return result
+    blocker = result.blocker
+    status = result.status
+    if snapshot.status in {JobStatus.FAILED, JobStatus.CANCELLED}:
+        detail = snapshot.error or snapshot.result_text or snapshot.message
+        blocker = (
+            f"execution job {snapshot.status.value}: {detail}"
+            if detail
+            else f"execution job {snapshot.status.value}"
+        )
+        status = "failed" if snapshot.status is JobStatus.FAILED else "blocked"
+    return replace(
+        result,
+        status=status,
+        blocker=blocker,
+        execution_job_status=snapshot.status.value,
+        execution_job_error=snapshot.error,
+        execution_job_message=snapshot.message,
+    )
 
 
 def _resolved_opencode_mode(runtime_backend: str | None, opencode_mode: str | None) -> str | None:
@@ -1782,6 +1814,12 @@ def _format_result(result: AutoPipelineResult) -> str:
         )
     if result.run_handoff_status:
         lines.append(f"Run handoff status: {result.run_handoff_status}")
+    if result.execution_job_status:
+        lines.append(f"Execution job status: {result.execution_job_status}")
+    if result.execution_job_error:
+        lines.append(f"Execution job error: {result.execution_job_error}")
+    elif result.execution_job_message and result.execution_job_status in {"failed", "cancelled"}:
+        lines.append(f"Execution job message: {result.execution_job_message}")
     if result.run_handoff_guidance:
         lines.append(f"Run handoff guidance: {result.run_handoff_guidance}")
     if result.attached_run_handle:

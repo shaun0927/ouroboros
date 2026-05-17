@@ -175,6 +175,9 @@ class AutoPipelineResult:
     execution_id: str | None = None
     job_id: str | None = None
     run_session_id: str | None = None
+    execution_job_status: str | None = None
+    execution_job_error: str | None = None
+    execution_job_message: str | None = None
     run_subagent: dict[str, Any] | None = None
     current_round: int = 0
     pending_question: str | None = None
