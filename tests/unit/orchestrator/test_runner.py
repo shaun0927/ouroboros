@@ -238,6 +238,13 @@ class TestBuildTaskPrompt:
         assert "## Ontology / Conceptual Lens" not in prompt
         assert "conceptual lens for execution decisions" not in prompt
 
+    def test_includes_auto_recursion_guard(self, sample_seed: Seed) -> None:
+        prompt = build_task_prompt(sample_seed)
+
+        assert "Auto Recursion Guard" in prompt
+        assert "ouroboros_auto" in prompt
+        assert "nested auto session" in prompt
+
 
 class TestOrchestratorResult:
     """Tests for OrchestratorResult dataclass."""

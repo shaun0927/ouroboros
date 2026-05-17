@@ -338,6 +338,13 @@ def build_task_prompt(
 ## Acceptance Criteria
 {ac_list}
 
+## Auto Recursion Guard
+Do not invoke `ooo auto`, `ouroboros_auto`, `ouroboros_start_auto`, or any MCP auto
+tool while executing this Seed. This execution is already downstream of any auto
+authoring step. Implement the concrete Seed requirements directly; if evidence
+about a prior auto run is needed, inspect existing artifacts/logs only and never
+start a nested auto session.
+
 {suffix}
 """
 

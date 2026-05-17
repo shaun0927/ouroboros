@@ -788,6 +788,15 @@ class TestBuildExecuteSubagent:
         )
         assert "build a CLI tool" in p.prompt
 
+    def test_prompt_includes_auto_recursion_guard(self) -> None:
+        p = build_execute_subagent(
+            seed_content="goal: build a CLI tool",
+            session_id="sess-123",
+        )
+        assert "Auto Recursion Guard" in p.prompt
+        assert "ouroboros_auto" in p.prompt
+        assert "nested auto session" in p.prompt
+
     def test_context_preserves_execution_args(self) -> None:
         p = build_execute_subagent(
             seed_content="goal: test",

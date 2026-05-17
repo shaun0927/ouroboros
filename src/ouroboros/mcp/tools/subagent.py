@@ -819,6 +819,12 @@ in the seed, respecting constraints and acceptance criteria.
 {seed_content}
 ```
 
+## Auto Recursion Guard
+Do not invoke `ooo auto`, `ouroboros_auto`, `ouroboros_start_auto`, or any MCP auto
+tool from this execution session. This task is already executing a Seed; implement
+the concrete Seed requirements directly. If evidence about a prior auto run is
+needed, inspect existing artifacts/logs only and never start a nested auto session.
+
 Implement the seed requirements. Work iteratively, testing as you go.
 Stop when all acceptance criteria are met or max iterations reached."""
 
