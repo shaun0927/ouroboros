@@ -1867,6 +1867,96 @@ class TestProviderErrorFormatDetails:
         assert "subtype" not in result.error.details
 
     @pytest.mark.asyncio
+    async def test_malformed_tool_use_diagnostic_clears_after_later_success(self) -> None:
+        """A transient malformed assistant turn must not override a later successful result."""
+        adapter = ClaudeCodeAdapter(max_turns=5)
+        config = CompletionConfig(model="claude-sonnet-4-6")
+
+        mock_options_cls = MagicMock()
+
+        async def malformed_then_success_query(*args, **kwargs):
+            assistant_msg = MagicMock()
+            type(assistant_msg).__name__ = "AssistantMessage"
+            assistant_msg.stop_reason = "tool_use"
+            assistant_msg.content = []
+            yield assistant_msg
+
+            result_msg = MagicMock()
+            type(result_msg).__name__ = "ResultMessage"
+            result_msg.structured_output = None
+            result_msg.result = "recovered response"
+            result_msg.is_error = False
+            yield result_msg
+
+        sdk_module = _make_sdk_mock(
+            mock_options_cls, MagicMock(side_effect=malformed_then_success_query)
+        )
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "claude_agent_sdk": sdk_module,
+                "claude_agent_sdk._errors": sdk_module._errors,
+            },
+        ):
+            result = await adapter._execute_single_request("test prompt", config)
+
+        assert result.is_ok
+        assert result.value.content == "recovered response"
+        assert result.value.finish_reason == "stop"
+
+    @pytest.mark.asyncio
+    async def test_malformed_tool_use_diagnostic_clears_after_later_partial_content(self) -> None:
+        """A malformed-turn candidate must not mask an accepted max-turns partial result."""
+        adapter = ClaudeCodeAdapter(max_turns=5)
+        config = CompletionConfig(model="claude-sonnet-4-6")
+
+        mock_options_cls = MagicMock()
+
+        class TextBlock:
+            text = "usable partial response"
+
+        async def malformed_then_partial_query(*args, **kwargs):
+            malformed_msg = MagicMock()
+            type(malformed_msg).__name__ = "AssistantMessage"
+            malformed_msg.stop_reason = "tool_use"
+            malformed_msg.content = []
+            yield malformed_msg
+
+            text_msg = MagicMock()
+            type(text_msg).__name__ = "AssistantMessage"
+            text_msg.stop_reason = "end_turn"
+            text_msg.content = [TextBlock()]
+            yield text_msg
+
+            result_msg = MagicMock()
+            type(result_msg).__name__ = "ResultMessage"
+            result_msg.structured_output = None
+            result_msg.result = ""
+            result_msg.is_error = True
+            result_msg.subtype = "error_max_turns"
+            result_msg.errors = ["Reached maximum number of turns (5)"]
+            result_msg.stop_reason = "end_turn"
+            yield result_msg
+
+        sdk_module = _make_sdk_mock(
+            mock_options_cls, MagicMock(side_effect=malformed_then_partial_query)
+        )
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "claude_agent_sdk": sdk_module,
+                "claude_agent_sdk._errors": sdk_module._errors,
+            },
+        ):
+            result = await adapter._execute_single_request("test prompt", config)
+
+        assert result.is_ok
+        assert result.value.content == "usable partial response"
+        assert result.value.finish_reason == "length"
+
+    @pytest.mark.asyncio
     async def test_complete_retries_retryable_malformed_diagnostic_then_succeeds(self) -> None:
         """complete() retries ProviderError details marked retryable before returning success."""
         adapter = ClaudeCodeAdapter()

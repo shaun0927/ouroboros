@@ -899,6 +899,12 @@ class ClaudeCodeAdapter:
         finish_reason = "stop"
         raw_response: dict[str, object] = {"session_id": None}
 
+        def _has_malformed_tool_use_error() -> bool:
+            return (
+                error_result is not None
+                and error_result.details.get("error_type") == "MalformedToolUseTurn"
+            )
+
         # Wrap query() to skip unknown message types (e.g., rate_limit_event)
         # that the SDK doesn't recognize yet. Without this, a single
         # MessageParseError inside the generator kills the entire request.
@@ -952,6 +958,8 @@ class ClaudeCodeAdapter:
                         if block_type == "TextBlock":
                             text = getattr(block, "text", "")
                             content += text
+                            if text and _has_malformed_tool_use_error():
+                                error_result = None
                             # Callback for thinking/reasoning
                             if self._on_message and text.strip():
                                 self._on_message("thinking", text.strip())
@@ -996,6 +1004,8 @@ class ClaudeCodeAdapter:
 
                     # Check for errors - don't break, just record.
                     is_error = getattr(sdk_message, "is_error", False)
+                    if not is_error and _has_malformed_tool_use_error():
+                        error_result = None
                     if is_error:
                         subtype = getattr(sdk_message, "subtype", None)
                         stop_reason = getattr(sdk_message, "stop_reason", None)
@@ -1025,6 +1035,8 @@ class ClaudeCodeAdapter:
                                 max_turns=self._max_turns,
                                 stop_reason=stop_reason,
                             )
+                            if _has_malformed_tool_use_error():
+                                error_result = None
                             continue
 
                         error_msg = (
@@ -1045,10 +1057,7 @@ class ClaudeCodeAdapter:
                             subtype=subtype,
                             partial_rejected=bool(partial_content),
                         )
-                        if (
-                            error_result is not None
-                            and error_result.details.get("error_type") == "MalformedToolUseTurn"
-                        ):
+                        if _has_malformed_tool_use_error():
                             continue
                         error_result = ProviderError(
                             message=error_msg,
