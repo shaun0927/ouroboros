@@ -505,6 +505,7 @@ class TestCreateOuroborosServer:
         "ouroboros_start_evaluate",
         "ouroboros_start_evolve_step",
         "ouroboros_start_execute_seed",
+        "ouroboros_start_ralph",
     }
 
     def test_creates_server_with_defaults(self) -> None:
