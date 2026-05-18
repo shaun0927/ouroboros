@@ -316,7 +316,7 @@ the contract and keeps review scope small.
 
 | Hook | Phase | Side-effect class | Default failure policy | Required permission class | v1 status |
 |---|---|---|---|---|---|
-| `before_invocation` | After trust/confirmation, before `plugin.invoked` | Read-only inspection / policy | `fail_closed` for policy hooks, `fail_open` for observability-only hooks | `plugin:lifecycle:read` for read-only, stronger scope for policy decisions | **Included** |
+| `before_invocation` | After trust/confirmation, before `plugin.invoked` | Read-only inspection / policy | `fail_closed` for policy hooks, `fail_open` for observability-only hooks | `plugin:lifecycle:read` for read-only, `plugin:lifecycle:policy` for policy/veto decisions | **Included** |
 | `after_invocation` | After `plugin.completed` / `plugin.failed` is known, before the wrapper returns to the caller | Observability / summary emission | `fail_open` | `plugin:lifecycle:read` | **Included** |
 | `before_tool_call` | Before a plugin-mediated tool call is allowed to execute | Policy / possible mutation gate | `fail_closed` | tool-specific permission plus `plugin:tool:intercept` | Deferred |
 | `after_tool_call` | After a plugin-mediated tool call result is available | Observability or result annotation | `fail_open` unless it mutates returned evidence | `plugin:tool:observe` | Deferred |
@@ -407,7 +407,8 @@ not trusted blocks before plugin-controlled code runs. Additional rules:
    `permissions[].scope`; dot-delimited forms such as `plugin.lifecycle.read` are
    invalid.
 2. Hooks that can block, authorize, rewrite, or mutate work require an explicit
-   policy/mutation permission and default to `fail_closed`.
+   policy/mutation permission. Lifecycle policy/veto hooks require
+   `plugin:lifecycle:policy` and default to `fail_closed`.
 3. Hooks MUST NOT directly edit `.omx`, EventStore rows, artifacts, or user
    files. Mutations must go through the same harness service boundary that the
    underlying command would use.

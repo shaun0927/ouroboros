@@ -13,7 +13,7 @@ from ouroboros.plugin.firewall import (
     DEFAULT_PLUGIN_INVOCATION_TIMEOUT_SECONDS,
     invoke_plugin,
 )
-from ouroboros.plugin.hooks import HOOK_LIFECYCLE_READ_SCOPE
+from ouroboros.plugin.hooks import HOOK_LIFECYCLE_POLICY_SCOPE, HOOK_LIFECYCLE_READ_SCOPE
 from ouroboros.plugin.manifest import load_manifest
 from ouroboros.plugin.trust_store import TrustStore
 from ouroboros.plugin.userlevel_registry import (
@@ -85,20 +85,30 @@ def _hook_manifest_payload(schema_version: str) -> dict:
                 "reason": "Allow v1 lifecycle hook observation.",
             }
         )
-        hook_permissions = [HOOK_LIFECYCLE_READ_SCOPE]
+        payload["permissions"].append(
+            {
+                "scope": HOOK_LIFECYCLE_POLICY_SCOPE,
+                "risk": "read_only",
+                "required": True,
+                "reason": "Allow v1 lifecycle hook policy decisions.",
+            }
+        )
+        before_hook_permissions = [HOOK_LIFECYCLE_POLICY_SCOPE]
+        after_hook_permissions = [HOOK_LIFECYCLE_READ_SCOPE]
     else:
-        hook_permissions = []
+        before_hook_permissions = []
+        after_hook_permissions = []
     payload["hooks"] = [
         {
             "name": "before_invocation",
             "entrypoint": {"type": "command", "command": "python -m hook_before"},
-            "permissions": hook_permissions,
+            "permissions": before_hook_permissions,
             "failure_policy": "fail_closed",
         },
         {
             "name": "after_invocation",
             "entrypoint": {"type": "command", "command": "python -m hook_after"},
-            "permissions": hook_permissions,
+            "permissions": after_hook_permissions,
             "failure_policy": "fail_open",
         },
     ]
@@ -281,6 +291,12 @@ def test_v03_hook_manifest_runs_and_emits_hook_events(tmp_path: Path) -> None:
         scope="github:read",
         granted_by="user:test",
     )
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope=HOOK_LIFECYCLE_POLICY_SCOPE,
+        granted_by="user:test",
+    )
     calls: list[list[str]] = []
 
     def runner(argv, *args, **kwargs) -> subprocess.CompletedProcess:
@@ -309,15 +325,66 @@ def test_v03_hook_manifest_runs_and_emits_hook_events(tmp_path: Path) -> None:
         "plugin.hook.completed",
         "plugin.invoked",
         "plugin.permission_used",
+        "plugin.permission_used",
+        "plugin.completed",
         "plugin.hook.invoked",
         "plugin.hook.completed",
-        "plugin.completed",
     ]
     assert all(
         event["schema_version"] == "0.3"
         for event in events
         if event["event_type"].startswith("plugin.hook.")
     )
+
+
+def test_v03_after_hook_runs_after_terminal_failed_event(tmp_path: Path) -> None:
+    program = _make_program(tmp_path, _hook_manifest_payload("0.3"))
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope="github:read",
+        granted_by="user:test",
+    )
+    trust = TrustStore(root=tmp_path / "trust").grant(
+        plugin="github-pr-ops",
+        version="0.1.0",
+        scope=HOOK_LIFECYCLE_POLICY_SCOPE,
+        granted_by="user:test",
+    )
+
+    def runner(argv, *args, **kwargs) -> subprocess.CompletedProcess:  # noqa: ARG001
+        returncode = 7 if argv[:3] == ["python", "-m", "fake_plugin"] else 0
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=returncode,
+            stdout="",
+            stderr="",
+        )
+
+    events: list[dict] = []
+    result = invoke_plugin(
+        program,
+        command_name="review",
+        argv=["https://example.com/pr/1"],
+        trust_record=trust,
+        event_sink=events.append,
+        correlation_id="corr-v03-after-failed",
+        subprocess_runner=runner,
+    )
+
+    assert result.status == "failed"
+    assert result.exit_code == 7
+    assert [event["event_type"] for event in events] == [
+        "plugin.hook.invoked",
+        "plugin.hook.completed",
+        "plugin.invoked",
+        "plugin.permission_used",
+        "plugin.permission_used",
+        "plugin.failed",
+        "plugin.hook.invoked",
+        "plugin.hook.completed",
+    ]
+    assert events[5]["result"]["status"] == "failed"
 
 
 def test_trust_violation_only_emits_failed_no_invoked(tmp_path: Path) -> None:

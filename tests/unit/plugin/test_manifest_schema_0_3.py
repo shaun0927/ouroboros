@@ -23,7 +23,11 @@ from pathlib import Path
 
 import pytest
 
-from ouroboros.plugin.hooks import HOOK_EVENT_TYPES, HOOK_LIFECYCLE_READ_SCOPE
+from ouroboros.plugin.hooks import (
+    HOOK_EVENT_TYPES,
+    HOOK_LIFECYCLE_POLICY_SCOPE,
+    HOOK_LIFECYCLE_READ_SCOPE,
+)
 from ouroboros.plugin.manifest import (
     SUPPORTED_SCHEMA_VERSIONS,
     PluginManifestError,
@@ -45,6 +49,14 @@ def _v03_manifest() -> dict:
             "risk": "read_only",
             "required": True,
             "reason": "Allow v1 lifecycle hook observation.",
+        }
+    )
+    payload["permissions"].append(
+        {
+            "scope": HOOK_LIFECYCLE_POLICY_SCOPE,
+            "risk": "read_only",
+            "required": True,
+            "reason": "Allow v1 lifecycle hook policy decisions.",
         }
     )
     return payload
@@ -70,7 +82,11 @@ def _valid_hook(name: str = "before_invocation", failure_policy: str = "fail_clo
             "type": "command",
             "command": "python -m plugin_hooks before",
         },
-        "permissions": [HOOK_LIFECYCLE_READ_SCOPE],
+        "permissions": [
+            HOOK_LIFECYCLE_POLICY_SCOPE
+            if failure_policy == "fail_closed"
+            else HOOK_LIFECYCLE_READ_SCOPE
+        ],
         "failure_policy": failure_policy,
         "timeout_seconds": 5,
     }
@@ -98,9 +114,18 @@ class TestV03HookEnum:
 
     def test_after_invocation_accepted(self, tmp_path: Path) -> None:
         payload = _v03_manifest()
-        payload["hooks"] = [_valid_hook(name="after_invocation")]
+        payload["hooks"] = [_valid_hook(name="after_invocation", failure_policy="fail_open")]
         manifest = load_manifest(_write(tmp_path, payload))
         assert manifest.hooks[0].name == "after_invocation"
+
+    def test_after_invocation_fail_closed_rejected_at_schema_layer(self, tmp_path: Path) -> None:
+        payload = _v03_manifest()
+        payload["hooks"] = [_valid_hook(name="after_invocation", failure_policy="fail_closed")]
+
+        with pytest.raises(PluginManifestError) as exc_info:
+            load_manifest(_write(tmp_path, payload))
+
+        assert exc_info.value.json_pointer == "/hooks/0/failure_policy"
 
     @pytest.mark.parametrize(
         "deferred_name",
@@ -167,7 +192,28 @@ class TestV03HookLifecyclePermissionSchema:
             load_manifest(_write(tmp_path, payload))
 
         assert exc_info.value.json_pointer == "/hooks/0/permissions"
-        assert HOOK_LIFECYCLE_READ_SCOPE in exc_info.value.expected
+        assert HOOK_LIFECYCLE_POLICY_SCOPE in exc_info.value.expected
+
+    def test_read_only_fail_closed_rejected_at_schema_layer(self, tmp_path: Path) -> None:
+        payload = _v03_manifest()
+        payload["hooks"] = [_valid_hook(failure_policy="fail_closed")]
+        payload["hooks"][0]["permissions"] = [HOOK_LIFECYCLE_READ_SCOPE]
+
+        with pytest.raises(PluginManifestError) as exc_info:
+            load_manifest(_write(tmp_path, payload))
+
+        assert exc_info.value.json_pointer == "/hooks/0/permissions"
+        assert HOOK_LIFECYCLE_POLICY_SCOPE in exc_info.value.expected
+
+    def test_unrelated_hook_permission_rejected_at_schema_layer(self, tmp_path: Path) -> None:
+        payload = _v03_manifest()
+        payload["hooks"] = [_valid_hook(failure_policy="fail_open")]
+        payload["hooks"][0]["permissions"] = ["github:read"]
+
+        with pytest.raises(PluginManifestError) as exc_info:
+            load_manifest(_write(tmp_path, payload))
+
+        assert exc_info.value.json_pointer == "/hooks/0/permissions"
 
 
 class TestV02Compatibility:

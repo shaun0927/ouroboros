@@ -46,7 +46,8 @@ class HookKind(StrEnum):
 
     #: Runs after trust check and confirmation gate, before
     #: ``plugin.invoked`` is emitted. Intended for read-only
-    #: inspection or ``fail_closed`` policy decisions.
+    #: inspection or policy decisions declared with the stronger
+    #: lifecycle policy scope.
     BEFORE_INVOCATION = "before_invocation"
 
     #: Runs after ``plugin.completed`` / ``plugin.failed`` is known,
@@ -142,16 +143,22 @@ HOOK_AUDIT_EVENTS: Final[frozenset[str]] = HOOK_OUTCOME_AUDIT_EVENTS
 #: observability hooks per ``docs/rfc/userlevel-plugins.md``). Manifest
 #: authors declare it under top-level ``permissions[].scope`` so the
 #: existing ``plugin.permission_used`` emission rule covers it without
-#: a separate event family. Stronger lifecycle scopes for policy
-#: decisions are deferred to a follow-up RFC slice.
+#: a separate event family.
 HOOK_LIFECYCLE_READ_SCOPE: Final[str] = "plugin:lifecycle:read"
+
+#: Hook permission scope required for lifecycle hooks that can veto an
+#: invocation through ``fail_closed``. Read-only lifecycle observation
+#: remains available through :data:`HOOK_LIFECYCLE_READ_SCOPE`; this
+#: ``plugin:lifecycle:policy`` is the explicit authority boundary for
+#: policy decisions.
+HOOK_LIFECYCLE_POLICY_SCOPE: Final[str] = "plugin:lifecycle:policy"
 
 #: Frozen set of v1 hook permission scopes. Validators and manifest
 #: authors reference this set rather than the bare string so the
-#: contract intent is observable at every call site. The set is
-#: intentionally a single entry for v1 — additional lifecycle scopes
-#: land alongside the RFC update that introduces them.
-HOOK_LIFECYCLE_SCOPES: Final[frozenset[str]] = frozenset({HOOK_LIFECYCLE_READ_SCOPE})
+#: contract intent is observable at every call site.
+HOOK_LIFECYCLE_SCOPES: Final[frozenset[str]] = frozenset(
+    {HOOK_LIFECYCLE_READ_SCOPE, HOOK_LIFECYCLE_POLICY_SCOPE}
+)
 
 
 def is_v1_hook_kind(value: str) -> bool:
@@ -197,6 +204,7 @@ __all__ = [
     "HOOK_EVENT_TYPES",
     "HOOK_FAILED_EVENT",
     "HOOK_INVOKED_EVENT",
+    "HOOK_LIFECYCLE_POLICY_SCOPE",
     "HOOK_LIFECYCLE_READ_SCOPE",
     "HOOK_LIFECYCLE_SCOPES",
     "HOOK_OUTCOME_AUDIT_EVENTS",

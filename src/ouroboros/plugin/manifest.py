@@ -35,7 +35,10 @@ from ouroboros.plugin.hooks import (
     HOOK_COMPLETED_EVENT,
     HOOK_FAILED_EVENT,
     HOOK_INVOKED_EVENT,
-    HOOK_LIFECYCLE_READ_SCOPE,
+    HOOK_LIFECYCLE_POLICY_SCOPE,
+    HOOK_LIFECYCLE_SCOPES,
+    HookFailurePolicy,
+    HookKind,
     is_deferred_hook_kind,
     is_excluded_hook_kind,
     is_v1_failure_policy,
@@ -391,6 +394,13 @@ def _build_hook(
         hook_index=hook_index,
         manifest_path=manifest_path,
     )
+    _validate_after_invocation_policy(
+        hook_name,
+        failure_policy,
+        hook_index=hook_index,
+        manifest_path=manifest_path,
+        schema_version=schema_version,
+    )
 
     for permission_index, scope in enumerate(raw.get("permissions", ())):
         if scope not in declared_permission_scopes:
@@ -433,24 +443,38 @@ def _validate_hook_lifecycle_permission(
     manifest_path: str | Path,
     schema_version: str,
 ) -> None:
-    """Require v0.3 lifecycle hooks to declare the v1 read permission.
+    """Require v0.3 lifecycle hooks to declare a v1 lifecycle permission.
 
-    Earlier slices introduced ``plugin:lifecycle:read`` as the permission
-    boundary for v1 observability hooks. Enforce it only for the tightened
-    v0.3 hook contract so supported v0.2 manifests keep their compatibility
-    behavior until that schema version is retired deliberately.
+    ``plugin:lifecycle:read`` remains the permission boundary for
+    observability hooks. Hooks that can veto command execution through
+    ``fail_closed`` must declare the stronger ``plugin:lifecycle:policy``
+    scope. Enforce this only for the tightened v0.3 hook contract so
+    supported v0.2 manifests keep their compatibility behavior until that
+    schema version is retired deliberately.
     """
 
     if schema_version != "0.3" or not is_v1_hook_kind(raw["name"]):
         return
     permissions = raw.get("permissions", ())
-    if HOOK_LIFECYCLE_READ_SCOPE in permissions:
+    declared_lifecycle_scopes = HOOK_LIFECYCLE_SCOPES.intersection(permissions)
+    if not declared_lifecycle_scopes:
+        raise PluginManifestError(
+            "v0.3 lifecycle hook must declare a lifecycle permission",
+            path=str(manifest_path),
+            json_pointer=f"/hooks/{hook_index}/permissions",
+            expected=f"one of {sorted(HOOK_LIFECYCLE_SCOPES)!r} in hooks[].permissions",
+            got=permissions,
+        )
+    if (
+        raw["failure_policy"] != HookFailurePolicy.FAIL_CLOSED.value
+        or HOOK_LIFECYCLE_POLICY_SCOPE in permissions
+    ):
         return
     raise PluginManifestError(
-        "v0.3 lifecycle hook must declare plugin:lifecycle:read",
+        "v0.3 fail_closed lifecycle hook must declare plugin:lifecycle:policy",
         path=str(manifest_path),
         json_pointer=f"/hooks/{hook_index}/permissions",
-        expected=f"{HOOK_LIFECYCLE_READ_SCOPE!r} in hooks[].permissions",
+        expected=f"{HOOK_LIFECYCLE_POLICY_SCOPE!r} in hooks[].permissions",
         got=permissions,
     )
 
@@ -524,6 +548,37 @@ def _validate_failure_policy(
         json_pointer=f"/hooks/{hook_index}/failure_policy",
         expected="'fail_open' or 'fail_closed'",
         got=repr(failure_policy),
+    )
+
+
+def _validate_after_invocation_policy(
+    hook_name: str,
+    failure_policy: str,
+    *,
+    hook_index: int,
+    manifest_path: str | Path,
+    schema_version: str,
+) -> None:
+    """Keep v0.3 after_invocation hooks observability-only.
+
+    v0.3 lifecycle permissions are read-only, so after-invocation hooks
+    may observe the completed outcome but must not be able to veto or
+    rewrite it through a fail-closed policy. v0.2 compatibility is left
+    unchanged; those hooks load but runtime dispatch remains disabled.
+    """
+
+    if (
+        schema_version != "0.3"
+        or hook_name != HookKind.AFTER_INVOCATION.value
+        or failure_policy != HookFailurePolicy.FAIL_CLOSED.value
+    ):
+        return
+    raise PluginManifestError(
+        "v0.3 after_invocation hooks must use fail_open",
+        path=str(manifest_path),
+        json_pointer=f"/hooks/{hook_index}/failure_policy",
+        expected="'fail_open' for v0.3 after_invocation hooks",
+        got=failure_policy,
     )
 
 

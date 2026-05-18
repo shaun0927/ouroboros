@@ -248,6 +248,44 @@
         "type": "object",
         "required": ["name", "entrypoint", "failure_policy", "permissions"],
         "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "name": {
+                  "const": "after_invocation"
+                }
+              },
+              "required": ["name"]
+            },
+            "then": {
+              "properties": {
+                "failure_policy": {
+                  "const": "fail_open"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "failure_policy": {
+                  "const": "fail_closed"
+                }
+              },
+              "required": ["failure_policy"]
+            },
+            "then": {
+              "properties": {
+                "permissions": {
+                  "contains": {
+                    "const": "plugin:lifecycle:policy"
+                  }
+                }
+              }
+            }
+          }
+        ],
         "properties": {
           "name": {
             "type": "string",
@@ -278,11 +316,23 @@
             "type": "array",
             "items": {
               "type": "string",
-              "pattern": "^[a-z][a-z0-9_-]*(?::[a-z][a-z0-9_-]*){0,3}$"
+              "enum": [
+                "plugin:lifecycle:read",
+                "plugin:lifecycle:policy"
+              ]
             },
-            "contains": {
-              "const": "plugin:lifecycle:read"
-            },
+            "anyOf": [
+              {
+                "contains": {
+                  "const": "plugin:lifecycle:read"
+                }
+              },
+              {
+                "contains": {
+                  "const": "plugin:lifecycle:policy"
+                }
+              }
+            ],
             "uniqueItems": true,
             "default": []
           },

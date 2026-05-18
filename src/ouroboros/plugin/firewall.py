@@ -46,6 +46,7 @@ from ouroboros.plugin.digest import (
     canonical_tree_hash,
 )
 from ouroboros.plugin.hooks import (
+    HOOK_BLOCKED_EVENT,
     HOOK_COMPLETED_EVENT,
     HOOK_FAILED_EVENT,
     HOOK_INVOKED_EVENT,
@@ -614,21 +615,25 @@ def invoke_plugin(
                     hook_error = f"hook {hook.name} failed to start: {type(exc).__name__}: {exc}"
 
             if hook_error:
+                blocks_invocation = hook.failure_policy == HookFailurePolicy.FAIL_CLOSED.value
                 _emit(
                     _event_envelope(
-                        event_type=HOOK_FAILED_EVENT,
+                        event_type=HOOK_BLOCKED_EVENT if blocks_invocation else HOOK_FAILED_EVENT,
                         manifest=manifest,
                         namespace=namespace,
                         command_name=command_name,
                         argv=argv,
                         trust_state=trust_state,
                         permissions_used=hook.permissions,
-                        result={"status": "failed", "message": hook_error},
+                        result={
+                            "status": "blocked" if blocks_invocation else "failed",
+                            "message": hook_error,
+                        },
                         provenance=hook_provenance,
                         schema_version=HOOK_AUDIT_SCHEMA_VERSION,
                     )
                 )
-                if hook.failure_policy == HookFailurePolicy.FAIL_CLOSED.value:
+                if blocks_invocation:
                     return False, hook_error
                 continue
 
@@ -865,18 +870,6 @@ def invoke_plugin(
     before_ok, before_message = _run_lifecycle_hooks(HookKind.BEFORE_INVOCATION)
     if not before_ok:
         message = f"before_invocation hook blocked invocation: {before_message}"
-        _emit(
-            _event_envelope(
-                event_type="plugin.failed",
-                manifest=manifest,
-                namespace=namespace,
-                command_name=command_name,
-                argv=argv,
-                trust_state=trust_state,
-                result={"status": "blocked", "message": message},
-                provenance={"correlation_id": correlation_id, "reason": "hook_failed"},
-            )
-        )
         return InvocationResult(
             status="blocked",
             exit_code=None,
@@ -1094,41 +1087,15 @@ def invoke_plugin(
     stdout_hash = hashlib.sha256(stdout_bytes).hexdigest()
     stderr_hash = hashlib.sha256(stderr_bytes).hexdigest()
 
-    after_ok, after_message = _run_lifecycle_hooks(HookKind.AFTER_INVOCATION)
     terminal_provenance = {
         "correlation_id": correlation_id,
         "stdout_sha256": stdout_hash,
         "stderr_sha256": stderr_hash,
     }
 
-    # 6. Terminal event: completed or failed. after_invocation hooks run
-    # before this event so a fail_closed hook can still control the final
-    # outcome instead of being hidden behind an already-emitted success.
-    if not after_ok:
-        message = f"after_invocation hook blocked invocation result: {after_message}"
-        _emit(
-            _event_envelope(
-                event_type="plugin.failed",
-                manifest=manifest,
-                namespace=namespace,
-                command_name=command_name,
-                argv=argv,
-                trust_state=trust_state,
-                result={"status": "blocked", "message": message},
-                provenance=terminal_provenance | {"reason": "hook_failed"},
-            )
-        )
-        return InvocationResult(
-            status="blocked",
-            exit_code=None,
-            message=message,
-            stdout_sha256=stdout_hash,
-            stderr_sha256=stderr_hash,
-            stdout_bytes=stdout_bytes,
-            stderr_bytes=stderr_bytes,
-            events=tuple(emitted),
-        )
-
+    # 6. Terminal event: completed or failed. after_invocation hooks are
+    # fail-open observation only and run after the command terminal event,
+    # so they can never change the returned InvocationResult.
     if completed.returncode == 0:
         _emit(
             _event_envelope(
@@ -1142,6 +1109,7 @@ def invoke_plugin(
                 provenance=terminal_provenance,
             )
         )
+        _run_lifecycle_hooks(HookKind.AFTER_INVOCATION)
         return InvocationResult(
             status="success",
             exit_code=0,
@@ -1165,6 +1133,7 @@ def invoke_plugin(
             provenance=terminal_provenance,
         )
     )
+    _run_lifecycle_hooks(HookKind.AFTER_INVOCATION)
     return InvocationResult(
         status="failed",
         exit_code=completed.returncode,
