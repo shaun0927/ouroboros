@@ -225,6 +225,80 @@ def test_request_allows_benign_token_metadata_keys() -> None:
     assert request.to_event_data()["payload"] == {"token_count": 1024, "token_limit": 4096}
 
 
+def test_plugin_permission_request_uses_firewall_hitl_contract() -> None:
+    request = HumanInputRequest(
+        request_id="hitl-plugin-permission-1",
+        session_id="plugin-session-1",
+        run_id="run-1",
+        invocation_id="plugin.invoke.install",
+        created_by="plugin-firewall",
+        kind=HumanInputKind.APPROVAL,
+        source=HumanInputSource.PLUGIN_FIREWALL,
+        risk_class=HumanInputRiskClass.MATERIAL_BRANCH,
+        question="Allow plugin acme.docs to use plugin:lifecycle:read?",
+        required_permission="plugin:lifecycle:read",
+        resume_target="plugin-firewall:permission:plugin-session-1",
+        surface="plugin.firewall.permission",
+        payload={
+            "plugin_id": "acme.docs",
+            "permission_scope": "plugin:lifecycle:read",
+            "permission_reason": "inspect declared lifecycle hooks",
+        },
+        created_at=datetime(2026, 5, 18, tzinfo=UTC),
+    )
+
+    data = request.to_event_data()
+
+    assert data["kind"] == "approval"
+    assert data["source"] == "plugin_firewall"
+    assert data["risk_class"] == "material_branch"
+    assert data["required_permission"] == "plugin:lifecycle:read"
+    assert data["surface"] == "plugin.firewall.permission"
+    assert data["payload"] == {
+        "plugin_id": "acme.docs",
+        "permission_scope": "plugin:lifecycle:read",
+        "permission_reason": "inspect declared lifecycle hooks",
+    }
+
+
+def test_plugin_destructive_permission_request_uses_destructive_confirmation() -> None:
+    request = HumanInputRequest(
+        request_id="hitl-plugin-permission-2",
+        session_id="plugin-session-2",
+        created_by="plugin-firewall",
+        kind=HumanInputKind.DESTRUCTIVE_CONFIRMATION,
+        source=HumanInputSource.PLUGIN_FIREWALL,
+        risk_class=HumanInputRiskClass.DESTRUCTIVE,
+        question="Allow plugin deployer to run external production deployment?",
+        required_permission="external:production:deploy",
+        resume_target="plugin-firewall:permission:plugin-session-2",
+        surface="plugin.firewall.permission",
+        payload={"plugin_id": "deployer", "permission_scope": "external:production:deploy"},
+        created_at=datetime(2026, 5, 18, tzinfo=UTC),
+    )
+    response = HumanInputResponse(
+        request_id=request.request_id,
+        session_id=request.session_id,
+        actor="local-user",
+        response_kind=HumanInputResponseKind.APPROVAL,
+        approval_decision=False,
+        surface="plugin.firewall.permission",
+        payload={"decision_reason": "outside approved deployment window"},
+        received_at=datetime(2026, 5, 18, 0, 1, tzinfo=UTC),
+    )
+
+    requested = request.to_event_data()
+    answered = response.to_event_data()
+
+    assert requested["kind"] == "destructive_confirmation"
+    assert requested["source"] == "plugin_firewall"
+    assert requested["risk_class"] == "destructive"
+    assert requested["required_permission"] == "external:production:deploy"
+    assert answered["response_kind"] == "approval"
+    assert answered["approval_decision"] is False
+    assert answered["surface"] == "plugin.firewall.permission"
+
+
 def test_request_accepts_mapping_payloads_and_freezes_normalized_copy() -> None:
     source: dict[str, object] = {"items": ["alpha", {"count": 1}]}
     request = HumanInputRequest(

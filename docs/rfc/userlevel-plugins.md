@@ -413,9 +413,50 @@ not trusted blocks before plugin-controlled code runs. Additional rules:
    underlying command would use.
 4. Hook output is advisory unless the hook is declared as a policy hook and the
    caller explicitly consumes the decision.
-5. Plugin permission approval is not implemented here. Required permission
-   denial remains fail-closed at the firewall; future HITL approval must route
-   through #960 rather than adding a hook-local prompt.
+5. Plugin permission approval is specified by the typed HITL contract below.
+   This RFC still does not implement a plugin prompt renderer; until a caller
+   wires a #960 HITL surface, required permission denial remains fail-closed at
+   the firewall rather than falling back to a hook-local prompt.
+
+
+### Plugin permission HITL contract (#960)
+
+When the plugin firewall needs human permission approval, it must express that
+wait through the shared `hitl.*` event contract instead of prompting from plugin
+code. This section is a contract/specification slice only; it does not add a
+plugin prompt runtime, scheduler, or UI renderer.
+
+Required request fields:
+
+| HITL field | Required value for plugin permission waits |
+|---|---|
+| `type` | `hitl.requested` |
+| `kind` | `approval` for ordinary permission grants; `destructive_confirmation` when the requested scope can delete, overwrite, deploy to production, or otherwise cause irreversible side effects |
+| `source` | `plugin_firewall` |
+| `required_permission` | the exact manifest/firewall scope being requested, for example `plugin:lifecycle:read` or `external:production:deploy` |
+| `risk_class` | `low` for read-only local inspection; `material_branch` for local mutation or policy-changing scopes; `credential_gated` for secret/credential authority; `external_production` for non-destructive production/external effects; `destructive` for irreversible deletion, overwrite, or production deployment |
+| `resume_target` | a firewall-owned target such as `plugin-firewall:permission:<session-or-invocation-id>` |
+| `surface` | the renderer that owns the question, for example `plugin.firewall.permission`, `cli.plugin.permission`, or a future MCP/TUI permission surface |
+| `payload` | bounded, non-secret metadata such as `plugin_id`, `permission_scope`, `permission_reason`, and `invocation_id` |
+
+Responses must be recorded as `hitl.answered` with `response_kind=approval`.
+`approval_decision=true` resumes the firewall path that originally requested the
+permission; `approval_decision=false` is a denial and must remain fail-closed.
+Aborted renderers must persist `hitl.cancelled`; expired permission waits must
+persist `hitl.timed_out` and use the contract's timeout action rather than
+letting plugin code continue silently.
+
+Secret material must not be stored in HITL payloads or answers. If the user must
+provide credentials, the permission request should point at a credential-gated
+external surface and persist only a non-secret reference or denial reason.
+
+Non-goals for this slice:
+
+1. no plugin-controlled `input()`/prompt fallback;
+2. no bypass of manifest permission validation;
+3. no persistence of tokens, API keys, or credential values;
+4. no scheduler or UI implementation for pending plugin waits; and
+5. no conversion of plugin permission waits into JobManager jobs.
 
 ### Hook audit events
 
