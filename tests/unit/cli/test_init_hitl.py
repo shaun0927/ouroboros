@@ -162,7 +162,6 @@ async def test_empty_interview_response_retries_same_hitl_request_without_cancel
     events = [event for batch in store.batches for event in batch]
     assert [event.type for event in events] == [
         "hitl.requested",
-        "hitl.requested",
         "hitl.answered",
     ]
     assert {event.data["request_id"] for event in events} == {"hitl_interview_interview_123_1"}
@@ -220,11 +219,40 @@ async def test_rejected_interview_response_retries_without_answered_event(
     events = [event for batch in store.batches for event in batch]
     assert [event.type for event in events] == [
         "hitl.requested",
-        "hitl.requested",
         "hitl.answered",
     ]
     assert engine.attempts == 2
     assert final_state.is_complete
+
+
+@pytest.mark.asyncio
+async def test_prompt_abort_does_not_leave_pending_hitl_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeEngine:
+        async def ask_next_question(self, state: InterviewState):
+            return Result.ok("What should it do?")
+
+        async def record_response(
+            self,
+            state: InterviewState,
+            user_response: str,
+            question: str,
+        ):
+            raise AssertionError("record_response should not run after prompt abort")
+
+    async def fake_prompt(_prompt: str) -> str:
+        raise EOFError
+
+    monkeypatch.setattr("ouroboros.cli.commands.init.multiline_prompt_async", fake_prompt)
+
+    state = InterviewState(interview_id="interview_123")
+    store = FakeEventStore()
+
+    with pytest.raises(EOFError):
+        await _run_interview_loop(FakeEngine(), state, event_store=store)
+
+    assert store.batches == []
 
 
 @pytest.mark.asyncio

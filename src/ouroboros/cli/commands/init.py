@@ -295,8 +295,6 @@ async def _run_interview_loop(
         console.print()
 
         hitl_request = _interview_hitl_request(state, round_number=current_round, question=question)
-        if not await _append_hitl_events(event_store, [create_hitl_requested_event(hitl_request)]):
-            event_store = None
 
         # Get user response (multiline-safe for paste)
         response = await multiline_prompt_async("Your response")
@@ -305,8 +303,11 @@ async def _run_interview_loop(
             print_error("Response cannot be empty. Please try again.")
             continue
 
-        # Record response before logging a terminal HITL answer: only accepted
-        # interview transitions should become terminal HITL events.
+        # Record response before logging HITL lifecycle telemetry: only accepted
+        # interview transitions should become HITL events. Because CLI init is a
+        # synchronous local prompt (not an external durable wait), persist the
+        # request and accepted answer atomically to avoid orphaning pending
+        # requests when input aborts or telemetry writes fail.
         record_result = await engine.record_response(state, response, question)
         if record_result.is_err:
             print_error(f"Failed to record response: {record_result.error.message}")
@@ -315,10 +316,11 @@ async def _run_interview_loop(
         if not await _append_hitl_events(
             event_store,
             [
+                create_hitl_requested_event(hitl_request),
                 create_hitl_answered_event(
                     hitl_request,
                     _interview_hitl_response(hitl_request, response),
-                )
+                ),
             ],
         ):
             event_store = None
