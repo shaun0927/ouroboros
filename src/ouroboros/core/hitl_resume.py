@@ -173,7 +173,10 @@ def _plain_json_value(value: Any) -> Any:
 
 def _datetime_from_payload(value: Any, *, fallback: datetime) -> datetime:
     if isinstance(value, str) and value.strip():
-        return datetime.fromisoformat(value)
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return fallback
     return fallback
 
 
