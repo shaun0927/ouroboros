@@ -207,8 +207,20 @@ class TestV03HookAuditEvents:
             "plugin.failed",
         )
 
-    def test_manifest_audit_events_accept_hook_wrapper_events(self, tmp_path: Path) -> None:
+    def test_manifest_audit_events_accept_hook_schema_vendored_events(self, tmp_path: Path) -> None:
         payload = _v03_manifest()
-        payload["audit"] = {"events": ["plugin.hook.blocked", "plugin.hook.failed"]}
+        payload["audit"] = {
+            "events": [
+                "plugin.hook.invoked",
+                "plugin.hook.completed",
+                "plugin.hook.blocked",
+                "plugin.hook.failed",
+            ]
+        }
         manifest = load_manifest(_write(tmp_path, payload))
-        assert manifest.audit.events == ("plugin.hook.blocked", "plugin.hook.failed")
+        assert manifest.audit.events == (
+            "plugin.hook.invoked",
+            "plugin.hook.completed",
+            "plugin.hook.blocked",
+            "plugin.hook.failed",
+        )
