@@ -119,7 +119,9 @@ def test_human_input_request_from_snapshot_reconstructs_persisted_contract() -> 
     assert reconstructed.to_event_data()["created_at"] == "2026-05-18T00:00:00+00:00"
 
 
-def test_human_input_request_from_legacy_plugin_firewall_snapshot_accepts_missing_new_fields() -> None:
+def test_human_input_request_from_legacy_plugin_firewall_snapshot_accepts_missing_new_fields() -> (
+    None
+):
     requested = BaseEvent(
         type="hitl.requested",
         aggregate_type="hitl",
