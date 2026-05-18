@@ -333,11 +333,15 @@ def _goal_tokens(value: str) -> set[str]:
         "the",
         "to",
     }
-    tokens = {
-        token
-        for token in re.findall(r"[^\W_]+", value.casefold())
-        if len(token) >= 2 and token not in stopwords
-    }
+    tokens = set()
+    for token in re.findall(r"[^\W_]+", value.casefold()):
+        if len(token) >= 2 and token not in stopwords:
+            tokens.add(token)
+        tokens.update(
+            ascii_token
+            for ascii_token in re.findall(r"[a-z0-9]+", token)
+            if len(ascii_token) >= 2 and ascii_token not in stopwords
+        )
     if "cli" in tokens:
         tokens.update({"command", "line", "interface"})
     if {"command", "line", "interface"} <= tokens:

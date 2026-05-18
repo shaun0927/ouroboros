@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from ouroboros.auto.grading import _seed_goal_matches_ledger
 from ouroboros.auto.interview_driver import (
     AutoInterviewDriver,
     FunctionInterviewBackend,
@@ -38,6 +39,12 @@ _ACCEPTANCE_MATRIX_GOALS = (
     """.strip(),
     "a static html page with a counter that survives refresh via localStorage",
 )
+
+
+def test_korean_mixed_script_goal_preserves_cli_alias_for_grading() -> None:
+    ledger = SeedDraftLedger.from_goal("로컬 markdown todo CLI를 만들어줘")
+
+    assert _seed_goal_matches_ledger("markdown todo cli", ledger)
 
 
 def _matrix_seed(goal: str) -> Seed:
