@@ -20,7 +20,9 @@ from typing import Any, Final, cast
 
 RUNTIME_TRANSITION_SCHEMA_VERSION: Final[int] = 1
 MAX_RUNTIME_TRANSITION_PAYLOAD_BYTES: Final[int] = 8192
-_CONCRETE_JOB_ID_PATTERN: Final[re.Pattern[str]] = re.compile(r"^job-[A-Za-z0-9][A-Za-z0-9_.:-]*$")
+_CONCRETE_JOB_ID_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"^(?:job_[0-9a-f]{12}|job-[A-Za-z0-9][A-Za-z0-9_.:-]*)$"
+)
 
 _SECRET_KEYS: Final[frozenset[str]] = frozenset(
     {

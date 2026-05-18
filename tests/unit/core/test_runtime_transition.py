@@ -271,7 +271,7 @@ def test_plugin_transition_rejects_concrete_job_subject_id() -> None:
     result = evaluate_runtime_transition(
         _transition(
             runtime_scope=RuntimeScope.PLUGIN,
-            subject_id="job-ralph-123",
+            subject_id="job_012345abcdef",
             from_state="delegated",
             to_state="blocked",
             reason="plugin child session reported blocked state",
@@ -289,7 +289,30 @@ def test_plugin_transition_rejects_concrete_job_subject_id() -> None:
     assert "JobManager job ids" in result.message
 
 
-def test_plugin_transition_rejects_concrete_job_metadata_id() -> None:
+def test_plugin_transition_rejects_production_job_metadata_id_regression() -> None:
+    result = evaluate_runtime_transition(
+        _transition(
+            runtime_scope=RuntimeScope.PLUGIN,
+            subject_id="plugin:opencode-ralph/session-42",
+            from_state="delegated",
+            to_state="blocked",
+            reason="plugin child session reported blocked state",
+            actor=RuntimeTransitionActor.PLUGIN,
+            expected_revision=None,
+            evidence_refs=("event://plugin/opencode-ralph/delegated/session-42/blocked",),
+            metadata={"job_id": "job_012345abcdef"},
+        ),
+        current_state="delegated",
+        allowed_transitions=(("delegated", "blocked"),),
+    )
+
+    assert result.accepted is False
+    assert result.failure_class is RuntimeFailureClass.BLOCKING
+    assert result.failure_kind is RuntimeTransitionFailureKind.INVALID_SCOPE
+    assert "JobManager job ids" in result.message
+
+
+def test_plugin_transition_still_rejects_legacy_job_metadata_id() -> None:
     result = evaluate_runtime_transition(
         _transition(
             runtime_scope=RuntimeScope.PLUGIN,
@@ -315,14 +338,14 @@ def test_plugin_transition_rejects_concrete_job_metadata_id() -> None:
 def test_jobmanager_transition_uses_concrete_mcp_job_subject() -> None:
     transition = _transition(
         runtime_scope=RuntimeScope.MCP_JOB,
-        subject_id="job-ralph-123",
+        subject_id="job_012345abcdef",
         from_state="running",
         to_state="completed",
         reason="JobManager persisted terminal result",
         actor=RuntimeTransitionActor.SYSTEM,
         expected_revision=None,
-        evidence_refs=("event://mcp.job.status/job-ralph-123/completed",),
-        metadata={"result_ref": "job://job-ralph-123/result"},
+        evidence_refs=("event://mcp.job.status/job_012345abcdef/completed",),
+        metadata={"result_ref": "job://job_012345abcdef/result"},
     )
 
     result = evaluate_runtime_transition(
@@ -334,7 +357,7 @@ def test_jobmanager_transition_uses_concrete_mcp_job_subject() -> None:
     )
 
     assert result.accepted is True
-    assert transition.aggregate_id == "mcp_job:job-ralph-123"
+    assert transition.aggregate_id == "mcp_job:job_012345abcdef"
     assert result.to_event_data()["runtime_scope"] == "mcp_job"
 
 
