@@ -75,6 +75,39 @@ def test_projects_pending_request_snapshot() -> None:
     assert snapshot.request["payload"] == {"nested": {"count": 1}}
 
 
+def test_projects_legacy_schema_v1_plugin_firewall_request_missing_new_fields() -> None:
+    event = _with_time(
+        BaseEvent(
+            type="hitl.requested",
+            aggregate_type="hitl",
+            aggregate_id="hitl-legacy-plugin",
+            data={
+                "schema_version": 1,
+                "request_id": "hitl-legacy-plugin",
+                "session_id": "plugin-session-1",
+                "created_by": "plugin-firewall",
+                "kind": "approval",
+                "source": "plugin_firewall",
+                "risk_class": "material_branch",
+                "question": "Allow plugin acme.docs to use plugin:lifecycle:read?",
+                "resume_target": "plugin-firewall:permission:plugin-session-1",
+                "payload": {"plugin_id": "acme.docs"},
+            },
+        ),
+        0,
+        "evt_legacy_plugin_requested",
+    )
+
+    snapshots = project_human_input_state([event])
+
+    assert len(snapshots) == 1
+    snapshot = snapshots[0]
+    assert snapshot.request_id == "hitl-legacy-plugin"
+    assert snapshot.state is HumanInputState.PENDING
+    assert snapshot.request["source"] == "plugin_firewall"
+    assert snapshot.request["payload"] == {"plugin_id": "acme.docs"}
+
+
 def test_answered_event_closes_request_with_response_payload() -> None:
     request = _request()
     events = [

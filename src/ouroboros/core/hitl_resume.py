@@ -82,9 +82,10 @@ def human_input_request_from_snapshot(snapshot: HumanInputSnapshot) -> HumanInpu
 
     data = snapshot.request
     try:
-        return HumanInputRequest(
+        return HumanInputRequest.from_persisted_schema_v1(
             request_id=_required_str(data, "request_id"),
             session_id=_required_str(data, "session_id"),
+            schema_version=data.get("schema_version", 1),
             run_id=_optional_str(data.get("run_id")),
             invocation_id=_optional_str(data.get("invocation_id")),
             created_by=_required_str(data, "created_by"),

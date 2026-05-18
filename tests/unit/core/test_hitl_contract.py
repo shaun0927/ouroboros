@@ -331,6 +331,22 @@ def test_plugin_permission_request_requires_required_permission() -> None:
         )
 
 
+def test_fresh_destructive_plugin_permission_request_requires_required_permission() -> None:
+    with pytest.raises(ValueError, match="required_permission"):
+        HumanInputRequest(
+            request_id="hitl-plugin-permission-2",
+            session_id="plugin-session-2",
+            created_by="plugin-firewall",
+            kind=HumanInputKind.DESTRUCTIVE_CONFIRMATION,
+            source=HumanInputSource.PLUGIN_FIREWALL,
+            risk_class=HumanInputRiskClass.DESTRUCTIVE,
+            question="Allow plugin deployer to run external production deployment?",
+            resume_target="plugin-firewall:permission:plugin-session-2",
+            surface="plugin.firewall.permission",
+            payload={"permission_scope": "external:production:deploy"},
+        )
+
+
 def test_plugin_permission_request_requires_surface() -> None:
     with pytest.raises(ValueError, match="surface"):
         HumanInputRequest(

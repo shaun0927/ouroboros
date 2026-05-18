@@ -208,9 +208,10 @@ def _requested_event_matches_contract(event: BaseEvent, request_id: str) -> bool
         if not isinstance(payload, Mapping):
             return False
         timeout_seconds = event.data.get("timeout_seconds")
-        HumanInputRequest(
+        HumanInputRequest.from_persisted_schema_v1(
             request_id=request_id,
             session_id=_required_str(event.data, "session_id", event.id),
+            schema_version=event.data.get("schema_version", 1),
             run_id=_optional_str(event.data.get("run_id")),
             invocation_id=_optional_str(event.data.get("invocation_id")),
             created_by=_required_str(event.data, "created_by", event.id),

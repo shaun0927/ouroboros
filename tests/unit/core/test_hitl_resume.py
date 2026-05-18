@@ -19,6 +19,7 @@ from ouroboros.core.hitl_resume import (
     pending_human_input_snapshot_for_response,
 )
 from ouroboros.core.hitl_state import HumanInputState, project_human_input_state
+from ouroboros.events.base import BaseEvent
 from ouroboros.events.hitl import create_hitl_answered_event, create_hitl_requested_event
 
 
@@ -116,6 +117,48 @@ def test_human_input_request_from_snapshot_reconstructs_persisted_contract() -> 
     assert reconstructed.risk_class is HumanInputRiskClass.MATERIAL_BRANCH
     assert reconstructed.payload["plan_id"] == "plan-1"
     assert reconstructed.to_event_data()["created_at"] == "2026-05-18T00:00:00+00:00"
+
+
+def test_human_input_request_from_legacy_plugin_firewall_snapshot_accepts_missing_new_fields() -> None:
+    requested = BaseEvent(
+        type="hitl.requested",
+        aggregate_type="hitl",
+        aggregate_id="hitl-legacy-plugin",
+        data={
+            "schema_version": 1,
+            "request_id": "hitl-legacy-plugin",
+            "session_id": "plugin-session-1",
+            "created_by": "plugin-firewall",
+            "kind": "destructive_confirmation",
+            "source": "plugin_firewall",
+            "risk_class": "destructive",
+            "question": "Allow plugin deployer to run external production deployment?",
+            "resume_target": "plugin-firewall:permission:plugin-session-1",
+            "payload": {"plugin_id": "deployer"},
+        },
+        timestamp=datetime(2026, 5, 18, tzinfo=UTC),
+    )
+    snapshot = project_human_input_state([requested])[0]
+
+    reconstructed = human_input_request_from_snapshot(snapshot)
+    event = create_validated_hitl_resume_event(
+        [requested],
+        HumanInputResponse(
+            request_id="hitl-legacy-plugin",
+            session_id="plugin-session-1",
+            actor="local-user",
+            response_kind=HumanInputResponseKind.APPROVAL,
+            approval_decision=True,
+        ),
+    )
+
+    assert reconstructed.kind is HumanInputKind.DESTRUCTIVE_CONFIRMATION
+    assert reconstructed.source is HumanInputSource.PLUGIN_FIREWALL
+    assert reconstructed.required_permission is None
+    assert reconstructed.surface is None
+    assert reconstructed.payload == {"plugin_id": "deployer"}
+    assert event.type == "hitl.answered"
+    assert event.aggregate_id == "hitl-legacy-plugin"
 
 
 def test_create_validated_hitl_resume_event_answers_wait_with_malformed_created_at() -> None:
