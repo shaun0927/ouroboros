@@ -36,14 +36,12 @@ from collections.abc import Callable
 import copy
 import uuid
 
-from ouroboros.plugin.hooks import HOOK_EVENT_TYPES
-
 PLUGIN_AGGREGATE_TYPE = "plugin"
 
-# Plugin audit event types accepted by the current core ledger adapter.
-# Runtime hook dispatch remains a separate #939 follow-up; these hook event
-# names are schema-vendored here so future dispatch does not invent audit
-# vocabulary at emission time.
+# Plugin audit event types accepted by the current core ledger adapter and
+# emitted by current runtime/plugin-manager paths. Future hook lifecycle event
+# names may be vendored in newer audit-event schemas before runtime dispatch
+# lands, but they are intentionally not part of this current-runtime vocabulary.
 AUDIT_EVENT_TYPES: tuple[str, ...] = (
     "plugin.discovered",
     "plugin.installed",
@@ -52,7 +50,6 @@ AUDIT_EVENT_TYPES: tuple[str, ...] = (
     "plugin.permission_used",
     "plugin.completed",
     "plugin.failed",
-    *tuple(sorted(HOOK_EVENT_TYPES)),
 )
 
 
