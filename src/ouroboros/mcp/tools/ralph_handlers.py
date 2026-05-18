@@ -465,6 +465,25 @@ class RalphHandler:
         )
 
 
+@dataclass
+class StartRalphHandler(RalphHandler):
+    """Compatibility fire-and-forget alias for the runtime-owned Ralph job surface."""
+
+    @property
+    def definition(self) -> MCPToolDefinition:
+        base = super().definition
+        return MCPToolDefinition(
+            name="ouroboros_start_ralph",
+            description=(
+                "Fire-and-forget alias for ouroboros_ralph. Starts the same "
+                "runtime-owned Ralph loop and returns a job_id immediately for "
+                "ouroboros_job_status, ouroboros_job_wait, ouroboros_job_result, "
+                "and ouroboros_cancel_job."
+            ),
+            parameters=base.parameters,
+        )
+
+
 def _normalize_lineage_id(value: Any) -> str:
     """Normalize user-provided lineage IDs before starting a mutating Ralph loop."""
     return value.strip() if isinstance(value, str) else ""

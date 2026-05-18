@@ -59,7 +59,7 @@ from ouroboros.mcp.tools.query_handlers import (
     QueryEventsHandler,
     SessionStatusHandler,
 )
-from ouroboros.mcp.tools.ralph_handlers import RalphHandler
+from ouroboros.mcp.tools.ralph_handlers import RalphHandler, StartRalphHandler
 
 if TYPE_CHECKING:
     from ouroboros.orchestrator.agent_runtime_context import AgentRuntimeContext
@@ -369,6 +369,22 @@ def ralph_handler(
     )
 
 
+def start_ralph_handler(
+    *,
+    runtime_backend: str | None = None,
+    opencode_mode: str | None = None,
+) -> StartRalphHandler:
+    """Create a fire-and-forget Ralph start handler alias."""
+    return StartRalphHandler(
+        evolve_handler=EvolveStepHandler(
+            agent_runtime_backend=runtime_backend,
+            opencode_mode=opencode_mode,
+        ),
+        agent_runtime_backend=runtime_backend,
+        opencode_mode=opencode_mode,
+    )
+
+
 def lineage_status_handler() -> LineageStatusHandler:
     """Create a LineageStatusHandler instance."""
     return LineageStatusHandler()
@@ -406,6 +422,7 @@ OuroborosToolHandlers = tuple[
     | EvolveStepHandler
     | StartEvolveStepHandler
     | RalphHandler
+    | StartRalphHandler
     | LineageStatusHandler
     | EvolveRewindHandler
     | CancelExecutionHandler
@@ -534,6 +551,14 @@ def get_ouroboros_tools(
             opencode_mode=opencode_mode,
         ),
         RalphHandler(
+            evolve_handler=EvolveStepHandler(
+                agent_runtime_backend=runtime_backend,
+                opencode_mode=opencode_mode,
+            ),
+            agent_runtime_backend=runtime_backend,
+            opencode_mode=opencode_mode,
+        ),
+        StartRalphHandler(
             evolve_handler=EvolveStepHandler(
                 agent_runtime_backend=runtime_backend,
                 opencode_mode=opencode_mode,

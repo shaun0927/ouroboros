@@ -1497,6 +1497,7 @@ class TestOuroborosTools:
         "ouroboros_start_evaluate",
         "ouroboros_start_evolve_step",
         "ouroboros_start_execute_seed",
+        "ouroboros_start_ralph",
     }
 
     def test_ouroboros_tools_contains_all_handlers(self) -> None:
@@ -1532,6 +1533,9 @@ class TestOuroborosTools:
         assert PMInterviewHandler in handler_types
         assert QAHandler in handler_types
         assert RalphHandler in handler_types
+        from ouroboros.mcp.tools.ralph_handlers import StartRalphHandler
+
+        assert StartRalphHandler in handler_types
 
     def test_all_tools_have_unique_names(self) -> None:
         """All tools have unique names."""
@@ -2493,3 +2497,12 @@ class TestInterviewHandlerDrain:
         assert handler._closed is False
         await handler.close()
         assert handler._closed is True
+
+
+def test_default_tools_include_start_ralph_alias() -> None:
+    from ouroboros.mcp.tools.definitions import get_ouroboros_tools
+
+    names = [handler.definition.name for handler in get_ouroboros_tools(include_auto=False)]
+
+    assert "ouroboros_ralph" in names
+    assert "ouroboros_start_ralph" in names

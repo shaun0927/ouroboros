@@ -32,6 +32,7 @@ from ouroboros.mcp.tools.definitions import (
     StartEvaluateHandler,
     StartEvolveStepHandler,
     StartExecuteSeedHandler,
+    StartRalphHandler,
     ac_tree_hud_handler,
     cancel_job_handler,
     evaluate_handler,
@@ -53,6 +54,7 @@ from ouroboros.mcp.tools.definitions import (
     start_evaluate_handler,
     start_evolve_step_handler,
     start_execute_seed_handler,
+    start_ralph_handler,
 )
 from ouroboros.mcp.tools.registry import ToolRegistry
 
@@ -77,6 +79,7 @@ __all__ = [
     "OUROBOROS_TOOLS",
     "QueryEventsHandler",
     "RalphHandler",
+    "StartRalphHandler",
     "SessionStatusHandler",
     "StartEvaluateHandler",
     "StartEvolveStepHandler",
@@ -99,6 +102,7 @@ __all__ = [
     "measure_drift_handler",
     "query_events_handler",
     "ralph_handler",
+    "start_ralph_handler",
     "session_status_handler",
     "start_evaluate_handler",
     "start_evolve_step_handler",

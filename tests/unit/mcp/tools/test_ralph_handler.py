@@ -308,3 +308,15 @@ def test_ralph_handler_definition_is_public_tool() -> None:
     }
     assert "ouroboros_cancel_job" in handler.definition.description
     assert "ouroboros_job_cancel" not in handler.definition.description
+
+
+def test_start_ralph_handler_definition_is_fire_and_forget_alias() -> None:
+    from ouroboros.mcp.tools.ralph_handlers import StartRalphHandler
+
+    handler = StartRalphHandler(evolve_handler=_FakeEvolveHandler(["converged"]))  # type: ignore[arg-type]
+
+    assert handler.definition.name == "ouroboros_start_ralph"
+    assert tuple(param.name for param in handler.definition.parameters) == tuple(
+        param.name for param in RalphHandler().definition.parameters
+    )
+    assert "job_id" in handler.definition.description
