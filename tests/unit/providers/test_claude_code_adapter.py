@@ -1867,6 +1867,50 @@ class TestProviderErrorFormatDetails:
         assert "subtype" not in result.error.details
 
     @pytest.mark.asyncio
+    async def test_malformed_tool_use_diagnostic_does_not_mask_later_terminal_error(self) -> None:
+        """Concrete terminal SDK errors must override stale malformed-turn candidates."""
+        adapter = ClaudeCodeAdapter(max_turns=5)
+        config = CompletionConfig(model="claude-sonnet-4-6")
+
+        mock_options_cls = MagicMock()
+
+        async def malformed_then_auth_error_query(*args, **kwargs):
+            assistant_msg = MagicMock()
+            type(assistant_msg).__name__ = "AssistantMessage"
+            assistant_msg.stop_reason = "tool_use"
+            assistant_msg.content = []
+            yield assistant_msg
+
+            result_msg = MagicMock()
+            type(result_msg).__name__ = "ResultMessage"
+            result_msg.structured_output = None
+            result_msg.result = "Authentication failed"
+            result_msg.is_error = True
+            result_msg.subtype = "error_during_execution"
+            result_msg.errors = ["Invalid API key"]
+            result_msg.stop_reason = None
+            yield result_msg
+
+        sdk_module = _make_sdk_mock(
+            mock_options_cls, MagicMock(side_effect=malformed_then_auth_error_query)
+        )
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "claude_agent_sdk": sdk_module,
+                "claude_agent_sdk._errors": sdk_module._errors,
+            },
+        ):
+            result = await adapter._execute_single_request("test prompt", config)
+
+        assert result.is_err
+        assert result.error.message == "Authentication failed"
+        assert result.error.details["subtype"] == "error_during_execution"
+        assert result.error.details["errors"] == ["Invalid API key"]
+        assert result.error.details.get("error_type") != "MalformedToolUseTurn"
+
+    @pytest.mark.asyncio
     async def test_malformed_tool_use_diagnostic_clears_after_later_success(self) -> None:
         """A transient malformed assistant turn must not override a later successful result."""
         adapter = ClaudeCodeAdapter(max_turns=5)

@@ -1057,7 +1057,7 @@ class ClaudeCodeAdapter:
                             subtype=subtype,
                             partial_rejected=bool(partial_content),
                         )
-                        if _has_malformed_tool_use_error():
+                        if _has_malformed_tool_use_error() and subtype == "error_max_turns":
                             continue
                         error_result = ProviderError(
                             message=error_msg,
