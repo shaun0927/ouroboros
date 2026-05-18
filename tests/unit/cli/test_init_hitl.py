@@ -104,12 +104,14 @@ async def test_get_init_event_store_failure_continues_without_store(
     warnings: list[str] = []
     event_store = Mock()
     event_store.initialize = AsyncMock(side_effect=RuntimeError("db unavailable"))
+    event_store.close = AsyncMock()
 
     monkeypatch.setattr("ouroboros.cli.commands.init.print_warning", warnings.append)
     with patch("ouroboros.persistence.event_store.EventStore", return_value=event_store):
         result = await _get_init_event_store()
 
     assert result is None
+    event_store.close.assert_awaited_once()
     assert warnings == ["HITL telemetry is unavailable; continuing without it: db unavailable"]
 
 
@@ -259,6 +261,17 @@ async def test_prompt_abort_does_not_leave_pending_hitl_request(
 async def test_interview_loop_records_and_saves_answer_when_hitl_append_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    order: list[str] = []
+
+    class StoreFailsAfterSave:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def append_batch(self, events):
+            self.calls += 1
+            order.append("append")
+            raise RuntimeError("telemetry write failed")
+
     class FakeEngine:
         def __init__(self) -> None:
             self.recorded: list[tuple[int, str, str]] = []
@@ -285,6 +298,7 @@ async def test_interview_loop_records_and_saves_answer_when_hitl_append_fails(
             return Result.ok(state)
 
         async def save_state(self, state: InterviewState):
+            order.append("save")
             self.saved.append(state)
             return Result.ok(None)
 
@@ -295,12 +309,13 @@ async def test_interview_loop_records_and_saves_answer_when_hitl_append_fails(
     monkeypatch.setattr("ouroboros.cli.commands.init.print_warning", lambda _message: None)
 
     state = InterviewState(interview_id="interview_123")
-    store = FailingEventStore()
+    store = StoreFailsAfterSave()
     engine = FakeEngine()
 
     final_state = await _run_interview_loop(engine, state, event_store=store)
 
     assert store.calls == 1
+    assert order == ["save", "append"]
     assert engine.recorded == [(1, "Useful answer", "What should it do?")]
     assert engine.saved == [final_state]
     assert final_state.is_complete

@@ -241,12 +241,18 @@ async def _append_hitl_events(event_store, events: list) -> bool:
 async def _get_init_event_store():
     from ouroboros.persistence.event_store import EventStore
 
+    event_store = None
     try:
         db_path = Path.home() / ".ouroboros" / "ouroboros.db"
         db_path.parent.mkdir(parents=True, exist_ok=True)
         event_store = EventStore(f"sqlite+aiosqlite:///{db_path}")
         await event_store.initialize()
     except Exception as exc:  # noqa: BLE001 - init interview must not depend on telemetry.
+        if event_store is not None:
+            try:
+                await event_store.close()
+            except Exception:
+                pass
         print_warning(f"HITL telemetry is unavailable; continuing without it: {exc}")
         return None
     return event_store
@@ -303,17 +309,22 @@ async def _run_interview_loop(
             print_error("Response cannot be empty. Please try again.")
             continue
 
-        # Record response before logging HITL lifecycle telemetry: only accepted
-        # interview transitions should become HITL events. Because CLI init is a
-        # synchronous local prompt (not an external durable wait), persist the
-        # request and accepted answer atomically to avoid orphaning pending
-        # requests when input aborts or telemetry writes fail.
+        # Record and save the accepted response before best-effort HITL telemetry
+        # touches SQLite. CLI init's durable interview state must not wait behind
+        # telemetry locks/retries; HITL events are emitted only after the
+        # interview transition is durably saved.
         record_result = await engine.record_response(state, response, question)
         if record_result.is_err:
             print_error(f"Failed to record response: {record_result.error.message}")
             continue
 
-        if not await _append_hitl_events(
+        state = record_result.value
+
+        # Save state immediately after recording
+        save_result = await engine.save_state(state)
+        if save_result.is_err:
+            print_error(f"Warning: Failed to save state: {save_result.error.message}")
+        elif not await _append_hitl_events(
             event_store,
             [
                 create_hitl_requested_event(hitl_request),
@@ -324,13 +335,6 @@ async def _run_interview_loop(
             ],
         ):
             event_store = None
-
-        state = record_result.value
-
-        # Save state immediately after recording
-        save_result = await engine.save_state(state)
-        if save_result.is_err:
-            print_error(f"Warning: Failed to save state: {save_result.error.message}")
 
         console.print()
 
