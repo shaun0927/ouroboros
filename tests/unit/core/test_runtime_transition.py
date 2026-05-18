@@ -230,6 +230,92 @@ def test_missing_required_evidence_is_blocking() -> None:
     assert result.failure_kind is RuntimeTransitionFailureKind.MISSING_EVIDENCE
 
 
+def test_plugin_delegation_transition_is_not_a_jobmanager_job() -> None:
+    transition = _transition(
+        runtime_scope=RuntimeScope.PLUGIN,
+        subject_id="plugin:opencode-ralph/session-42",
+        from_state="delegated",
+        to_state="completed",
+        reason="plugin child session reported completion",
+        actor=RuntimeTransitionActor.PLUGIN,
+        expected_revision=None,
+        evidence_refs=("event://plugin/opencode-ralph/delegated/session-42/completed",),
+        metadata={
+            "delegation_mode": "plugin_child_session",
+            "job_id": None,
+            "owner": "opencode_plugin_bridge",
+        },
+    )
+
+    result = evaluate_runtime_transition(
+        transition,
+        current_state="delegated",
+        allowed_transitions=(("delegated", "completed"), ("delegated", "blocked")),
+        terminal_states=("completed", "failed", "cancelled"),
+        require_evidence=True,
+    )
+
+    event_data = result.to_event_data()
+    assert result.accepted is True
+    assert transition.aggregate_id == "plugin:plugin:opencode-ralph/session-42"
+    assert event_data["runtime_scope"] == "plugin"
+    assert event_data["subject_id"] == "plugin:opencode-ralph/session-42"
+    assert event_data["metadata"] == {
+        "delegation_mode": "plugin_child_session",
+        "job_id": None,
+        "owner": "opencode_plugin_bridge",
+    }
+
+
+def test_jobmanager_transition_uses_concrete_mcp_job_subject() -> None:
+    transition = _transition(
+        runtime_scope=RuntimeScope.MCP_JOB,
+        subject_id="job-ralph-123",
+        from_state="running",
+        to_state="completed",
+        reason="JobManager persisted terminal result",
+        actor=RuntimeTransitionActor.SYSTEM,
+        expected_revision=None,
+        evidence_refs=("event://mcp.job.status/job-ralph-123/completed",),
+        metadata={"result_ref": "job://job-ralph-123/result"},
+    )
+
+    result = evaluate_runtime_transition(
+        transition,
+        current_state="running",
+        allowed_transitions=(("running", "completed"), ("running", "failed")),
+        terminal_states=("completed", "failed", "cancelled"),
+        require_evidence=True,
+    )
+
+    assert result.accepted is True
+    assert transition.aggregate_id == "mcp_job:job-ralph-123"
+    assert result.to_event_data()["runtime_scope"] == "mcp_job"
+
+
+def test_plugin_terminal_transition_without_bridge_evidence_is_blocking() -> None:
+    result = evaluate_runtime_transition(
+        _transition(
+            runtime_scope=RuntimeScope.PLUGIN,
+            subject_id="plugin:opencode-ralph/session-42",
+            from_state="delegated",
+            to_state="completed",
+            reason="plugin child session reported completion",
+            actor=RuntimeTransitionActor.PLUGIN,
+            expected_revision=None,
+            evidence_refs=(),
+        ),
+        current_state="delegated",
+        allowed_transitions=(("delegated", "completed"), ("delegated", "blocked")),
+        terminal_states=("completed", "failed", "cancelled"),
+        require_evidence=True,
+    )
+
+    assert result.accepted is False
+    assert result.failure_class is RuntimeFailureClass.BLOCKING
+    assert result.failure_kind is RuntimeTransitionFailureKind.MISSING_EVIDENCE
+
+
 def test_validation_rejects_noop_duplicate_evidence_and_secret_metadata() -> None:
     with pytest.raises(ValueError, match="from_state and to_state must differ"):
         _transition(from_state="running", to_state="running")
