@@ -26,7 +26,11 @@ from ouroboros.core.hitl_contract import (
     HumanInputRiskClass,
     HumanInputSource,
 )
-from ouroboros.events.hitl import create_hitl_answered_event, create_hitl_requested_event
+from ouroboros.events.hitl import (
+    create_hitl_answered_event,
+    create_hitl_cancelled_event,
+    create_hitl_requested_event,
+)
 
 app = typer.Typer(
     name="cancel",
@@ -60,9 +64,22 @@ async def _confirm_cancel_session_with_hitl(
         payload={"session_status": status},
         created_at=requested_at,
     )
-    await event_store.append(create_hitl_requested_event(request))
+    requested_event = create_hitl_requested_event(request)
+    try:
+        approved = typer.confirm(request.question)
+    except (KeyboardInterrupt, EOFError, typer.Abort):
+        await event_store.append_batch(
+            [
+                requested_event,
+                create_hitl_cancelled_event(
+                    request,
+                    reason="Local CLI confirmation prompt aborted",
+                    actor="local-user",
+                ),
+            ]
+        )
+        return False
 
-    approved = typer.confirm(request.question)
     response = HumanInputResponse(
         request_id=request.request_id,
         session_id=session_id,
@@ -73,7 +90,12 @@ async def _confirm_cancel_session_with_hitl(
         surface="cli.cancel.execution",
         received_at=datetime.now(UTC),
     )
-    await event_store.append(create_hitl_answered_event(request, response))
+    await event_store.append_batch(
+        [
+            requested_event,
+            create_hitl_answered_event(request, response),
+        ]
+    )
     return approved
 
 
@@ -299,11 +321,15 @@ async def _interactive_cancel(reason: str) -> None:
         selected = active_sessions[index]
         session_id = selected.session_id
 
-        confirmed = await _confirm_cancel_session_with_hitl(
-            event_store,
-            session_id=session_id,
-            status=selected.status.value,
-        )
+        try:
+            confirmed = await _confirm_cancel_session_with_hitl(
+                event_store,
+                session_id=session_id,
+                status=selected.status.value,
+            )
+        except Exception as exc:
+            print_error(f"Failed to record cancellation confirmation: {exc}")
+            raise typer.Exit(1) from exc
 
         if not confirmed:
             print_info("Cancelled. No executions were modified.")
