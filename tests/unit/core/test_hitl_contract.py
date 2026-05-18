@@ -8,6 +8,7 @@ from types import MappingProxyType
 import pytest
 
 from ouroboros.core.hitl_contract import (
+    HITL_CONTRACT_SCHEMA_VERSION,
     MAX_HITL_PAYLOAD_BYTES,
     HumanInputKind,
     HumanInputRequest,
@@ -42,6 +43,9 @@ def test_human_input_request_serializes_wait_contract() -> None:
     data = request.to_event_data()
 
     assert request.aggregate_id == "hitl-1"
+    assert request.schema_version == 2
+    assert data["schema_version"] == 2
+    assert HITL_CONTRACT_SCHEMA_VERSION == 2
     assert data["kind"] == "single_select"
     assert data["source"] == "interview"
     assert data["risk_class"] == "material_branch"
@@ -265,6 +269,7 @@ def test_plugin_permission_request_uses_firewall_hitl_contract() -> None:
 
     data = request.to_event_data()
 
+    assert data["schema_version"] == 2
     assert data["kind"] == "approval"
     assert data["source"] == "plugin_firewall"
     assert data["risk_class"] == "material_branch"
@@ -422,6 +427,22 @@ def test_persisted_schema_v2_plugin_permission_request_rejects_missing_fields() 
             request_id="hitl-plugin-permission-v2",
             session_id="plugin-session-1",
             schema_version=2,
+            created_by="plugin-firewall",
+            kind=HumanInputKind.APPROVAL,
+            source=HumanInputSource.PLUGIN_FIREWALL,
+            risk_class=HumanInputRiskClass.MATERIAL_BRANCH,
+            question="Allow plugin acme.docs to use plugin:lifecycle:read?",
+            resume_target="plugin-firewall:permission:plugin-session-1",
+            surface="plugin.firewall.permission",
+            payload={"plugin_id": "acme.docs", "permission_scope": "plugin:lifecycle:read"},
+        )
+
+
+def test_persisted_plugin_permission_request_without_schema_version_is_strict() -> None:
+    with pytest.raises(ValueError, match="required_permission"):
+        HumanInputRequest.from_persisted_event_data(
+            request_id="hitl-plugin-permission-v2",
+            session_id="plugin-session-1",
             created_by="plugin-firewall",
             kind=HumanInputKind.APPROVAL,
             source=HumanInputSource.PLUGIN_FIREWALL,

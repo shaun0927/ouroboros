@@ -15,7 +15,7 @@ import json
 from types import MappingProxyType
 from typing import Any, ClassVar, Self, cast
 
-HITL_CONTRACT_SCHEMA_VERSION = 1
+HITL_CONTRACT_SCHEMA_VERSION = 2
 MAX_HITL_PAYLOAD_BYTES = 8192
 _SECRET_KEY_NAMES = frozenset(
     {
@@ -222,9 +222,10 @@ class HumanInputRequest:
         normal constructor remains strict for fresh requests.
         """
 
-        if kwargs.get("schema_version", HITL_CONTRACT_SCHEMA_VERSION) != 1:
+        schema_version = kwargs.get("schema_version", 1)
+        if schema_version != 1:
             raise ValueError("legacy HITL request replay only supports schema_version=1")
-        return cls(**kwargs, _legacy_schema_v1_replay=True)
+        return cls(**{**kwargs, "schema_version": 1}, _legacy_schema_v1_replay=True)
 
     @classmethod
     def from_persisted_event_data(cls, **kwargs: Any) -> Self:
