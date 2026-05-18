@@ -1,10 +1,13 @@
 """Adapter from firewall audit events to the core event store.
 
-The firewall (`plugin/firewall.py`) emits events that conform to
-`schemas/0.1/audit-event.schema.json`. Those events have
-`additionalProperties: false`, so any wrapping fields the core ledger
-needs (`id`, `aggregate_type`, `aggregate_id`, `timestamp`) MUST live
-in a layer ABOVE the audit-event boundary, not inside it.
+The firewall (`plugin/firewall.py`) emits current-runtime plugin audit
+events that conform to `schemas/0.1/audit-event.schema.json`. Newer
+schema versions may vendor forward-compatible event names before the
+runtime emits them; this adapter still treats the audit event as an
+opaque payload whose schema boundary has `additionalProperties: false`.
+Any wrapping fields the core ledger needs (`id`, `aggregate_type`,
+`aggregate_id`, `timestamp`) MUST live in a layer ABOVE the audit-event
+boundary, not inside it.
 
 This adapter:
 
@@ -63,10 +66,10 @@ def wrap_plugin_event(
     """Wrap a plugin audit event in a core-ledger row envelope.
 
     Args:
-        audit_event: A dict matching schemas/0.1/audit-event.schema.json.
-            This becomes the `payload` field verbatim — the schema's
-            `additionalProperties: false` is preserved by NOT mutating
-            the event in place.
+        audit_event: A dict matching the plugin audit-event schema version
+            used by the caller. This becomes the `payload` field verbatim —
+            the schema's `additionalProperties: false` is preserved by NOT
+            mutating the event in place.
         correlation_id: Cross-event correlation id (from the firewall).
             Used as the default `aggregate_id`.
         aggregate_id: Override for the aggregate id. Defaults to
